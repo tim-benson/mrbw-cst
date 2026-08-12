@@ -81,6 +81,15 @@
 //      EE_NOTCH_SPEEDSTEP             0x26
 //      EE_NOTCH_SPEEDSTEP             0x27
 
+#define EE_BK1_FUNCTION               (0x28 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_BK2_FUNCTION               (0x29 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_BK3_FUNCTION               (0x2A + CONFIG_OFFSET(WORKING_CONFIG))
+//                                     0x2B
+//                                     0x2C
+//                                     0x2D
+//                                     0x2E
+//                                     0x2F
+
 #define EE_COMPRESSOR_FUNCTION        (0x30 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_BRAKE_TEST_FUNCTION        (0x31 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_NEUTRAL_FUNCTION           (0x32 + CONFIG_OFFSET(WORKING_CONFIG))

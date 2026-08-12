@@ -61,6 +61,9 @@ static FunctionData functions[] = {
 	[REAR_DITCH_FN]          = {.name = "R.DITCH",  .eeAddr = EE_REAR_DITCH_FUNCTION},
 	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
 	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
+	[BK1_FN]                 = {.name = "BRAKE1",   .eeAddr = EE_BK1_FUNCTION},
+	[BK2_FN]                 = {.name = "BRAKE2",   .eeAddr = EE_BK2_FUNCTION},
+	[BK3_FN]                 = {.name = "BRAKE3",   .eeAddr = EE_BK3_FUNCTION},
 };
 
 static Functions currentFunction = 0;
@@ -421,5 +424,8 @@ void resetFunctionConfiguration(void)
 	functions[ALERTER_FN].fn = FN_OFF;
 	functions[COMPRESSOR_FN].fn = FN_OFF;
 	functions[BRAKE_TEST_FN].fn = FN_OFF;
+	functions[BK1_FN].fn = FN_OFF;
+	functions[BK2_FN].fn = FN_OFF;
+	functions[BK3_FN].fn = FN_OFF;
 }
 

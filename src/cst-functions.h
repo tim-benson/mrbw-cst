@@ -27,6 +27,9 @@ typedef enum
 	REAR_DIM2_FN,
 	UP_FN,
 	DOWN_FN,
+	BK1_FN,
+	BK2_FN,
+	BK3_FN,
 	LAST_FN,
 } Functions;
 

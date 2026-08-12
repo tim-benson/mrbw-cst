@@ -107,6 +107,28 @@ char baseString[9];
 #define HORN_HYSTERESIS   5
 #define BRAKE_HYSTERESIS  5
 
+// STACK combo brake mode: 6 equal bands, 5 internal boundaries. A table rather than hardcoded
+// conditionals, since boundaries are expected to become uneven later.
+#define STACK_BAND_COUNT 6
+static const uint8_t stackBandThresholds[STACK_BAND_COUNT - 1] = { 17, 33, 50, 67, 83 };
+
+#define BK1_CONTROL 0x01
+#define BK2_CONTROL 0x02
+#define BK3_CONTROL 0x04
+
+// Placeholder band->combo mapping - confirm/adjust with real testing.
+static const uint8_t stackBandCombos[STACK_BAND_COUNT] = {
+	0x00,                                     // Band 0 (0-16.67%):    none (also drives BRAKE_OFF)
+	BK1_CONTROL,                              // Band 1 (16.67-33.3%)
+	BK2_CONTROL | BK3_CONTROL,                // Band 2 (33.3-50%)
+	BK1_CONTROL | BK2_CONTROL,                // Band 3 (50-66.7%)
+	BK1_CONTROL | BK3_CONTROL,                // Band 4 (66.7-83.3%)
+	BK1_CONTROL | BK2_CONTROL | BK3_CONTROL,  // Band 5 (83.3-100%)
+};
+
+uint8_t brakeComboControls = 0;
+uint8_t currentStackBand = 0;  // sticky band, for hysteresis
+
 // BRAKE_PULSE_WIDTH is in decisecs
 // It is the minimum on time for the pulsed brake
 #define BRAKE_PULSE_WIDTH_MIN       2
@@ -127,7 +149,16 @@ uint8_t configBits = CONFIGBITS_DEFAULT;
 #define OPTIONBITS_ESTOP_ON_BRAKE    0
 #define OPTIONBITS_REVERSER_SWAP     1
 #define OPTIONBITS_VARIABLE_BRAKE    2
-#define OPTIONBITS_STEPPED_BRAKE     3
+
+// BRK TYPE is a 2-bit field (bits 3-4) selecting the variable-brake variant, replacing what used
+// to be the single boolean OPTIONBITS_STEPPED_BRAKE bit.
+#define OPTIONBITS_BRK_TYPE_LSB      3
+#define OPTIONBITS_BRK_TYPE_MASK     (0x03 << OPTIONBITS_BRK_TYPE_LSB)
+#define BRK_TYPE_PULSE  0
+#define BRK_TYPE_STEP   1
+#define BRK_TYPE_STACK  2
+#define GET_BRK_TYPE(bits)          (((bits) >> OPTIONBITS_BRK_TYPE_LSB) & 0x03)
+#define SET_BRK_TYPE(bits, val)     ((bits) = ((bits) & ~OPTIONBITS_BRK_TYPE_MASK) | (((val) & 0x03) << OPTIONBITS_BRK_TYPE_LSB))
 
 #define OPTIONBITS_DEFAULT                 (_BV(OPTIONBITS_ESTOP_ON_BRAKE))
 uint8_t optionBits = OPTIONBITS_DEFAULT;
@@ -261,6 +292,33 @@ uint32_t functionForceOff = 0;
 #define DOWN_OPTION_BUTTON 0x02
 
 uint8_t controls = 0;
+
+// STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
+// graft onto BrakeStates - that machine is deliberately asymmetric (advance-only, TCS-style) and is the
+// wrong shape for a mode that must track the lever symmetrically in both directions.
+void evaluateStackBrake(uint8_t brakePcnt)
+{
+	uint8_t pcnt = (brakePcnt > 100) ? 100 : brakePcnt;
+	uint8_t band = currentStackBand;
+
+	// Escalate immediately on crossing a boundary going up.
+	while(band < STACK_BAND_COUNT - 1 && pcnt >= stackBandThresholds[band])
+		band++;
+	// De-escalate only once BRAKE_HYSTERESIS below that same boundary coming back down.
+	while(band > 0 && pcnt < ((stackBandThresholds[band - 1] > BRAKE_HYSTERESIS) ?
+	                           (stackBandThresholds[band - 1] - BRAKE_HYSTERESIS) : 0))
+		band--;
+
+	currentStackBand = band;
+	brakeComboControls = stackBandCombos[band];
+
+	// BRAKE_OFF_FN behaves like standard/pulse mode here (continuous hold), not stepped mode's
+	// one-tick pulse - reuses the existing controls bit/function, no new plumbing needed.
+	if(0 == band)
+		controls |= BRAKE_OFF_CONTROL;
+	else
+		controls &= ~BRAKE_OFF_CONTROL;
+}
 
 #define ENGINE_TIMER_DECISECS      20
 volatile uint8_t engineTimer = 0;
@@ -1200,7 +1258,7 @@ int main(void)
 		}
 		
 		// Handle brake
-		if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+		if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
 		{
 			// This state machine handles the variable (stepped) brake.
 			switch(brakeState)
@@ -1274,7 +1332,7 @@ int main(void)
 					break;
 			}
 		}
-		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && !(optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_PULSE == GET_BRK_TYPE(optionBits)) )
 		{
 			// This state machine handles the variable (pulse) brake.
 			switch(brakeState)
@@ -1317,6 +1375,11 @@ int main(void)
 					brakeState = BRAKE_60PCNT_BEGIN;
 					break;
 			}
+		}
+		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+		{
+			// STACK combo mode - stateless per loop, see evaluateStackBrake().
+			evaluateStackBrake(brakePcnt);
 		}
 		else
 		{
@@ -1363,8 +1426,14 @@ int main(void)
 						brakeState = BRAKE_20PCNT_BEGIN;
 					break;
 			}
-		}		
+		}
 
+		// Make sure a stale combo doesn't stick if BRK TYPE is switched away from STACK mid-combo.
+		if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
+		{
+			brakeComboControls = 0;
+			currentStackBand = 0;
+		}
 
 		// Swap reverser if configured to do so
 		ReverserPosition reverserPosition_tmp = reverserPosition;
@@ -2444,7 +2513,7 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 means boolean
+					uint8_t bitPosition = 0xFF;  // <8 means boolean, 0xFE means the BRK TYPE 3-way field, 0xFF means generic numeric
 					enableLCDBacklight();
 					lcd_gotoxy(0,0);
 					if(1 == subscreenState)
@@ -2456,7 +2525,7 @@ int main(void)
 					else if(2 == subscreenState)
 					{
 						lcd_puts("BRK TYPE");
-						bitPosition = OPTIONBITS_STEPPED_BRAKE;
+						bitPosition = 0xFE;
 						optionsPtr = &optionBits;
 					}
 					else if(3 == subscreenState)
@@ -2487,27 +2556,33 @@ int main(void)
 
 					if(bitPosition < 8)
 					{
-						if(OPTIONBITS_STEPPED_BRAKE == bitPosition)
-						{
-							// Special case for brake type
-							lcd_gotoxy(3,1);
-							if(*optionsPtr & _BV(bitPosition))
-								lcd_puts(" STEP");
-							else
-								lcd_puts("PULSE");
-						}
+						lcd_gotoxy(5,1);
+						if(*optionsPtr & _BV(bitPosition))
+							lcd_puts("ON ");
 						else
-						{
-							lcd_gotoxy(5,1);
-							if(*optionsPtr & _BV(bitPosition))
-								lcd_puts("ON ");
-							else
-								lcd_puts("OFF");
-						}
+							lcd_puts("OFF");
 					}
 					else if(8 == bitPosition)
 					{
 						// Do nothing
+					}
+					else if(0xFE == bitPosition)
+					{
+						// BRK TYPE 3-way cycle
+						lcd_gotoxy(3,1);
+						switch(GET_BRK_TYPE(*optionsPtr))
+						{
+							case BRK_TYPE_STEP:
+								lcd_puts(" STEP");
+								break;
+							case BRK_TYPE_STACK:
+								lcd_puts("STACK");
+								break;
+							case BRK_TYPE_PULSE:
+							default:
+								lcd_puts("PULSE");
+								break;
+						}
 					}
 					else if(optionsPtr == &brakePulseWidth)
 					{
@@ -2532,6 +2607,14 @@ int main(void)
 								{
 									*optionsPtr |= _BV(bitPosition);
 								}
+								else if(0xFE == bitPosition)
+								{
+									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
+									if(brkType < BRK_TYPE_STACK)
+										brkType++;
+									SET_BRK_TYPE(*optionsPtr, brkType);
+									ticks_autoincrement = 0;
+								}
 								else
 								{
 									if(*optionsPtr < 0xFF)
@@ -2548,6 +2631,14 @@ int main(void)
 								if(bitPosition < 8)
 								{
 									*optionsPtr &= ~_BV(bitPosition);
+								}
+								else if(0xFE == bitPosition)
+								{
+									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
+									if(brkType > BRK_TYPE_PULSE)
+										brkType--;
+									SET_BRK_TYPE(*optionsPtr, brkType);
+									ticks_autoincrement = 0;
 								}
 								else
 								{
@@ -2582,7 +2673,8 @@ int main(void)
 								// Conditionally skip menus if they don't apply
 								while(	((2 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip brake type when variable brake disabled
 										((3 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip pulse width when variable brake disabled
-										((3 == subscreenState) &&  (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)))      // Skip pulse width when brake type = stepped
+										((3 == subscreenState) &&  (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits))) ||    // Skip pulse width when brake type = stepped
+										((3 == subscreenState) &&  (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)))     // Skip pulse width when brake type = stack
 										)
 								{
 									subscreenState++;
@@ -3338,7 +3430,7 @@ int main(void)
 							}
 							else
 							{
-								if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+								if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
 								{
 									switch(brakeState)
 									{
@@ -3367,6 +3459,18 @@ int main(void)
 										case BRAKE_FULL_WAIT:
 											lcd_puts("BRK5");
 											break;
+									}
+								}
+								else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+								{
+									if(0 == currentStackBand)
+									{
+										lcd_puts("OFF ");
+									}
+									else
+									{
+										lcd_puts("BND");
+										lcd_putc('0' + currentStackBand);
 									}
 								}
 								else
@@ -3841,6 +3945,12 @@ int main(void)
 			functionMask |= getFunctionMask(BRAKE_FN);
 		if(controls & BRAKE_OFF_CONTROL)
 			functionMask |= getFunctionMask(BRAKE_OFF_FN);
+		if(brakeComboControls & BK1_CONTROL)
+			functionMask |= getFunctionMask(BK1_FN);
+		if(brakeComboControls & BK2_CONTROL)
+			functionMask |= getFunctionMask(BK2_FN);
+		if(brakeComboControls & BK3_CONTROL)
+			functionMask |= getFunctionMask(BK3_FN);
 		if((ENGINE_ON == engineState)||(ENGINE_START == engineState))
 			functionMask |= getFunctionMask(ENGINE_ON_FN);
 		if(ENGINE_STOP == engineState)

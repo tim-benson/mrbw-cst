@@ -261,6 +261,11 @@ typedef enum
 	ADC_STATE_LAST  // Must be the last state
 } ADCState;
 
+// Light knobs are detented rotary switches with break-before-make contacts -
+// mid-rotation they can transiently read as any band. Require this many
+// consecutive matching reads before committing a new value.
+#define LIGHT_DEBOUNCE_THRESHOLD 3
+
 volatile LEDStatus led;
 
 ReverserPosition reverserPosition = NEUTRAL;
@@ -317,6 +322,10 @@ void startADC(uint8_t mux)
 void processADC()
 {
 	static ADCState adcState = 0;
+	static LightPosition frontLightCandidate = LIGHT_OFF;
+	static uint8_t frontLightDebounceCount = 0;
+	static LightPosition rearLightCandidate = LIGHT_OFF;
+	static uint8_t rearLightDebounceCount = 0;
 	
 	if(!(ADCSRA & _BV(ADEN)))
 	{
@@ -376,31 +385,33 @@ void processADC()
 				break;
 
 			case ADC_STATE_READ_VLIGHT_F:
+			{
+				LightPosition newFrontLight;
 				frontLightValue = (adcAccumulator >> 8);
 				if (frontLightValue > 160)
-					frontLight = LIGHT_OFF;
+					newFrontLight = LIGHT_OFF;
 				else if (frontLightValue > 96)
-					frontLight = LIGHT_DIM;
+					newFrontLight = LIGHT_DIM;
 				else if (frontLightValue > 32)
-					frontLight = LIGHT_BRIGHT;
-				else 
-					frontLight = LIGHT_BRIGHT_DITCH;
-/*				delta = (int16_t)(adcAccumulator >> 9) - (int16_t)frontLightValue;*/
-/*				if(delta > 64)  // Rate-of-change clamping determined experimentally*/
-/*					delta = 64;*/
-/*				else if(delta < -32)*/
-/*					delta = -32;*/
-/*				frontLightValue = ((delta + ((int16_t)frontLightValue << 3)) >> 3);*/
-/*				if (frontLightValue > 106)*/
-/*					frontLight = LIGHT_OFF;*/
-/*				else if (frontLightValue > 60)*/
-/*					frontLight = LIGHT_DIM;*/
-/*				else if (frontLightValue > 20)*/
-/*					frontLight = LIGHT_BRIGHT;*/
-/*				else */
-/*					frontLight = LIGHT_BRIGHT_DITCH;*/
+					newFrontLight = LIGHT_BRIGHT;
+				else
+					newFrontLight = LIGHT_BRIGHT_DITCH;
+
+				if(newFrontLight == frontLightCandidate)
+				{
+					if(frontLightDebounceCount < LIGHT_DEBOUNCE_THRESHOLD)
+						frontLightDebounceCount++;
+					else
+						frontLight = frontLightCandidate;
+				}
+				else
+				{
+					frontLightCandidate = newFrontLight;
+					frontLightDebounceCount = 0;
+				}
 				adcState++;
 				break;
+			}
 
 			case ADC_STATE_START_VLIGHT_R:
 				enableLightSwitches();
@@ -409,31 +420,33 @@ void processADC()
 				break;
 
 			case ADC_STATE_READ_VLIGHT_R:
+			{
+				LightPosition newRearLight;
 				rearLightValue = (adcAccumulator >> 8);
 				if (rearLightValue > 160)
-					rearLight = LIGHT_OFF;
+					newRearLight = LIGHT_OFF;
 				else if (rearLightValue > 96)
-					rearLight = LIGHT_DIM;
+					newRearLight = LIGHT_DIM;
 				else if (rearLightValue > 32)
-					rearLight = LIGHT_BRIGHT;
-				else 
-					rearLight = LIGHT_BRIGHT_DITCH;
-/*				delta = (int16_t)(adcAccumulator >> 9) - (int16_t)rearLightValue;*/
-/*				if(delta > 64)  // Rate-of-change clamping determined experimentally*/
-/*					delta = 64;*/
-/*				else if(delta < -32)*/
-/*					delta = -32;*/
-/*				rearLightValue = ((delta + ((int16_t)rearLightValue << 3)) >> 3);*/
-/*				if (rearLightValue > 106)*/
-/*					rearLight = LIGHT_OFF;*/
-/*				else if (rearLightValue > 60)*/
-/*					rearLight = LIGHT_DIM;*/
-/*				else if (rearLightValue > 20)*/
-/*					rearLight = LIGHT_BRIGHT;*/
-/*				else */
-/*					rearLight = LIGHT_BRIGHT_DITCH;*/
+					newRearLight = LIGHT_BRIGHT;
+				else
+					newRearLight = LIGHT_BRIGHT_DITCH;
+
+				if(newRearLight == rearLightCandidate)
+				{
+					if(rearLightDebounceCount < LIGHT_DEBOUNCE_THRESHOLD)
+						rearLightDebounceCount++;
+					else
+						rearLight = rearLightCandidate;
+				}
+				else
+				{
+					rearLightCandidate = newRearLight;
+					rearLightDebounceCount = 0;
+				}
 				adcState++;
 				break;
+			}
 
 			case ADC_STATE_START_VBATT:
 				ADMUX  = _BV(REFS0) | ANALOG_VBATT;
