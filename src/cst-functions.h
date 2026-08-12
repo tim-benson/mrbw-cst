@@ -7,6 +7,8 @@ typedef enum
 	HORN_FN = 0,
 	BELL_FN,
 	BRAKE_FN,
+	BK2_FN,
+	BK3_FN,
 	BRAKE_OFF_FN,
 	AUX_FN,
 	ENGINE_ON_FN,
@@ -27,9 +29,6 @@ typedef enum
 	REAR_DIM2_FN,
 	UP_FN,
 	DOWN_FN,
-	BK1_FN,
-	BK2_FN,
-	BK3_FN,
 	LAST_FN,
 } Functions;
 
@@ -65,6 +64,7 @@ typedef enum
 void printCurrentFunctionName(void);
 void printCurrentFunctionValue(void);
 void advanceCurrentFunction(void);
+Functions getCurrentFunction(void);
 void resetCurrentFunction(void);
 void incrementCurrentFunctionValue(void);
 void decrementCurrentFunctionValue(void);

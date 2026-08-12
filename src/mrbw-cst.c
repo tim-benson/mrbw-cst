@@ -112,21 +112,30 @@ char baseString[9];
 #define STACK_BAND_COUNT 6
 static const uint8_t stackBandThresholds[STACK_BAND_COUNT - 1] = { 17, 33, 50, 67, 83 };
 
-#define BK1_CONTROL 0x01
-#define BK2_CONTROL 0x02
-#define BK3_CONTROL 0x04
+// Brake1 in STACK mode reuses the existing BRAKE_CONTROL/BRAKE_FN plumbing (same DCC function number as
+// standard/pulse/stepped mode's brake), same idea as STACK's Band 0 reusing BRAKE_OFF_CONTROL/BRAKE_OFF_FN.
+// Brake2/Brake3 use controls' 2 remaining free bits - no separate control byte needed.
+#define BK2_CONTROL 0x20
+#define BK3_CONTROL 0x40
 
-// Placeholder band->combo mapping - confirm/adjust with real testing.
-static const uint8_t stackBandCombos[STACK_BAND_COUNT] = {
-	0x00,                                     // Band 0 (0-16.67%):    none (also drives BRAKE_OFF)
-	BK1_CONTROL,                              // Band 1 (16.67-33.3%)
-	BK2_CONTROL | BK3_CONTROL,                // Band 2 (33.3-50%)
-	BK1_CONTROL | BK2_CONTROL,                // Band 3 (50-66.7%)
-	BK1_CONTROL | BK3_CONTROL,                // Band 4 (66.7-83.3%)
-	BK1_CONTROL | BK2_CONTROL | BK3_CONTROL,  // Band 5 (83.3-100%)
+// Band->combo mapping, configurable on-device via STACK_CONFIG_SCREEN (bands 1-5; band 0 is fixed to
+// "none", not stored/editable). Populated from EE_STACK_BAND_COMBOS by readConfig(); see resetConfig()
+// for factory defaults.
+uint8_t stackBandCombos[STACK_BAND_COUNT];
+
+// STACK_CONFIG_SCREEN's UP/DOWN cycle order: none -> each single brake -> each pair -> all three,
+// rather than a raw binary count - a more intuitive progression for a human turning the dial.
+static const uint8_t stackComboSequence[8] = {
+	0x00,                                       // ---
+	BRAKE_CONTROL,                              // 1--
+	BK2_CONTROL,                                // -2-
+	BK3_CONTROL,                                // --3
+	BRAKE_CONTROL | BK2_CONTROL,                // 12-
+	BRAKE_CONTROL | BK3_CONTROL,                // 1-3
+	BK2_CONTROL | BK3_CONTROL,                  // -23
+	BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL,  // 123
 };
 
-uint8_t brakeComboControls = 0;
 uint8_t currentStackBand = 0;  // sticky band, for hysteresis
 
 // BRAKE_PULSE_WIDTH is in decisecs
@@ -240,6 +249,7 @@ typedef enum
 	LOCO_SCREEN,
 	FORCE_FUNC_SCREEN,
 	CONFIG_FUNC_SCREEN,
+	STACK_CONFIG_SCREEN,
 	NOTCH_CONFIG_SCREEN,
 	OPTION_SCREEN,
 	SYSTEM_SCREEN,
@@ -310,7 +320,10 @@ void evaluateStackBrake(uint8_t brakePcnt)
 		band--;
 
 	currentStackBand = band;
-	brakeComboControls = stackBandCombos[band];
+
+	// Brake1/2/3 combo bits all live directly in controls - Brake1 reuses BRAKE_CONTROL, so this
+	// touches only the 3 combo bits, leaving BRAKE_OFF_CONTROL (set below) and any other bits alone.
+	controls = (controls & ~(BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL)) | stackBandCombos[band];
 
 	// BRAKE_OFF_FN behaves like standard/pulse mode here (continuous hold), not stepped mode's
 	// one-tick pulse - reuses the existing controls bit/function, no new plumbing needed.
@@ -918,6 +931,16 @@ void readConfig(void)
 		if(notchSpeedStep[i] < 1)
 			notchSpeedStep[i] = 1;
 	}
+
+	// STACK band->combo mapping (bands 1-5; band 0 is always fixed to "none")
+	stackBandCombos[0] = 0x00;
+	eeprom_read_block((void *)&stackBandCombos[1], (void *)EE_STACK_BAND_COMBOS, 5);
+	for(i=1; i<STACK_BAND_COUNT; i++)
+	{
+		// Mask off anything but the 3 valid bits, in case of unprogrammed/corrupt EEPROM - this
+		// value gets OR'd directly into controls, so stray bits here would corrupt unrelated bits.
+		stackBandCombos[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
+	}
 }
 
 void copyConfig(uint8_t srcConfig, uint8_t destConfig)
@@ -1003,6 +1026,12 @@ void resetConfig(void)
 	notchSpeedStep[6] = 103;
 	notchSpeedStep[7] = 119;
 	eeprom_write_block((void *)notchSpeedStep, (void *)EE_NOTCH_SPEEDSTEP, 8);
+	stackBandCombos[1] = BRAKE_CONTROL;
+	stackBandCombos[2] = BK2_CONTROL | BK3_CONTROL;
+	stackBandCombos[3] = BRAKE_CONTROL | BK2_CONTROL;
+	stackBandCombos[4] = BRAKE_CONTROL | BK3_CONTROL;
+	stackBandCombos[5] = BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL;
+	eeprom_write_block((void *)&stackBandCombos[1], (void *)EE_STACK_BAND_COMBOS, 5);
 
 	for (i=1; i<=MAX_CONFIGS; i++)
 	{
@@ -1429,9 +1458,10 @@ int main(void)
 		}
 
 		// Make sure a stale combo doesn't stick if BRK TYPE is switched away from STACK mid-combo.
+		// BRAKE_CONTROL/BRAKE_OFF_CONTROL are left alone - already owned by whichever mode just ran.
 		if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
 		{
-			brakeComboControls = 0;
+			controls &= ~(BK2_CONTROL | BK3_CONTROL);
 			currentStackBand = 0;
 		}
 
@@ -2391,7 +2421,102 @@ int main(void)
 						case MENU_BUTTON:
 							if(MENU_BUTTON != previousButton)
 							{
-								advanceCurrentFunction();
+								// Skip Brake2/Brake3 unless BRK TYPE = STACK - they're meaningless otherwise.
+								do
+								{
+									advanceCurrentFunction();
+								} while( ((BK2_FN == getCurrentFunction()) || (BK3_FN == getCurrentFunction())) &&
+										!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ) );
+								lcd_clrscr();
+							}
+							break;
+						case NO_BUTTON:
+							break;
+					}
+				}
+				break;
+
+			case STACK_CONFIG_SCREEN:
+				enableLCDBacklight();
+				if(!subscreenState)
+				{
+					lcd_gotoxy(3,0);
+					lcd_puts("STACK");
+					lcd_gotoxy(0,1);
+					lcd_putc(0x7F);
+					lcd_puts("-   CFG");
+					switch(button)
+					{
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								subscreenState = 1;
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+						case UP_BUTTON:
+						case DOWN_BUTTON:
+						case NO_BUTTON:
+							break;
+					}
+				}
+				else
+				{
+					uint8_t band = subscreenState;
+					// comboIndex is band's position within stackComboSequence[] (none/singles/pairs/all) -
+					// found by a short reverse lookup, since only the resulting bit pattern is stored.
+					uint8_t comboIndex = 0;
+					while((comboIndex < 7) && (stackComboSequence[comboIndex] != stackBandCombos[band]))
+						comboIndex++;
+
+					lcd_gotoxy(0,0);
+					lcd_puts("STEP");
+					lcd_putc('0' + band);
+					lcd_gotoxy(0,1);
+					lcd_puts("BRAKE");
+					lcd_putc((stackBandCombos[band] & BRAKE_CONTROL) ? '1' : '-');
+					lcd_putc((stackBandCombos[band] & BK2_CONTROL)   ? '2' : '-');
+					lcd_putc((stackBandCombos[band] & BK3_CONTROL)   ? '3' : '-');
+
+					switch(button)
+					{
+						case UP_BUTTON:
+							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								comboIndex = (comboIndex + 1) & 0x07;
+								stackBandCombos[band] = stackComboSequence[comboIndex];
+								ticks_autoincrement = 0;
+							}
+							break;
+						case DOWN_BUTTON:
+							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								comboIndex = (comboIndex - 1) & 0x07;
+								stackBandCombos[band] = stackComboSequence[comboIndex];
+								ticks_autoincrement = 0;
+							}
+							break;
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								eeprom_write_block((void *)&stackBandCombos[1], (void *)EE_STACK_BAND_COMBOS, 5);
+								readConfig();
+								lcd_clrscr();
+								lcd_gotoxy(1,0);
+								lcd_puts("SAVED!");
+								wait100ms(7);
+								subscreenState = 0;  // Escape submenu
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+							if(MENU_BUTTON != previousButton)
+							{
+								// Menu pressed, advance menu
+								subscreenState++;
+								if(subscreenState > 5)
+									subscreenState = 1;
 								lcd_clrscr();
 							}
 							break;
@@ -3862,7 +3987,17 @@ int main(void)
 							}
 						}
 					}
-					
+
+					// Skip STACK CFG screen unless BRK TYPE = STACK - the band->combo mapping it edits
+					// is meaningless in any other mode.
+					if(STACK_CONFIG_SCREEN == screenState)
+					{
+						if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
+						{
+							screenState++;
+						}
+					}
+
 					if(systemBits & _BV(SYSTEMBITS_MENU_LOCK))
 					{
 						// Menu lock active
@@ -3945,11 +4080,9 @@ int main(void)
 			functionMask |= getFunctionMask(BRAKE_FN);
 		if(controls & BRAKE_OFF_CONTROL)
 			functionMask |= getFunctionMask(BRAKE_OFF_FN);
-		if(brakeComboControls & BK1_CONTROL)
-			functionMask |= getFunctionMask(BK1_FN);
-		if(brakeComboControls & BK2_CONTROL)
+		if(controls & BK2_CONTROL)
 			functionMask |= getFunctionMask(BK2_FN);
-		if(brakeComboControls & BK3_CONTROL)
+		if(controls & BK3_CONTROL)
 			functionMask |= getFunctionMask(BK3_FN);
 		if((ENGINE_ON == engineState)||(ENGINE_START == engineState))
 			functionMask |= getFunctionMask(ENGINE_ON_FN);
