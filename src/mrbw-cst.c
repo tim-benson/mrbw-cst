@@ -291,9 +291,17 @@ void parseVersionStr(uint8_t* major, uint8_t* minor, uint8_t* delta)
 	char version_string[] = VERSION_STRING;
 	char *ptr = version_string;
 	uint8_t version = 0;
-	
+
 	*major = *minor = *delta = 0;
-	
+
+	// Skip the "X" fork-name prefix before parsing major.minor.delta - see git-revision.sh, which tags
+	// this fork's releases as "X<major>.<minor>". Only alphabetic characters are skipped (not '.') so
+	// the untagged/degenerate VERSION_STRING ".0+" (no matching git tag found at all) still falls
+	// through to the existing "empty major defaults to 0" behavior below, rather than misparsing '.'
+	// as part of a value.
+	while(isalpha((unsigned char)*ptr))
+		ptr++;
+
 	while(('.' != *ptr) && ('\0' != *ptr))
 	{
 		version *= 10;

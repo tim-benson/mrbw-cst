@@ -2,4 +2,7 @@
 *~
 *.elf
 src/*.hex
+src/hex/*.hex
 doc/eep
+.DS_Store
+*.code-workspace
