@@ -7,6 +7,8 @@ typedef enum
 	HORN_FN = 0,
 	BELL_FN,
 	BRAKE_FN,
+	BK2_FN,
+	BK3_FN,
 	BRAKE_OFF_FN,
 	AUX_FN,
 	ENGINE_ON_FN,

@@ -54,9 +54,7 @@ typedef enum
 
 } LightPosition;
 
-extern uint8_t frontLightPot;
 extern LightPosition frontLight;
-extern uint8_t rearLightPot;
 extern LightPosition rearLight;
 
 void initADC();

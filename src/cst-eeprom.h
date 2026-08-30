@@ -81,9 +81,35 @@
 //      EE_NOTCH_SPEEDSTEP             0x26
 //      EE_NOTCH_SPEEDSTEP             0x27
 
+//                                     0x28  (was EE_BK1_FUNCTION - STACK brake mode's Brake1 slot
+//                                            now reuses EE_BRAKE_FUNCTION instead)
+#define EE_BK2_FUNCTION               (0x29 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_BK3_FUNCTION               (0x2A + CONFIG_OFFSET(WORKING_CONFIG))
+//                                     0x2B
+//                                     0x2C
+//                                     0x2D
+//                                     0x2E
+//                                     0x2F
+
 #define EE_COMPRESSOR_FUNCTION        (0x30 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_BRAKE_TEST_FUNCTION        (0x31 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_NEUTRAL_FUNCTION           (0x32 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_ALERTER_FUNCTION           (0x33 + CONFIG_OFFSET(WORKING_CONFIG))
+
+// STACK brake mode's 5-STEP band->combo mapping, one byte per band 1-5 (band 0 is fixed to "none" and
+// isn't stored). Each byte reuses the BRAKE_CONTROL/BK2_CONTROL/BK3_CONTROL bit values from mrbw-cst.c.
+// The 3-STEP variant (see EE_STACK_BAND_COMBOS_3STEP below) is stored completely separately, so toggling
+// between the two never cross-contaminates one variant's configured combos with the other's.
+#define EE_STACK_BAND_COMBOS          (0x34 + CONFIG_OFFSET(WORKING_CONFIG))
+//      EE_STACK_BAND_COMBOS           0x35
+//      EE_STACK_BAND_COMBOS           0x36
+//      EE_STACK_BAND_COMBOS           0x37
+//      EE_STACK_BAND_COMBOS           0x38
+
+// STACK brake mode's 3-STEP band->combo mapping, one byte per band 1-3 (band 0 is fixed to "none" and
+// isn't stored) - stored separately from EE_STACK_BAND_COMBOS (the 5-STEP variant), see that comment above.
+#define EE_STACK_BAND_COMBOS_3STEP    (0x42 + CONFIG_OFFSET(WORKING_CONFIG))
+//      EE_STACK_BAND_COMBOS_3STEP     0x43
+//      EE_STACK_BAND_COMBOS_3STEP     0x44
 
 #endif

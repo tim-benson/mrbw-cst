@@ -107,6 +107,60 @@ char baseString[9];
 #define HORN_HYSTERESIS   5
 #define BRAKE_HYSTERESIS  5
 
+// STACK combo brake mode: two selectable variants, 5-STEP (6 equal bands, the original design) and
+// 3-STEP (4 equal bands, added for users who find 5-STEP's independent per-step combos too complex) -
+// see OPTIONBITS_STACK_5STEP below for the toggle. Tables rather than hardcoded conditionals, since
+// boundaries are expected to become uneven later.
+#define STACK_BAND_COUNT_3STEP 4
+#define STACK_BAND_COUNT_5STEP 6
+static const uint8_t stackBandThresholds3Step[STACK_BAND_COUNT_3STEP - 1] = { 25, 50, 75 };
+static const uint8_t stackBandThresholds5Step[STACK_BAND_COUNT_5STEP - 1] = { 17, 33, 50, 67, 83 };
+
+// Brake1 in STACK mode reuses the existing BRAKE_CONTROL/BRAKE_FN plumbing (same DCC function number as
+// standard/pulse/stepped mode's brake), same idea as STACK's Band 0 reusing BRAKE_OFF_CONTROL/BRAKE_OFF_FN.
+// Brake2/Brake3 use controls' 2 remaining free bits - no separate control byte needed.
+#define BK2_CONTROL 0x20
+#define BK3_CONTROL 0x40
+
+// Band->combo mapping, configurable on-device via OPTION_SCREEN (bands 1-3/1-5; band 0 is fixed to
+// "none", not stored/editable). Populated from EE_STACK_BAND_COMBOS_3STEP/EE_STACK_BAND_COMBOS by
+// readConfig(); see resetConfig() for factory defaults. Stored completely separately per variant, so
+// toggling OPTIONBITS_STACK_5STEP back and forth never cross-contaminates one variant's configured
+// combos with the other's.
+uint8_t stackBandCombos3Step[STACK_BAND_COUNT_3STEP];
+uint8_t stackBandCombos5Step[STACK_BAND_COUNT_5STEP];
+
+// Factory defaults for the two variants - named so readConfig() (0xFF-fallback for unprogrammed EEPROM)
+// and resetConfig() (factory-reset writes) can't drift out of sync with each other.
+// Both variants' steps are ordered by escalating *total* decoder brake force, not by which brake is
+// used - for the CV mix these target (Brake1 130, Brake2 70, Brake3 100) 5-STEP runs
+// 100/130/170/200/230 and 3-STEP runs 70/100/130. All three brakes together (~300, past the decoder's
+// 255 cap = near-instant stop) is deliberately NOT a step - it's left for a dedicated emergency-stop
+// control, not normal lever travel.
+#define STACK_5STEP_DEFAULT_1  BK3_CONTROL
+#define STACK_5STEP_DEFAULT_2  BRAKE_CONTROL
+#define STACK_5STEP_DEFAULT_3  (BK2_CONTROL | BK3_CONTROL)
+#define STACK_5STEP_DEFAULT_4  (BRAKE_CONTROL | BK2_CONTROL)
+#define STACK_5STEP_DEFAULT_5  (BRAKE_CONTROL | BK3_CONTROL)
+#define STACK_3STEP_DEFAULT_1  BK2_CONTROL
+#define STACK_3STEP_DEFAULT_2  BK3_CONTROL
+#define STACK_3STEP_DEFAULT_3  BRAKE_CONTROL
+
+// OPTION_SCREEN's STACK band-editor UP/DOWN cycle order: none -> each single brake -> each pair -> all three,
+// rather than a raw binary count - a more intuitive progression for a human turning the dial.
+static const uint8_t stackComboSequence[8] = {
+	0x00,                                       // ---
+	BRAKE_CONTROL,                              // 1--
+	BK2_CONTROL,                                // -2-
+	BK3_CONTROL,                                // --3
+	BRAKE_CONTROL | BK2_CONTROL,                // 12-
+	BRAKE_CONTROL | BK3_CONTROL,                // 1-3
+	BK2_CONTROL | BK3_CONTROL,                  // -23
+	BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL,  // 123
+};
+
+uint8_t currentStackBand = 0;  // sticky band, for hysteresis
+
 // BRAKE_PULSE_WIDTH is in decisecs
 // It is the minimum on time for the pulsed brake
 #define BRAKE_PULSE_WIDTH_MIN       2
@@ -127,7 +181,20 @@ uint8_t configBits = CONFIGBITS_DEFAULT;
 #define OPTIONBITS_ESTOP_ON_BRAKE    0
 #define OPTIONBITS_REVERSER_SWAP     1
 #define OPTIONBITS_VARIABLE_BRAKE    2
-#define OPTIONBITS_STEPPED_BRAKE     3
+
+// BRK TYPE is a 2-bit field (bits 3-4) selecting the variable-brake variant, replacing what used
+// to be the single boolean OPTIONBITS_STEPPED_BRAKE bit.
+#define OPTIONBITS_BRK_TYPE_LSB      3
+#define OPTIONBITS_BRK_TYPE_MASK     (0x03 << OPTIONBITS_BRK_TYPE_LSB)
+#define BRK_TYPE_PULSE  0
+#define BRK_TYPE_STEP   1
+#define BRK_TYPE_STACK  2
+#define GET_BRK_TYPE(bits)          (((bits) >> OPTIONBITS_BRK_TYPE_LSB) & 0x03)
+#define SET_BRK_TYPE(bits, val)     ((bits) = ((bits) & ~OPTIONBITS_BRK_TYPE_MASK) | (((val) & 0x03) << OPTIONBITS_BRK_TYPE_LSB))
+
+// STACK mode's step-count toggle: 0 = 3-STEP (default, for every device - including ones already flashed
+// with a 5-STEP config, since no prior firmware ever wrote this bit), 1 = 5-STEP.
+#define OPTIONBITS_STACK_5STEP       5
 
 #define OPTIONBITS_DEFAULT                 (_BV(OPTIONBITS_ESTOP_ON_BRAKE))
 uint8_t optionBits = OPTIONBITS_DEFAULT;
@@ -261,6 +328,63 @@ uint32_t functionForceOff = 0;
 #define DOWN_OPTION_BUTTON 0x02
 
 uint8_t controls = 0;
+
+// STACK 3-STEP/5-STEP: single shared hysteresis-walk algorithm (evaluateStackBrake() below), parameterized
+// by these 3 small accessors rather than duplicated per variant - the two variants are structurally
+// identical (an N-band walk over a threshold table, ending in an array lookup), differing only in which
+// table/array they use.
+static uint8_t stackIs5Step(void)
+{
+	return (optionBits & _BV(OPTIONBITS_STACK_5STEP)) ? 1 : 0;
+}
+static uint8_t stackBandCount(void)
+{
+	return stackIs5Step() ? STACK_BAND_COUNT_5STEP : STACK_BAND_COUNT_3STEP;
+}
+static const uint8_t* stackThresholds(void)
+{
+	return stackIs5Step() ? stackBandThresholds5Step : stackBandThresholds3Step;
+}
+static uint8_t* stackCombos(void)
+{
+	return stackIs5Step() ? stackBandCombos5Step : stackBandCombos3Step;
+}
+
+// STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
+// graft onto BrakeStates - that machine is deliberately asymmetric (advance-only, TCS-style) and is the
+// wrong shape for a mode that must track the lever symmetrically in both directions.
+void evaluateStackBrake(uint8_t brakePcnt)
+{
+	uint8_t pcnt = (brakePcnt > 100) ? 100 : brakePcnt;
+	uint8_t bandCount = stackBandCount();
+	const uint8_t *thresholds = stackThresholds();
+	uint8_t *combos = stackCombos();
+
+	// Clamp a leftover band from the other variant (e.g. 4, valid only in 5-STEP) so the walk below can
+	// never index either table out of bounds right after the toggle switches variants.
+	uint8_t band = (currentStackBand < bandCount) ? currentStackBand : (bandCount - 1);
+
+	// Escalate immediately on crossing a boundary going up.
+	while(band < bandCount - 1 && pcnt >= thresholds[band])
+		band++;
+	// De-escalate only once BRAKE_HYSTERESIS below that same boundary coming back down.
+	while(band > 0 && pcnt < ((thresholds[band - 1] > BRAKE_HYSTERESIS) ?
+	                           (thresholds[band - 1] - BRAKE_HYSTERESIS) : 0))
+		band--;
+
+	currentStackBand = band;
+
+	// Brake1/2/3 combo bits all live directly in controls - Brake1 reuses BRAKE_CONTROL, so this
+	// touches only the 3 combo bits, leaving BRAKE_OFF_CONTROL (set below) and any other bits alone.
+	controls = (controls & ~(BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL)) | combos[band];
+
+	// BRAKE_OFF_FN behaves like standard/pulse mode here (continuous hold), not stepped mode's
+	// one-tick pulse - reuses the existing controls bit/function, no new plumbing needed.
+	if(0 == band)
+		controls |= BRAKE_OFF_CONTROL;
+	else
+		controls &= ~BRAKE_OFF_CONTROL;
+}
 
 #define ENGINE_TIMER_DECISECS      20
 volatile uint8_t engineTimer = 0;
@@ -679,6 +803,23 @@ ISR(TIMER0_COMPA_vect)
 			ticks_autoincrement++;
 }
 
+// 0xFF is EEPROM's erased/never-written state - on a chip that was flashed before a given field
+// existed (or, for optionBits/configBits, a chip that's never had readConfig() run at all), that's
+// what it'll read back as, not the intended default. Detect that and fall back to defaultValue,
+// persisting it so the field reads clean from here on (same idiom already used for
+// sleep_tmr_reset_value/alerter_tmr_reset_value below, generalized here for both STACK combo arrays and
+// optionBits/configBits).
+static uint8_t readByteOrDefault(uint8_t *eeAddr, uint8_t defaultValue)
+{
+	uint8_t val = eeprom_read_byte(eeAddr);
+	if(0xFF == val)
+	{
+		val = defaultValue;
+		eeprom_write_byte(eeAddr, val);
+	}
+	return val;
+}
+
 void readConfig(void)
 {
 	uint8_t i;
@@ -782,7 +923,7 @@ void readConfig(void)
 	if(getPressureConfig() != pressureConfig)
 		eeprom_write_byte((uint8_t*)EE_PRESSURE_CONFIG, getPressureConfig());
 
-	configBits = eeprom_read_byte((uint8_t*)EE_CONFIGBITS);
+	configBits = readByteOrDefault((uint8_t*)EE_CONFIGBITS, CONFIGBITS_DEFAULT);
 
 	// Initialize MRBus address from EEPROM
 	mrbus_dev_addr = eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_ADDR);
@@ -845,7 +986,7 @@ void readConfig(void)
 	brakeHighThreshold = eeprom_read_byte((uint8_t*)EE_BRAKE_HIGH_THRESHOLD);
 	
 	// Options
-	optionBits = eeprom_read_byte((uint8_t*)EE_OPTIONBITS);
+	optionBits = readByteOrDefault((uint8_t*)EE_OPTIONBITS, OPTIONBITS_DEFAULT);
 
 	brakePulseWidth = eeprom_read_byte((uint8_t*)EE_BRAKE_PULSE_WIDTH);
 	if(brakePulseWidth < BRAKE_PULSE_WIDTH_MIN)
@@ -868,6 +1009,30 @@ void readConfig(void)
 		if(notchSpeedStep[i] < 1)
 			notchSpeedStep[i] = 1;
 	}
+
+	// STACK band->combo mapping, both variants (band 0 is always fixed to "none" in each). Read byte by
+	// byte via readByteOrDefault() rather than a raw eeprom_read_block(), so an unprogrammed/never-written
+	// byte (0xFF - true for EE_STACK_BAND_COMBOS_3STEP on any device that pre-dates the 3-STEP feature)
+	// falls back to the real named default instead of "all 3 combo bits set" (0xFF masked down to the 3
+	// valid bits is always all-ones, regardless of which band it belongs to).
+	stackBandCombos5Step[0] = 0x00;
+	stackBandCombos5Step[1] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS + 0), STACK_5STEP_DEFAULT_1);
+	stackBandCombos5Step[2] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS + 1), STACK_5STEP_DEFAULT_2);
+	stackBandCombos5Step[3] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS + 2), STACK_5STEP_DEFAULT_3);
+	stackBandCombos5Step[4] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS + 3), STACK_5STEP_DEFAULT_4);
+	stackBandCombos5Step[5] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS + 4), STACK_5STEP_DEFAULT_5);
+	for(i=1; i<STACK_BAND_COUNT_5STEP; i++)
+	{
+		// Mask off anything but the 3 valid bits, in case of other (non-0xFF) corrupt EEPROM - this
+		// value gets OR'd directly into controls, so stray bits here would corrupt unrelated bits.
+		stackBandCombos5Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
+	}
+	stackBandCombos3Step[0] = 0x00;
+	stackBandCombos3Step[1] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 0), STACK_3STEP_DEFAULT_1);
+	stackBandCombos3Step[2] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 1), STACK_3STEP_DEFAULT_2);
+	stackBandCombos3Step[3] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 2), STACK_3STEP_DEFAULT_3);
+	for(i=1; i<STACK_BAND_COUNT_3STEP; i++)
+		stackBandCombos3Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
 }
 
 void copyConfig(uint8_t srcConfig, uint8_t destConfig)
@@ -953,6 +1118,20 @@ void resetConfig(void)
 	notchSpeedStep[6] = 103;
 	notchSpeedStep[7] = 119;
 	eeprom_write_block((void *)notchSpeedStep, (void *)EE_NOTCH_SPEEDSTEP, 8);
+
+	stackBandCombos5Step[1] = STACK_5STEP_DEFAULT_1;
+	stackBandCombos5Step[2] = STACK_5STEP_DEFAULT_2;
+	stackBandCombos5Step[3] = STACK_5STEP_DEFAULT_3;
+	stackBandCombos5Step[4] = STACK_5STEP_DEFAULT_4;
+	stackBandCombos5Step[5] = STACK_5STEP_DEFAULT_5;
+	eeprom_write_block((void *)&stackBandCombos5Step[1], (void *)EE_STACK_BAND_COMBOS, 5);
+
+	// 3-STEP factory defaults: each step maps to just its own single brake number - see the #define
+	// comments above for why this is simpler than 5-STEP's own tuned combo-based defaults.
+	stackBandCombos3Step[1] = STACK_3STEP_DEFAULT_1;
+	stackBandCombos3Step[2] = STACK_3STEP_DEFAULT_2;
+	stackBandCombos3Step[3] = STACK_3STEP_DEFAULT_3;
+	eeprom_write_block((void *)&stackBandCombos3Step[1], (void *)EE_STACK_BAND_COMBOS_3STEP, 3);
 
 	for (i=1; i<=MAX_CONFIGS; i++)
 	{
@@ -1208,7 +1387,7 @@ int main(void)
 		}
 		
 		// Handle brake
-		if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+		if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
 		{
 			// This state machine handles the variable (stepped) brake.
 			switch(brakeState)
@@ -1282,7 +1461,7 @@ int main(void)
 					break;
 			}
 		}
-		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && !(optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_PULSE == GET_BRK_TYPE(optionBits)) )
 		{
 			// This state machine handles the variable (pulse) brake.
 			switch(brakeState)
@@ -1325,6 +1504,11 @@ int main(void)
 					brakeState = BRAKE_60PCNT_BEGIN;
 					break;
 			}
+		}
+		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+		{
+			// STACK combo mode - stateless per loop, see evaluateStackBrake().
+			evaluateStackBrake(brakePcnt);
 		}
 		else
 		{
@@ -1371,8 +1555,15 @@ int main(void)
 						brakeState = BRAKE_20PCNT_BEGIN;
 					break;
 			}
-		}		
+		}
 
+		// Make sure a stale combo doesn't stick if BRK TYPE is switched away from STACK mid-combo.
+		// BRAKE_CONTROL/BRAKE_OFF_CONTROL are left alone - already owned by whichever mode just ran.
+		if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
+		{
+			controls &= ~(BK2_CONTROL | BK3_CONTROL);
+			currentStackBand = 0;
+		}
 
 		// Swap reverser if configured to do so
 		ReverserPosition reverserPosition_tmp = reverserPosition;
@@ -1719,6 +1910,10 @@ int main(void)
 							// Disable normal brake functions to they don't interfere with the brake test sounds as we move the brake lever
 							controls &= ~(BRAKE_OFF_CONTROL);
 							controls &= ~(BRAKE_CONTROL);
+							controls &= ~(BK2_CONTROL | BK3_CONTROL);
+							currentStackBand = 0;
+							// Suppress the lever-triggered estop (BRK ESTP) too - a full-lever brake test shouldn't e-stop the loco
+							estopStatus &= ~ESTOP_BRAKE;
 						}
 						switch(button)
 						{
@@ -2452,7 +2647,14 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 means boolean
+					uint8_t bitPosition = 0xFF;  // <8 boolean, 0xFC STACK band editor, 0xFD STACK STEPS toggle, 0xFE BRK TYPE 3-way, 0xFF generic numeric
+					// STACK's STEPS toggle + band editors only apply when brake is variable AND BRK TYPE = STACK.
+					uint8_t stackModeActive = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) &&
+					                          (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits));
+					uint8_t editableBandCount = stackModeActive ? (stackBandCount() - 1) : 0;
+					uint8_t estopItem    = 4 + editableBandCount;  // BRK ESTP - fixed at 4 outside STACK mode
+					uint8_t revSwapItem  = 5 + editableBandCount;  // REV SWAP - fixed at 5 outside STACK mode
+					uint8_t stackEditBand = 0;  // set below when bitPosition == 0xFC
 					enableLCDBacklight();
 					lcd_gotoxy(0,0);
 					if(1 == subscreenState)
@@ -2464,24 +2666,41 @@ int main(void)
 					else if(2 == subscreenState)
 					{
 						lcd_puts("BRK TYPE");
-						bitPosition = OPTIONBITS_STEPPED_BRAKE;
+						bitPosition = 0xFE;
 						optionsPtr = &optionBits;
 					}
 					else if(3 == subscreenState)
 					{
-						lcd_puts("BRK RATE");
-						lcd_gotoxy(7,1);
-						lcd_puts("s");
-						bitPosition = 0xFF;
-						optionsPtr = &brakePulseWidth;
+						if(stackModeActive)
+						{
+							lcd_puts("STEPS");
+							bitPosition = 0xFD;
+						}
+						else
+						{
+							lcd_puts("BRK RATE");
+							lcd_gotoxy(7,1);
+							lcd_puts("s");
+							bitPosition = 0xFF;
+							optionsPtr = &brakePulseWidth;
+						}
 					}
-					else if(4 == subscreenState)
+					else if((subscreenState >= 4) && (subscreenState < estopItem))
+					{
+						// STACK band->combo editors - only reachable when stackModeActive, so this range
+						// is only ever non-empty in STACK mode (editableBandCount is 0 otherwise).
+						stackEditBand = subscreenState - 3;
+						lcd_puts("STEP");
+						lcd_putc('0' + stackEditBand);
+						bitPosition = 0xFC;
+					}
+					else if(subscreenState == estopItem)
 					{
 						lcd_puts("BRK ESTP");
 						bitPosition = OPTIONBITS_ESTOP_ON_BRAKE;
 						optionsPtr = &optionBits;
 					}
-					else if(5 == subscreenState)
+					else if(subscreenState == revSwapItem)
 					{
 						lcd_puts("REV SWAP");
 						bitPosition = OPTIONBITS_REVERSER_SWAP;
@@ -2495,27 +2714,50 @@ int main(void)
 
 					if(bitPosition < 8)
 					{
-						if(OPTIONBITS_STEPPED_BRAKE == bitPosition)
-						{
-							// Special case for brake type
-							lcd_gotoxy(3,1);
-							if(*optionsPtr & _BV(bitPosition))
-								lcd_puts(" STEP");
-							else
-								lcd_puts("PULSE");
-						}
+						lcd_gotoxy(5,1);
+						if(*optionsPtr & _BV(bitPosition))
+							lcd_puts("ON ");
 						else
-						{
-							lcd_gotoxy(5,1);
-							if(*optionsPtr & _BV(bitPosition))
-								lcd_puts("ON ");
-							else
-								lcd_puts("OFF");
-						}
+							lcd_puts("OFF");
 					}
 					else if(8 == bitPosition)
 					{
 						// Do nothing
+					}
+					else if(0xFE == bitPosition)
+					{
+						// BRK TYPE 3-way cycle
+						lcd_gotoxy(3,1);
+						switch(GET_BRK_TYPE(*optionsPtr))
+						{
+							case BRK_TYPE_STEP:
+								lcd_puts(" STEP");
+								break;
+							case BRK_TYPE_STACK:
+								lcd_puts("STACK");
+								break;
+							case BRK_TYPE_PULSE:
+							default:
+								lcd_puts("PULSE");
+								break;
+						}
+					}
+					else if(0xFD == bitPosition)
+					{
+						// STACK step-count toggle - deterministic set-to (not a flip), avoids autorepeat
+						// visibly flickering between two states.
+						lcd_gotoxy(0,1);
+						lcd_puts(stackIs5Step() ? "5-STEP" : "3-STEP");
+					}
+					else if(0xFC == bitPosition)
+					{
+						// STACK band->combo editor
+						uint8_t combo = stackCombos()[stackEditBand];
+						lcd_gotoxy(0,1);
+						lcd_puts("BRAKE");
+						lcd_putc((combo & BRAKE_CONTROL) ? '1' : '-');
+						lcd_putc((combo & BK2_CONTROL)   ? '2' : '-');
+						lcd_putc((combo & BK3_CONTROL)   ? '3' : '-');
 					}
 					else if(optionsPtr == &brakePulseWidth)
 					{
@@ -2530,7 +2772,6 @@ int main(void)
 						printDec3Dig(*optionsPtr);
 					}
 
-					
 					switch(button)
 					{
 						case UP_BUTTON:
@@ -2539,6 +2780,34 @@ int main(void)
 								if(bitPosition < 8)
 								{
 									*optionsPtr |= _BV(bitPosition);
+								}
+								else if(0xFE == bitPosition)
+								{
+									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
+									if(brkType < BRK_TYPE_STACK)
+										brkType++;
+									SET_BRK_TYPE(*optionsPtr, brkType);
+									ticks_autoincrement = 0;
+								}
+								else if(0xFD == bitPosition)
+								{
+									if(!stackIs5Step())
+									{
+										optionBits |= _BV(OPTIONBITS_STACK_5STEP);
+										currentStackBand = 0;  // avoid a stale out-of-range band mid-switch
+									}
+									ticks_autoincrement = 0;
+								}
+								else if(0xFC == bitPosition)
+								{
+									uint8_t *combos = stackCombos();
+									// comboIndex is band's position within stackComboSequence[] (none/singles/pairs/all) -
+									// found by a short reverse lookup, since only the resulting bit pattern is stored.
+									uint8_t comboIndex = 0;
+									while((comboIndex < 7) && (stackComboSequence[comboIndex] != combos[stackEditBand]))
+										comboIndex++;
+									combos[stackEditBand] = stackComboSequence[(comboIndex + 1) & 0x07];
+									ticks_autoincrement = 0;
 								}
 								else
 								{
@@ -2557,6 +2826,32 @@ int main(void)
 								{
 									*optionsPtr &= ~_BV(bitPosition);
 								}
+								else if(0xFE == bitPosition)
+								{
+									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
+									if(brkType > BRK_TYPE_PULSE)
+										brkType--;
+									SET_BRK_TYPE(*optionsPtr, brkType);
+									ticks_autoincrement = 0;
+								}
+								else if(0xFD == bitPosition)
+								{
+									if(stackIs5Step())
+									{
+										optionBits &= ~_BV(OPTIONBITS_STACK_5STEP);
+										currentStackBand = 0;
+									}
+									ticks_autoincrement = 0;
+								}
+								else if(0xFC == bitPosition)
+								{
+									uint8_t *combos = stackCombos();
+									uint8_t comboIndex = 0;
+									while((comboIndex < 7) && (stackComboSequence[comboIndex] != combos[stackEditBand]))
+										comboIndex++;
+									combos[stackEditBand] = stackComboSequence[(comboIndex - 1) & 0x07];
+									ticks_autoincrement = 0;
+								}
 								else
 								{
 									if(*optionsPtr > 1)
@@ -2572,6 +2867,10 @@ int main(void)
 							{
 								eeprom_write_byte((uint8_t*)EE_BRAKE_PULSE_WIDTH, brakePulseWidth);
 								eeprom_write_byte((uint8_t*)EE_OPTIONBITS, optionBits);
+								if(stackIs5Step())
+									eeprom_write_block((void *)&stackBandCombos5Step[1], (void *)EE_STACK_BAND_COMBOS, 5);
+								else
+									eeprom_write_block((void *)&stackBandCombos3Step[1], (void *)EE_STACK_BAND_COMBOS_3STEP, 3);
 								readConfig();
 								lcd_clrscr();
 								lcd_gotoxy(1,0);
@@ -2587,10 +2886,12 @@ int main(void)
 								// Menu pressed, advance menu
 								subscreenState++;
 
-								// Conditionally skip menus if they don't apply
+								// Conditionally skip menus if they don't apply. Item 3 (BRK RATE / STEPS) and the
+								// STACK band editors above it are not skipped when BRK TYPE = STACK - they're shown
+								// instead of BRK RATE, per stackModeActive/estopItem above.
 								while(	((2 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip brake type when variable brake disabled
-										((3 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip pulse width when variable brake disabled
-										((3 == subscreenState) &&  (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)))      // Skip pulse width when brake type = stepped
+										((3 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip pulse width/STEPS when variable brake disabled
+										((3 == subscreenState) &&  (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)))       // Skip pulse width when brake type = stepped
 										)
 								{
 									subscreenState++;
@@ -3346,8 +3647,12 @@ int main(void)
 							}
 							else
 							{
-								if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (optionBits & _BV(OPTIONBITS_STEPPED_BRAKE)) )
+								if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
 								{
+									// Stepped-brake level shown as "STP1".."STP5", not "BRK*" - keeps it clear of
+									// the BRAKE / BRAKE2 / BRAKE3 function names (Configure Function) and the
+									// "BRAKE1".."BRAKE123" combo readout (STACK step editor). Same "STP" label
+									// STACK mode uses on this status field (below).
 									switch(brakeState)
 									{
 										// These two states get "brake off" set by first making sure "brake on" is clear (TCS decoders don't like these changing at the same time)
@@ -3357,24 +3662,36 @@ int main(void)
 											break;
 										case BRAKE_20PCNT_BEGIN:
 										case BRAKE_20PCNT_WAIT:
-											lcd_puts("BRK1");
+											lcd_puts("STP1");
 											break;
 										case BRAKE_40PCNT_BEGIN:
 										case BRAKE_40PCNT_WAIT:
-											lcd_puts("BRK2");
+											lcd_puts("STP2");
 											break;
 										case BRAKE_60PCNT_BEGIN:
 										case BRAKE_60PCNT_WAIT:
-											lcd_puts("BRK3");
+											lcd_puts("STP3");
 											break;
 										case BRAKE_80PCNT_BEGIN:
 										case BRAKE_80PCNT_WAIT:
-											lcd_puts("BRK4");
+											lcd_puts("STP4");
 											break;
 										case BRAKE_FULL_BEGIN:
 										case BRAKE_FULL_WAIT:
-											lcd_puts("BRK5");
+											lcd_puts("STP5");
 											break;
+									}
+								}
+								else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+								{
+									if(0 == currentStackBand)
+									{
+										lcd_puts("OFF ");
+									}
+									else
+									{
+										lcd_puts("STP");
+										lcd_putc('0' + currentStackBand);
 									}
 								}
 								else
@@ -3849,6 +4166,10 @@ int main(void)
 			functionMask |= getFunctionMask(BRAKE_FN);
 		if(controls & BRAKE_OFF_CONTROL)
 			functionMask |= getFunctionMask(BRAKE_OFF_FN);
+		if(controls & BK2_CONTROL)
+			functionMask |= getFunctionMask(BK2_FN);
+		if(controls & BK3_CONTROL)
+			functionMask |= getFunctionMask(BK3_FN);
 		if((ENGINE_ON == engineState)||(ENGINE_START == engineState))
 			functionMask |= getFunctionMask(ENGINE_ON_FN);
 		if(ENGINE_STOP == engineState)

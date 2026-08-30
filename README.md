@@ -8,6 +8,8 @@ This is a fork adding:
 
 - **Headlights debounce** — fixes a brief dark-flicker glitch when twisting the front or rear
   Headlights knob between detents.
+- **STACK brake mode** — a fourth brake mode driving up to three stackable DCC brake functions (e.g.
+  ESU LokSound/LokPilot V5 Brake1/2/3) from lever position, in 3-step or 5-step variants.
 
 ## Repo layout
 

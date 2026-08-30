@@ -134,6 +134,8 @@ all the `EE_*_FUNCTION`, threshold, and option-byte addresses are computed relat
 fields are read through `readByteOrDefault()`, which detects that sentinel and substitutes+persists a real
 default rather than trusting a plainly-invalid raw byte.
 
+**Brake logic**: see "Brake logic" below.
+
 **The LCD is only 8 columns × 2 rows** (`LCD_DISP_LENGTH` in `lcd.h`, `= 8`) — easy to mistake for wider
 given the unrelated `CANVAS_COLS 20` constant in `cst-pressure.c` (a custom-bitmap-canvas size, not the
 physical display width). `lcd_gotoxy(x,y)`/`lcd_puts()` do no bounds checking: writing at column ≥8 does
@@ -167,6 +169,78 @@ another reading overrides the candidate. Applied via a candidate+counter static 
 
 The reverser (`ADC_STATE_READ_VREV`) uses the identical raw-threshold-no-smoothing pattern and could in
 principle exhibit the same class of transient glitch — not reported as an issue, not currently addressed.
+
+## Brake logic
+
+`brakeState` (`BrakeStates` enum: `BRAKE_LOW_BEGIN` ... `BRAKE_FULL_WAIT`, `mrbw-cst.c`) drives two
+outputs, `BRAKE_CONTROL` and `BRAKE_OFF_CONTROL`, which map to the `BRAKE_FN`/`BRAKE_OFF_FN` logical
+functions. Which variant runs is selected by `BRK TYPE`, a 3-way cycle in `optionBits`
+(`OPTIONBITS_BRK_TYPE_LSB`, bits 3-4; `GET_BRK_TYPE`/`SET_BRK_TYPE` macros), set via the on-device menu:
+
+- **Standard** (`BRK TYPE` variable-brake bit off): on/off threshold with hysteresis.
+- **Pulse**: duty-cycle pulses `BRAKE_CONTROL` proportional to lever percentage, period set by
+  `brakePulseWidth` (`BRK RATE` in menu).
+- **Step**: advances through 20/40/60/80/100% bands only as the lever *increases*; only a full return to
+  the bottom resets it (a TCS-decoder-friendly mode, since some decoder brake implementations only step
+  forward).
+- **Stack**: see below.
+
+`EE_BRAKE_THRESHOLD` / `EE_BRAKE_LOW_THRESHOLD` / `EE_BRAKE_HIGH_THRESHOLD` are global (once-per-throttle,
+not per-profile — same as `EE_HORN_THRESHOLD`) calibration values set through the on-device
+threshold-calibration menu screens, not compile-time constants.
+`OPTIONBITS_ESTOP_ON_BRAKE` ("BRK ESTP") is a mode-independent check that runs *before* the brake-mode
+dispatch, comparing raw `brakePosition` against `brakeLowThreshold`/`brakeHighThreshold` directly — pushing
+the lever to max triggers the throttle built-in emergency stop (if enabled) regardless of `BRK TYPE`,
+clearing only once the lever returns fully to the bottom.
+
+### STACK combo brake mode
+
+A fourth mode where lever percentage drives combinations of **three DCC functions** — "Brake1" (reuses the
+existing `BRAKE_FN`/`BRAKE_CONTROL` plumbing directly), "Brake2", "Brake3" (`BK2_FN`/`BK3_FN`) — mapped to
+e.g. ESU LokSound/LokPilot V5 brake functions that stack, instead of pulsing/stepping a single function. Combos
+track the lever symmetrically in both directions, and each combo persists (holds continuously) rather than
+pulsing, matching the standard/pulse mode idiom rather than the stepped mode one.
+
+Two step-count variants, selected by a `STEPS` toggle (3-STEP default, 5-STEP option; existing
+combo config for whichever variant is not active stays stored and reactivates if switched back): the lever
+divides into `stackBandCount()` equal-width bands (4 for 3-STEP, 6 for 5-STEP, both counts including band
+0). Band 0 (full-left) and the top band (full-right) are pinned to the lever extremes; band 0 is
+permanently fixed to "no combo" and asserts `BRAKE_OFF_FN` continuously (like the standard/pulse mode
+release, not the stepped mode one-tick pulse) — it is not stored or editable. An interior band combo of
+`0x00` ("none active") is distinct from band 0: it asserts neither a brake-on combo nor `BRAKE_OFF_FN`.
+Band cut-points live in the explicit ordered array in `stackThresholds()` rather than a formula, since
+boundaries could change to become uneven in the future.
+
+Combo evaluation is **stateless per loop** (`evaluateStackBrake(brakePcnt)`, called from the main
+brake-mode dispatch) — not a graft onto the `BrakeStates` state machine, which is deliberately asymmetric
+(advance-only, TCS-style) and the wrong shape here. It re-derives the correct band fresh from `brakePcnt`
+on every call: escalate immediately on crossing a threshold going up, de-escalate only once
+`BRAKE_HYSTERESIS` below that same threshold coming back down — the same dead-band idiom basic on/off mode
+uses at its one boundary, generalized to as many boundaries as the active variant has. All 3 combo bits
+live directly in the `controls` byte — `BRAKE_CONTROL` (reused) for Brake1, `BK2_CONTROL`/
+`BK3_CONTROL` for Brake2/Brake3. A guard right after the brake-mode dispatch clears
+`BK2_CONTROL`/`BK3_CONTROL` (and resets the sticky `currentStackBand`) whenever STACK is not active. Because
+evaluation resolves however many band-boundaries got crossed within a single call, a fast lever sweep drops
+the combos of intermediate bands — only the band the lever is actually in when sampled is ever asserted.
+
+The band→combo mapping is edited live inside `OPTION_SCREEN`, revealed only when `BRK TYPE = STACK` (item
+numbering shifts dynamically based on the editable band count of the active variant). `stackBandCombos3Step[]`/
+`stackBandCombos5Step[]` are RAM arrays populated from separate EEPROM blocks (band 0 hardcoded to `0x00`,
+never stored). `UP`/`DOWN` cycle each band through all 8 possible 3-bit combos (none, each single, each
+pair, all three) via a `stackComboSequence[8]` lookup table. Display is `STEP1`…`STEPn` / `BRAKE---`…
+`BRAKE123` — "band" is the internal term (includes the off band); "step" is the on-device end-user term for
+the editable bands only.
+
+The pre-existing Brake Test screen (the pressure-gauge subscreen of `SPECFN_SCREEN`, reached via a control
+configured to `FN_BRKTEST`) suppresses `BRAKE_CONTROL`/`BRAKE_OFF_CONTROL`/`BK2_CONTROL`/`BK3_CONTROL` and
+the lever-triggered e-stop while its simulated pressure/sound sequence is active, so moving the lever
+during a test does not also fire real brake functions or a genuine e-stop.
+
+**DCC packet economy note**: NMRA DCC groups function numbers into fixed packet groups (F0-F4, F5-F8,
+F9-F12, F13-F20, F21-F28); assigning Brake1/2/3 within one group (F9-F12 fits all three) lets a downstream
+command station fold a simultaneous multi-brake transition into one DCC packet instead of up to three. This
+is a Configure Function choice the user makes — the firmware always sends the full function bitmask as one
+MRBus/MRBee packet regardless.
 
 ## Firmware versioning
 
