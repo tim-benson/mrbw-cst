@@ -45,6 +45,7 @@ LICENSE:
 #include "cst-tonnage.h"
 #include "cst-time.h"
 #include "cst-math.h"
+#include "cst-speed.h"
 
 //#define FAST_SLEEP
 #ifdef FAST_SLEEP
@@ -173,6 +174,9 @@ uint8_t brakePulseWidth = BRAKE_PULSE_WIDTH_DEFAULT;
 
 // Boolean config bits (EEPROM, global)
 #define CONFIGBITS_LED_BLINK         0
+// Bit clear = main screen shows the clock (the pre-fork default - preserved for throttles upgrading
+// from stock firmware, whose stored config byte already has this bit clear); set = show scale speed.
+#define CONFIGBITS_MAIN_SCREEN_SPEED 1
 #define CONFIGBITS_REVERSER_LOCK     4
 #define CONFIGBITS_STRICT_SLEEP      5
 
@@ -284,6 +288,7 @@ typedef enum
 	FORCE_FUNC_SCREEN,
 	CONFIG_FUNC_SCREEN,
 	NOTCH_CONFIG_SCREEN,
+	SPEED_CONFIG_SCREEN,
 	OPTION_SCREEN,
 	SYSTEM_SCREEN,
 	COMM_SCREEN,
@@ -336,6 +341,40 @@ uint32_t functionForceOff = 0;
 
 uint16_t controls = 0;
 
+// Commanded DCC speed step (0-126, magnitude only), mirrored here so the speed simulation's
+// 10Hz hook can see it - activeThrottleSetting/notchSpeedStep[] are main()-locals. Updated once
+// per main-loop pass; see the "Calculate active throttle setting" block below.
+volatile uint8_t commandedSpeedStep = 0;
+
+// Set by TIMER0_COMPA_vect every 100ms; the main loop consumes it and runs updateSpeed10Hz() from
+// there (not the ISR) - its standing-start ramp does 64-bit math that must not stall other interrupts.
+volatile uint8_t speed10HzTick = 0;
+
+// Is the user's SPEED "watched" DCC function (STOPFN) currently part of the outgoing functionMask
+// - regardless of which physical control put it there? functionMask itself is a main()-local, not
+// visible from the ISR, so this is computed once per main-loop pass right after functionMask is
+// finalized (see the "Force specific functions on or off" block below) and mirrored here.
+volatile uint8_t stopFunctionActive = 0;
+
+// Same watching mechanism as stopFunctionActive above, for the SPEED OPLOADFN/PRLOADFN - is the
+// user's watched Optional/Primary Load DCC function currently part of the outgoing functionMask?
+volatile uint8_t oploadFunctionActive = 0;
+volatile uint8_t prloadFunctionActive = 0;
+
+// Same watching mechanism again, for the SPEED HOLDFN (ESU Drive Hold) - is the user's watched
+// DCC function currently part of the outgoing functionMask? Defaults to F09, not OFF - see cst-speed.h.
+volatile uint8_t holdFunctionActive = 0;
+
+// Same watching mechanism again, for Brake1/2/3 (BRAKE_FN/BK2_FN/BK3_FN) - is each one's configured DCC
+// function currently part of the outgoing functionMask, regardless of which physical control (the brake
+// lever's own state machine, or anything else mapped to the same function number) put it there? Forced
+// false whenever BRK TYPE == STEP - Step's brake pulses advance a TCS-style ratchet on the real decoder,
+// not "hold to brake at rate X", which the speed simulation's held-while-active model was never a valid
+// representation of; see the watching block below.
+volatile uint8_t brake1FunctionActive = 0;
+volatile uint8_t brake2FunctionActive = 0;
+volatile uint8_t brake3FunctionActive = 0;
+
 // STACK 3-STEP/5-STEP: single shared hysteresis-walk algorithm (evaluateStackBrake() below), parameterized
 // by these 3 small accessors rather than duplicated per variant - the two variants are structurally
 // identical (an N-band walk over a threshold table, ending in an array lookup), differing only in which
@@ -355,6 +394,16 @@ static const uint8_t* stackThresholds(void)
 static uint8_t* stackCombos(void)
 {
 	return stackIs5Step() ? stackBandCombos5Step : stackBandCombos3Step;
+}
+
+// SPEED_CONFIG_SCREEN: the four watched-DCC-function items (HOLDFN/STOPFN/OPLOADFN/PRLOADFN) share one
+// edit behaviour - an 0-28 range plus the SPEED_STOP_WATCH_FN_OFF (255) sentinel, distinct from the plain
+// 0-255 numeric items and the two 0/1 toggles (UNIT/TYPE). Not contiguous in the SPEED_ITEM_* enum, which
+// follows menu order, so this is a set test rather than a range check.
+static uint8_t speedItemIsWatchFn(uint8_t item)
+{
+	return (SPEED_ITEM_HOLD_FN == item) || (SPEED_ITEM_STOP_FN == item)
+	    || (SPEED_ITEM_OPLOAD_FN == item) || (SPEED_ITEM_PRLOAD_FN == item);
 }
 
 // STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
@@ -801,6 +850,7 @@ ISR(TIMER0_COMPA_vect)
 		
 		updateTime10Hz();
 		updatePressure10Hz();
+		speed10HzTick = 1;   // updateSpeed10Hz() runs from the main loop - see speed10HzTick's use there
 	}
 
 	if(txHoldoff)
@@ -814,8 +864,8 @@ ISR(TIMER0_COMPA_vect)
 // existed (or, for optionBits/configBits, a chip that's never had readConfig() run at all), that's
 // what it'll read back as, not the intended default. Detect that and fall back to defaultValue,
 // persisting it so the field reads clean from here on (same idiom already used for
-// sleep_tmr_reset_value/alerter_tmr_reset_value below, generalized here for both STACK combo arrays and
-// optionBits/configBits).
+// sleep_tmr_reset_value/alerter_tmr_reset_value below, generalized here for every SPEED field,
+// both STACK combo arrays, and optionBits/configBits).
 static uint8_t readByteOrDefault(uint8_t *eeAddr, uint8_t defaultValue)
 {
 	uint8_t val = eeprom_read_byte(eeAddr);
@@ -1041,6 +1091,27 @@ void readConfig(void)
 	stackBandCombos3Step[3] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 2), STACK_3STEP_DEFAULT_3);
 	for(i=1; i<STACK_BAND_COUNT_3STEP; i++)
 		stackBandCombos3Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
+
+	// Scale-speed simulation config - raw 0-255 values mirroring the loco's decoder CVs directly.
+	speedSet(SPEED_ITEM_ACCEL,            readByteOrDefault((uint8_t*)EE_MOMENTUM_ACCEL_CV3, MOMENTUM_ACCEL_CV3_DEFAULT));
+	speedSet(SPEED_ITEM_DECEL,            readByteOrDefault((uint8_t*)EE_MOMENTUM_DECEL_CV4, MOMENTUM_DECEL_CV4_DEFAULT));
+	speedSet(SPEED_ITEM_BRAKE1,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE1_CV179, MOMENTUM_BRAKE1_CV179_DEFAULT));
+	speedSet(SPEED_ITEM_BRAKE2,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE2_CV180, MOMENTUM_BRAKE2_CV180_DEFAULT));
+	speedSet(SPEED_ITEM_BRAKE3,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE3_CV181, MOMENTUM_BRAKE3_CV181_DEFAULT));
+	speedSet(SPEED_ITEM_START_DELAY,      readByteOrDefault((uint8_t*)EE_MOMENTUM_START_DELAY, MOMENTUM_START_DELAY_DEFAULT));
+	speedSet(SPEED_ITEM_MAX_MPH,          readByteOrDefault((uint8_t*)EE_SPEED_MAX_MPH, SPEED_MAX_MPH_DEFAULT));
+	speedSet(SPEED_ITEM_UNIT,             readByteOrDefault((uint8_t*)EE_SPEED_UNIT_KMH, SPEED_UNIT_KMH_DEFAULT));
+	speedSet(SPEED_ITEM_STOP_FN,          readByteOrDefault((uint8_t*)EE_SPEED_STOP_WATCH_FN, SPEED_STOP_WATCH_FN_DEFAULT));
+	speedSet(SPEED_ITEM_TYPE,             readByteOrDefault((uint8_t*)EE_SPEED_TYPE, SPEED_TYPE_DEFAULT));
+	speedSet(SPEED_ITEM_OPLOAD,           readByteOrDefault((uint8_t*)EE_SPEED_OPLOAD, SPEED_OPLOAD_DEFAULT));
+	speedSet(SPEED_ITEM_PRLOAD,           readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD, SPEED_PRLOAD_DEFAULT));
+	speedSet(SPEED_ITEM_OPLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_OPLOAD_FN, SPEED_OPLOAD_FN_DEFAULT));
+	speedSet(SPEED_ITEM_PRLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD_FN, SPEED_PRLOAD_FN_DEFAULT));
+	speedSet(SPEED_ITEM_HOLD_FN,          readByteOrDefault((uint8_t*)EE_SPEED_HOLD_WATCH_FN, SPEED_HOLD_WATCH_FN_DEFAULT));
+	speedSet(SPEED_ITEM_DECEL_THRESHOLD,  readByteOrDefault((uint8_t*)EE_SPEED_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT));
+	speedSet(SPEED_ITEM_DECEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT));
+	speedSet(SPEED_ITEM_ACCEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT));
+	speedSet(SPEED_ITEM_ACCEL_TARGET,     readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT));
 }
 
 void copyConfig(uint8_t srcConfig, uint8_t destConfig)
@@ -1128,6 +1199,28 @@ void resetConfig(void)
 	notchSpeedStep[7] = 119;
 	eeprom_write_block((void *)notchSpeedStep, (void *)EE_NOTCH_SPEEDSTEP, 8);
 
+	// Scale-speed simulation config - factory defaults, same values readByteOrDefault() falls
+	// back to in readConfig() if it finds unprogrammed (0xFF) EEPROM on an upgraded chip.
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_ACCEL_CV3, MOMENTUM_ACCEL_CV3_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_DECEL_CV4, MOMENTUM_DECEL_CV4_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE1_CV179, MOMENTUM_BRAKE1_CV179_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE2_CV180, MOMENTUM_BRAKE2_CV180_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE3_CV181, MOMENTUM_BRAKE3_CV181_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MOMENTUM_START_DELAY, MOMENTUM_START_DELAY_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_MAX_MPH, SPEED_MAX_MPH_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_UNIT_KMH, SPEED_UNIT_KMH_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_STOP_WATCH_FN, SPEED_STOP_WATCH_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_TYPE, SPEED_TYPE_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD, SPEED_OPLOAD_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD, SPEED_PRLOAD_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD_FN, SPEED_OPLOAD_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD_FN, SPEED_PRLOAD_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_HOLD_WATCH_FN, SPEED_HOLD_WATCH_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT);
+
 	stackBandCombos5Step[1] = STACK_5STEP_DEFAULT_1;
 	stackBandCombos5Step[2] = STACK_5STEP_DEFAULT_2;
 	stackBandCombos5Step[3] = STACK_5STEP_DEFAULT_3;
@@ -1198,6 +1291,7 @@ void init(void)
 
 	engineStatesQueueInitialize();
 	resetPressure();
+	resetSpeed();
 
 	DDRB |= _BV(PB3);
 }
@@ -1643,6 +1737,16 @@ int main(void)
 			activeThrottleSetting = throttlePosition;
 		}
 
+		// Commanded speed step for the local speed simulation (cst-speed.c). Deliberately
+		// different from the outgoing DCC packet's speed byte, which does NOT zero for a centered
+		// reverser - it relies on the decoder's separately-sent NEUTRAL_FN to actually stop the motor.
+		// For the local mph display, though, a centered reverser means the loco is physically
+		// stationary regardless of notch position.
+		if((throttleStatus & THROTTLE_STATUS_EMERGENCY) || (NEUTRAL == activeReverserSetting) || (0 == activeThrottleSetting))
+			commandedSpeedStep = 0;
+		else
+			commandedSpeedStep = notchSpeedStep[activeThrottleSetting - 1];
+
 		if((ENGINE_START == engineState) && !engineTimer)
 		{
 			// START --> RUNNING
@@ -1689,6 +1793,14 @@ int main(void)
 						lcd_puts("REV!");
 						enableLCDBacklight();
 					}
+					else if(holdFunctionActive)
+					{
+						lcd_puts("HOLD");
+						if(backlight)
+							enableLCDBacklight();
+						else
+							disableLCDBacklight();
+					}
 					else
 					{
 						printLocomotiveAddress(locoAddress);
@@ -1699,7 +1811,10 @@ int main(void)
 					}
 
 					lcd_gotoxy(1,1);
-					printTime();
+					if(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED))
+						printSpeed();
+					else
+						printTime();
 					printBattery();
 				
 					lcd_gotoxy(7,0);
@@ -2003,6 +2118,7 @@ int main(void)
 								screenState = LAST_SCREEN;
 								setupLCD(LCD_DEFAULT);
 								resetPressure();
+								resetSpeed();
 							}
 							break;
 						case MENU_BUTTON:
@@ -2012,6 +2128,7 @@ int main(void)
 								subscreenState = (subscreenState & 0x7F) + 1;
 								lcd_clrscr();
 								resetPressure();
+								resetSpeed();
 							}
 							break;
 						case UP_BUTTON:
@@ -2643,6 +2760,173 @@ int main(void)
 								// Menu pressed, advance menu
 								subscreenState++;
 								if(subscreenState > 8)
+									subscreenState = 1;
+								lcd_clrscr();
+							}
+							break;
+						case NO_BUTTON:
+							break;
+					}
+				}
+				break;
+
+			case SPEED_CONFIG_SCREEN:
+				enableLCDBacklight();
+				if(!subscreenState)
+				{
+					lcd_gotoxy(3,0);
+					lcd_puts("SPEED");
+					lcd_gotoxy(0,1);
+					lcd_putc(0x7F);
+					lcd_puts("-   CFG");
+					switch(button)
+					{
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								subscreenState = 1;
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+						case UP_BUTTON:
+						case DOWN_BUTTON:
+						case NO_BUTTON:
+							break;
+					}
+				}
+				else
+				{
+					uint8_t speedItem = subscreenState - 1;
+					uint8_t speedVal = speedGet(speedItem);
+
+					lcd_gotoxy(0,0);
+					switch(speedItem)
+					{
+						case SPEED_ITEM_ACCEL:           lcd_puts("ACCEL "); break;  // CV3
+						case SPEED_ITEM_DECEL:           lcd_puts("DECEL "); break;  // CV4
+						case SPEED_ITEM_BRAKE1:          lcd_puts("BRK1  "); break;  // CV179
+						case SPEED_ITEM_BRAKE2:          lcd_puts("BRK2  "); break;  // CV180
+						case SPEED_ITEM_BRAKE3:          lcd_puts("BRK3  "); break;  // CV181
+						case SPEED_ITEM_START_DELAY:     lcd_puts("DELAY "); break;  // CV167
+						case SPEED_ITEM_MAX_MPH:         lcd_puts("MAXSPEED"); break;
+						case SPEED_ITEM_UNIT:            lcd_puts("UNIT  "); break;
+						case SPEED_ITEM_HOLD_FN:         lcd_puts("HOLDFN"); break;
+						case SPEED_ITEM_STOP_FN:         lcd_puts("STOPFN"); break;
+						case SPEED_ITEM_OPLOAD:          lcd_puts("OPLOAD"); break;  // CV103
+						case SPEED_ITEM_OPLOAD_FN:       lcd_puts("OPLOADFN"); break;
+						case SPEED_ITEM_PRLOAD:          lcd_puts("PRLOAD"); break;  // CV104
+						case SPEED_ITEM_PRLOAD_FN:       lcd_puts("PRLOADFN"); break;
+						case SPEED_ITEM_TYPE:            lcd_puts("TYPE"); break;
+						case SPEED_ITEM_ACCEL_PCT:       lcd_puts("ACCPCT"); break;
+						case SPEED_ITEM_ACCEL_TARGET:    lcd_puts("ACCTGT"); break;
+						case SPEED_ITEM_DECEL_PCT:       lcd_puts("DECPCT"); break;
+						case SPEED_ITEM_DECEL_THRESHOLD: lcd_puts("DECTHR"); break;
+					}
+					lcd_gotoxy(0,1);
+					if(SPEED_ITEM_UNIT == speedItem)
+						lcd_puts((SPEED_UNIT_KMH == speedVal) ? "KMH" : "MPH");
+					else if(speedItemIsWatchFn(speedItem))
+					{
+						if(SPEED_STOP_WATCH_FN_OFF == speedVal)
+							lcd_puts("OFF");
+						else
+						{
+							lcd_putc('F');
+							printDec2DigWZero(speedVal);
+						}
+					}
+					else if(SPEED_ITEM_TYPE == speedItem)
+						lcd_puts((SPEED_TYPE_V4V5MULT == speedVal) ? "V4V5MULT" : "V5DCC   ");
+					else
+						printDec3Dig(speedVal);
+
+					switch(button)
+					{
+						case UP_BUTTON:
+							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								if(speedItemIsWatchFn(speedItem))
+								{
+									// OFF/255 sentinel below 0; step up 0..28, then hold at 28.
+									if(SPEED_STOP_WATCH_FN_OFF == speedVal)
+										speedVal = 0;
+									else if(speedVal < 28)
+										speedVal++;
+									speedSet(speedItem, speedVal);
+								}
+								else
+								{
+									// UNIT/TYPE are 0/1 toggles (KMH/V4V5MULT at 1); the rest clamp at 255.
+									uint8_t speedMax = ((SPEED_ITEM_UNIT == speedItem) || (SPEED_ITEM_TYPE == speedItem)) ? 1 : 255;
+									if(speedVal < speedMax)
+										speedSet(speedItem, speedVal + 1);
+								}
+								ticks_autoincrement = 0;
+							}
+							break;
+						case DOWN_BUTTON:
+							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								if(speedItemIsWatchFn(speedItem))
+								{
+									// Step down 28..0, then wrap to the OFF/255 sentinel and hold there.
+									if(0 == speedVal)
+										speedVal = SPEED_STOP_WATCH_FN_OFF;
+									else if(SPEED_STOP_WATCH_FN_OFF != speedVal)
+										speedVal--;
+									speedSet(speedItem, speedVal);
+								}
+								else
+								{
+									// UNIT/TYPE toggle back to 0 (MPH/V5DCC); the rest clamp at 0.
+									if(speedVal > 0)
+										speedSet(speedItem, speedVal - 1);
+								}
+								ticks_autoincrement = 0;
+							}
+							break;
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_ACCEL_CV3,     speedGet(SPEED_ITEM_ACCEL));
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_DECEL_CV4,     speedGet(SPEED_ITEM_DECEL));
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE1_CV179,  speedGet(SPEED_ITEM_BRAKE1));
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE2_CV180,  speedGet(SPEED_ITEM_BRAKE2));
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE3_CV181,  speedGet(SPEED_ITEM_BRAKE3));
+								eeprom_write_byte((uint8_t*)EE_MOMENTUM_START_DELAY,   speedGet(SPEED_ITEM_START_DELAY));
+								eeprom_write_byte((uint8_t*)EE_SPEED_MAX_MPH,          speedGet(SPEED_ITEM_MAX_MPH));
+								eeprom_write_byte((uint8_t*)EE_SPEED_UNIT_KMH,         speedGet(SPEED_ITEM_UNIT));
+								eeprom_write_byte((uint8_t*)EE_SPEED_HOLD_WATCH_FN,    speedGet(SPEED_ITEM_HOLD_FN));
+								eeprom_write_byte((uint8_t*)EE_SPEED_STOP_WATCH_FN,    speedGet(SPEED_ITEM_STOP_FN));
+								eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD,           speedGet(SPEED_ITEM_OPLOAD));
+								eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD_FN,        speedGet(SPEED_ITEM_OPLOAD_FN));
+								eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD,           speedGet(SPEED_ITEM_PRLOAD));
+								eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD_FN,        speedGet(SPEED_ITEM_PRLOAD_FN));
+								eeprom_write_byte((uint8_t*)EE_SPEED_TYPE,             speedGet(SPEED_ITEM_TYPE));
+								eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_PCT,        speedGet(SPEED_ITEM_ACCEL_PCT));
+								eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_TARGET,     speedGet(SPEED_ITEM_ACCEL_TARGET));
+								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_PCT,        speedGet(SPEED_ITEM_DECEL_PCT));
+								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_THRESHOLD,  speedGet(SPEED_ITEM_DECEL_THRESHOLD));
+								readConfig();
+								lcd_clrscr();
+								lcd_gotoxy(1,0);
+								lcd_puts("SAVED!");
+								wait100ms(7);
+								subscreenState = 0;  // Escape submenu
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+							if(MENU_BUTTON != previousButton)
+							{
+								// Menu pressed, advance menu
+								subscreenState++;
+
+								// Wrap past the last item; skip the ACCPCT/ACCTGT/DECPCT/DECTHR correction
+								// tunables (SPEED_ITEM_ACCEL_PCT onward) unless ADV FUNC is enabled.
+								if( (subscreenState > SPEED_ITEM_COUNT) ||
+								    ((subscreenState - 1 >= (uint8_t)SPEED_ITEM_ACCEL_PCT) && !(systemBits & _BV(SYSTEMBITS_ADV_FUNC))) )
 									subscreenState = 1;
 								lcd_clrscr();
 							}
@@ -3327,6 +3611,12 @@ int main(void)
 					
 					if(1 == subscreenState)
 					{
+						lcd_puts("DISPLAY");
+						bitPosition = CONFIGBITS_MAIN_SCREEN_SPEED;
+						prefsPtr = &configBits;
+					}
+					else if(2 == subscreenState)
+					{
 						lcd_puts("SLEEP");
 						lcd_gotoxy(0,1);
 						lcd_puts("DLY:");
@@ -3336,7 +3626,7 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &newSleepTimeout;
 					}
-					else if(2 == subscreenState)
+					else if(3 == subscreenState)
 					{
 						lcd_puts("ALERTER");
 						lcd_gotoxy(0,1);
@@ -3354,7 +3644,7 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &newAlerterTimeout;
 					}
-					else if(3 == subscreenState)
+					else if(4 == subscreenState)
 					{
 						lcd_puts("TIMEOUT");
 						lcd_gotoxy(0,1);
@@ -3365,7 +3655,7 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &maxDeadReckoningTime;
 					}
-					else if(4 == subscreenState)
+					else if(5 == subscreenState)
 					{
 						lcd_puts("PUMP");
 						lcd_gotoxy(0,1);
@@ -3375,19 +3665,19 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &pressureCoefficients;
 					}
-					else if(5 == subscreenState)
+					else if(6 == subscreenState)
 					{
 						lcd_puts("LED BLNK");
 						bitPosition = CONFIGBITS_LED_BLINK;
 						prefsPtr = &configBits;
 					}
-					else if(6 == subscreenState)
+					else if(7 == subscreenState)
 					{
 						lcd_puts("REV LOCK");
 						bitPosition = CONFIGBITS_REVERSER_LOCK;
 						prefsPtr = &configBits;
 					}
-					else if(7 == subscreenState)
+					else if(8 == subscreenState)
 					{
 						lcd_puts("STRICT");
 						lcd_gotoxy(0,1);
@@ -3403,11 +3693,22 @@ int main(void)
 
 					if(bitPosition < 8)
 					{
-						lcd_gotoxy(4,1);
-						if(*prefsPtr & _BV(bitPosition))
-							lcd_puts(" ON ");
+						if(CONFIGBITS_MAIN_SCREEN_SPEED == bitPosition)
+						{
+							// This item has no row-1 prefix (unlike e.g. STRICT SLP's "SLP"), so unlike
+							// the shared column-4 slot below, columns 0-7 are all free here - room
+							// enough for the full word rather than the other boolean items' 4-char cap.
+							lcd_gotoxy(0,1);
+							lcd_puts((*prefsPtr & _BV(bitPosition)) ? "SPEED" : "CLOCK");
+						}
 						else
-							lcd_puts(" OFF");
+						{
+							lcd_gotoxy(4,1);
+							if(*prefsPtr & _BV(bitPosition))
+								lcd_puts(" ON ");
+							else
+								lcd_puts(" OFF");
+						}
 					}
 					else if(8 == bitPosition)
 					{
@@ -4169,7 +4470,17 @@ int main(void)
 							}
 						}
 					}
-					
+
+					// Skip SPEED CFG screen when the main screen is showing the clock, not speed -
+					// tuning these settings is meaningless if the throttle isn't displaying speed at all.
+					if(SPEED_CONFIG_SCREEN == screenState)
+					{
+						if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
+						{
+							screenState++;
+						}
+					}
+
 					if(systemBits & _BV(SYSTEMBITS_MENU_LOCK))
 					{
 						// Menu lock active
@@ -4397,6 +4708,28 @@ int main(void)
 		functionMask |= functionForceOn;
 		functionMask &= ~functionForceOff;
 
+		// Speed sim: are the user's watched DCC functions (STOPFN/OPLOADFN/PRLOADFN) currently part
+		// of the outgoing mask, regardless of which physical control put them there?
+		{
+			uint8_t watchFn = speedGet(SPEED_ITEM_STOP_FN);
+			stopFunctionActive = (watchFn <= 28) && (functionMask & ((uint32_t)1 << watchFn));
+			uint8_t opFn = speedGet(SPEED_ITEM_OPLOAD_FN);
+			oploadFunctionActive = (opFn <= 28) && (functionMask & ((uint32_t)1 << opFn));
+			uint8_t prFn = speedGet(SPEED_ITEM_PRLOAD_FN);
+			prloadFunctionActive = (prFn <= 28) && (functionMask & ((uint32_t)1 << prFn));
+			uint8_t holdFn = speedGet(SPEED_ITEM_HOLD_FN);
+			holdFunctionActive = (holdFn <= 28) && (functionMask & ((uint32_t)1 << holdFn));
+
+			// Same mechanism, for Brake1/2/3 (BRAKE_FN/BK2_FN/BK3_FN) - forced false in Step mode, since
+			// Step's brake pulses advance a TCS-style ratchet on the real decoder rather than meaning
+			// "hold to brake", which the sim's held-while-active model can't represent regardless of
+			// how the active state is detected.
+			uint8_t stepBrakeMode = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits));
+			brake1FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BRAKE_FN))) ? 1 : 0;
+			brake2FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BK2_FN))) ? 1 : 0;
+			brake3FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BK3_FN))) ? 1 : 0;
+		}
+
 		wdt_reset();
 
 		// Process various E-Stop inputs to create single status bit
@@ -4404,6 +4737,20 @@ int main(void)
 			throttleStatus |= THROTTLE_STATUS_EMERGENCY;
 		else
 			throttleStatus &= ~THROTTLE_STATUS_EMERGENCY;
+
+		// Scale-speed sim: once per 10Hz tick (flag set by TIMER0_COMPA_vect), but run from here, not
+		// the ISR - its standing-start ramp does 64-bit math that must not stall the radio/encoder
+		// interrupts. Placed after every input it reads is this pass's value (commandedSpeedStep, the
+		// brake/watch mirrors above, and THROTTLE_STATUS_EMERGENCY just finalized).
+		{
+			uint8_t doSpeedTick;
+			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { doSpeedTick = speed10HzTick; speed10HzTick = 0; }
+			if(doSpeedTick)
+				updateSpeed10Hz(commandedSpeedStep, brake1FunctionActive, brake2FunctionActive,
+				                brake3FunctionActive, throttleStatus & THROTTLE_STATUS_EMERGENCY,
+				                stopFunctionActive, oploadFunctionActive, prloadFunctionActive,
+				                holdFunctionActive);
+		}
 
 		uint8_t inputsChanged =	(activeReverserSetting != lastActiveReverserSetting) ||
 									(activeThrottleSetting != lastActiveThrottleSetting) ||

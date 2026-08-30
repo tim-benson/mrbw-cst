@@ -274,6 +274,196 @@ command station fold a simultaneous multi-brake transition into one DCC packet i
 is a Configure Function choice the user makes — the firmware always sends the full function bitmask as one
 MRBus/MRBee packet regardless.
 
+## SPEED — scale-speed simulation
+
+Replaces the fast clock on the main screen with a locally-computed **scale miles-per-hour (or km/h)**
+readout that models ESU LokSound/LokPilot (both V4 and V5, selected via the `TYPE` field) momentum and
+three-brake deceleration behavior, so the displayed speed stays in visual sync with what the decoder is
+actually doing rather than just the instantaneous commanded speed step. Local computation was chosen over
+an earlier wireless-received-speed design that was evaluated and not adopted.
+
+Commanded speed is `notchSpeedStep[activeThrottleSetting-1]` — the same 0-126 DCC speed step already
+transmitted, no new input needed. Scale speed is `speedStep/126 × speedMaxMph`, with `speedMaxMph` a
+per-profile configurable value (`MAXSPEED`), converted to km/h at display time if that unit is selected.
+`src/cst-speed.c`/`.h` (mirroring the shape of `cst-pressure.c`: EEPROM-backed per-profile config, 10Hz update,
+own display printer) holds `simSpeedStepQ8`, an 8.8 fixed-point simulated speed step — chosen over a plain
+integer to avoid per-tick truncation stalling at slow rates, the same class of problem
+`updatePressure10Hz()` works around with its own floor. `updateSpeed10Hz()` runs once per 100ms tick, but
+from the **main loop**, not the timer ISR: `TIMER0_COMPA_vect` only sets a `speed10HzTick` flag and the
+main loop consumes it. The standing-start ramp does `int64` multiply/divide that must not run inside an ISR
+— it would stall the radio-UART and quadrature-encoder interrupts for its duration (a latency concern, not
+a CPU-load one — the math is a ~0.25% duty cycle). `updateTime10Hz()` and `updatePressure10Hz()` stay in
+the ISR: cheap, and they need precise timing. Brake-active flags and the other inputs are passed to
+`updateSpeed10Hz()` explicitly rather than read via `extern`, so the module has no dependency on
+the internal bit layout of `mrbw-cst.c`.
+
+**ESU LokSound/LokPilot formulas modeled** (from ESU community documentation — covers both V4 and V5, see
+`TYPE` below):
+- Accel/decel: time to cross the full speed range = `CV × multiplier` seconds (CV3 for accel, CV4 for
+  decel). The multiplier is decoder-family-dependent — see `TYPE` below.
+- Brake override: `stopSeconds = (255-CVbrakeSum)/255 × (CV4 × multiplier)`.
+- Start delay (decoder CV167): `delaySeconds = CV167 × 0.25`.
+
+**Brake semantics**: Brake1/2/3 (`CV179`/`180`/`181`, mirroring the same three DCC functions STACK brake
+mode drives) sum when stacked, capped at 255 (near-instant stop), rather than "fastest wins." Any brake
+asserted overrides throttle demand entirely — the simulation always heads toward a full stop while a brake
+is held. Start Delay only arms once the loco is both fully stopped *and* free of any asserted brake.
+**Reverser neutral is a hard override**: `commandedSpeedStep` is forced to 0 whenever the reverser is
+centered, unlike the real outgoing DCC packet (which relies on the decoder separately-sent `NEUTRAL_FN`)
+— a deliberate simulation-only difference, since the loco is physically stationary in neutral regardless of
+notch position.
+
+### On-device editor
+
+`SPEED_CONFIG_SCREEN` (landing page `SPEED CFG`), a 19-item cycle grouped: momentum CVs (`ACCEL`/`DECEL`/
+`BRK1`/`BRK2`/`BRK3`/`DELAY`) → display calibration (`MAXSPEED`/`UNIT`) → watched-function triggers
+(`HOLDFN`/`STOPFN`) → load simulation (`OPLOAD`/`OPLOADFN`/`PRLOAD`/`PRLOADFN`) → decoder family (`TYPE`) →
+correction tunables (`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`). The last four are fine-grained calibration
+values hidden from the item cycle unless `ADV FUNC` (`SYSTEM` screen) is enabled, to avoid accidental
+edits; they are still always read via `readByteOrDefault()` with real defaults regardless of visibility, so
+hiding them never risks an unset field. `UNIT`/`TYPE` are strict two-way toggles; `HOLDFN`/`STOPFN`/
+`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+
+`printSpeed()` converts the configured `MAXSPEED` into km/h once before computing the displayed value
+(rather than converting an already-rounded mph figure) to avoid compounding rounding error, and decides its
+field width (2-digit-padded vs. 3-digit-unpadded) from that *configured* max rather than the live
+instantaneous value, so the layout never jumps mid-session.
+
+**Main-screen display toggle, "DISPLAY" in PREFS**: `CONFIGBITS_MAIN_SCREEN_SPEED` toggles the main screen
+between `printTime()` and `printSpeed()`. The clock is the default — the bit is clear on a fresh chip
+(not in `CONFIGBITS_DEFAULT`) and clear in the stored config byte of any throttle upgrading from stock
+firmware, so both land on the clock; showing speed is an explicit opt-in. While the bit is clear (clock),
+`SPEED CFG` is silently skipped in the top-level menu cycle.
+
+### Watched-function e-stop and Drive Hold
+
+Two independent conditions snap the display straight to zero (held there for as long as either stays true)
+instead of ramping down at the normal/brake rate: `STOPFN` (a per-profile watched DCC function number,
+0-28 or OFF — whenever that function number is present *anywhere* in the outgoing `functionMask`,
+regardless of which physical control put it there) and the throttle built-in e-stop
+(`THROTTLE_STATUS_EMERGENCY`). Both go through `snapToStop()`, which also drops any in-progress
+standing-start ramp and re-arms the Start Delay, so releasing e-stop/`STOPFN` resumes from a genuine
+standing start — not mid-ramp. `HOLDFN` (default F09) freezes the simulation exactly as-is while asserted —
+no state is touched, since `functionMask`/`commandedSpeedStep` are recomputed fresh every pass, so freezing
+is sufficient by construction for "resume based on current state once released." While `HOLDFN` is
+asserted, the loco-address line of the main screen is also replaced with a literal `"HOLD"` on-screen cue — the
+same priority slot the throttle existing reverser-mismatch indicator already uses, checked in order:
+alerter-timeout backlight blink → reverser mismatch → `"HOLD"` → normal loco address/speed display.
+`STOPFN` has no on-screen text of its own — its effect is only visible through the speed readout itself
+snapping to 0mph.
+
+`THROTTLE_STATUS_EMERGENCY` is a live combinational OR of three sources, recomputed every main-loop pass:
+brake lever at max (gated by `OPTIONBITS_ESTOP_ON_BRAKE`), a control configured to `FN_EMRG`, and alerter
+timeout specifically when `ALERTER_FN = FN_EMRG` — an ordinary alerter timeout always forces the throttle
+to zero and applies the brake as a fail-safe regardless of how `ALERTER_FN` is configured, but only feeds
+`THROTTLE_STATUS_EMERGENCY` (and so the display snap-to-zero) in the `FN_EMRG` case. That forced brake
+application asserts the `BRAKE_FN` bit directly in `functionMask` (the alerter-timeout block in
+`mrbw-cst.c`), so the `functionMask`-based Brake1 detection the speed sim already does picks it up
+through the same path as every other brake source.
+
+### How the simulation math works
+
+**Decoder family (`TYPE`)**: selects which momentum-CV time convention `ACCEL`/`DECEL`/`BRK1-3` use —
+`V5DCC` (0.896s per CV unit, ESU LokSound 5 DCC-only, the NMRA S9.2.2-standard multiplier) or `V4V5MULT`
+(0.25s per CV unit, the general case: LokPilot/LokSound V4, and V5 MultiProtocol).
+
+**Load simulation (`OPLOAD`/`PRLOAD`/`OPLOADFN`/`PRLOADFN`)**: mirrors decoder CV103 (Optional Load)/CV104
+(Primary Load) — each a 0-255 value (128 = neutral) that scales the base `ACCEL`/`DECEL` CV while its
+watched DCC function is active, `time = CV × loadValue/128`. Primary Load wins if both are active
+simultaneously, per the ESU manual.
+
+**Brake-function detection**: the simulation reads whether Brake1/2/3 are active from the actual outgoing
+`functionMask`, not from the lever own state-machine bits — so any control mapped to the same DCC
+function number is detected regardless of source. Step brake mode is deliberately excluded (forced
+inactive) — its pulses are a one-directional decoder-side ratchet the sum-based brake model cannot
+represent; Step remains the one brake mode where the simulated behavior can diverge from a real
+Step-braking locomotive.
+
+**Deceleration lag correction (`DECTHR`/`DECPCT`)**: real decoders decelerate faster than the plain `DECEL`
+(or summed brake) model predicts. `lag(speed) = slope × max(0, speedStep − DECTHR)`, slope proportional to
+the relevant reference time. Calibrated from hardware measurement: `DECTHR≈11` (~4.2mph, roughly constant
+across `DECEL`), validated for `DECEL 0-230` (values above showed non-monotonic real-decoder behavior and
+are outside the validated scope — the underlying `ticksToCross()` math itself is strictly linear, so this
+is a decoder characteristic, not a firmware bug). Applies to any deceleration via one unconditional path —
+coast or brake, steady-state or interrupting an active climb.
+
+**Standing-start acceleration (`ACCPCT`/`ACCTGT`)**: real locomotives reach any speed below 15mph faster
+than the plain `ACCEL` model predicts, by a roughly constant amount of time (not proportional to distance).
+`ACCPCT` (0-255 = 0-100% of the full-range crossing time of `ACCEL` itself) is that lead-time budget, spent as a
+smooth cubic-Hermite ramp from a genuine stop up to the 15mph-equivalent speed, calibrated from a 30-point
+standing-start hardware sweep. `ACCTGT` (0.1s/unit) is a target time-to-1mph, achieved by generalizing the
+the zero-rate starting boundary condition of the ramp to a configurable nonzero initial slope chosen so the ramp
+hits the target tick exactly — both ramp endpoints are algebraically unaffected by this, so
+the calibrated total time of `ACCPCT` to 15mph never changes regardless of `ACCTGT`. `ACCTGT` can only *shorten*
+the onset from its own natural baseline, never push it later. Very aggressive `ACCTGT` values can make the
+ramp briefly non-monotonic later in its climb (confirmed tiny, below display resolution, at the one extreme
+tested).
+
+**Requires a linearized decoder speed table**: the simulation assumes real locomotive speed scales linearly
+with the commanded DCC speed step — this only holds if the decoder own speed-table CVs are themselves
+calibrated linear across the full 0-126 range. A non-linear/uncalibrated decoder speed table will make the
+display diverge from the real locomotive regardless of `SPEED` tuning, since that is a decoder-side
+characteristic entirely outside this codebase.
+
+### Reference: `SPEED` field definitions and tested values
+
+`ACCEL`/`DECEL`/`BRK1-3`/`DELAY` are named after their CV role, but the CV convention itself is inverted
+from what the name suggests — a *bigger* number means *slower*/*weaker* (a time constant, not a rate); that
+is an NMRA convention, not a naming choice made here.
+
+**Momentum CVs (direct decoder mirrors)**
+
+| Item | Default | Tested | What it does | Increase | Decrease |
+|---|---|---|---|---|---|
+| `ACCEL` (CV3) | 60 | 60 | Time to cross the full speed range while speeding up | Slower acceleration | Faster acceleration |
+| `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). **Values above 230 showed non-linear behavior on real decoder hardware during calibration — not recommended; `DECTHR`/`DECPCT` were only validated up to `DECEL=230`.** | Slower coast-down (up to 230) | Faster coast-down |
+| `BRK1` (CV179) | 130 | — | How strongly Brake1 shortens the stop when active — sums with `BRK2`/`BRK3` (capped at 255) | Faster/harder stop | Weaker braking |
+| `BRK2` (CV180) | 70 | — | Same as `BRK1`, second stackable brake | Faster/harder stop | Weaker braking |
+| `BRK3` (CV181) | 100 | — | Same as `BRK1`, third stackable brake | Faster/harder stop | Weaker braking |
+| `DELAY` (CV167) | 13 | — | Mirrors the decoder own programmed prime-mover spool-up time. 0.25s/unit | Longer pause before movement | Shorter pause (0 = none) |
+
+**Display calibration**
+
+| Item | Default | Tested | What it does |
+|---|---|---|---|
+| `MAXSPEED` | 50 | 50 | Real-world scale speed (mph) at speed step 126 — the calibration anchor |
+| `UNIT` | MPH | — | MPH or KMH display |
+
+**Watched-function triggers**
+
+| Item | Default | What it does |
+|---|---|---|
+| `HOLDFN` | F09 | DCC function watched for ESU Drive Hold — display freezes while asserted |
+| `STOPFN` | OFF | DCC function watched to snap the display to 0mph |
+
+**Load simulation (CV103/CV104)**
+
+| Item | Default | What it does |
+|---|---|---|
+| `OPLOAD` | 128 | Scales `ACCEL`/`DECEL` while its watched function is active. 128 = neutral |
+| `OPLOADFN` | OFF | DCC function watched to switch `OPLOAD` on |
+| `PRLOAD` | 128 | Same as `OPLOAD`; wins if both active at once |
+| `PRLOADFN` | OFF | DCC function watched to switch `PRLOAD` on |
+
+**Decoder family**
+
+| Item | Default | What it does |
+|---|---|---|
+| `TYPE` | V5DCC | `V5DCC` (0.896s/unit) or `V4V5MULT` (0.25s/unit) |
+
+**Correction tunables** (hidden behind `ADV FUNC`)
+
+| Item | Default | Tested | What it does |
+|---|---|---|---|
+| `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time) |
+| `ACCTGT` | 5 | 5 | Target time (0.1s/unit) for the display to first show 1mph |
+| `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the steady-state deceleration-lag correction |
+| `DECTHR` | 11 | 11 | Speed (raw step) below which the `DECPCT` correction does not apply |
+
+Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
+`DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
+the shipped compile-time default, not independently re-validated against that locomotive.
+
 ## Firmware versioning
 
 Tags follow `X<major>.<minor>` (e.g. `X1.0`), created only at meaningful milestones — the `X` prefix

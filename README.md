@@ -12,6 +12,9 @@ This is a fork adding:
   ESU LokSound/LokPilot V5 Brake1/2/3) from lever position, in 3-step or 5-step variants.
 - **Two-stage horn ("Horn2")** — a second, independently-calibrated horn function, additive or exclusive
   with the primary horn.
+- **Scale-speed simulation ("SPEED")** — replaces the main screen's fast clock with a locally-computed
+  scale mph/km-h readout modeling ESU LokSound/LokPilot V4/V5 momentum and brake deceleration, so the display stays in
+  visual sync with what the decoder is actually doing.
 
 ## Repo layout
 
