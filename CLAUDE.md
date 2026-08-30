@@ -94,6 +94,9 @@ and its datasheet:
    `pcb/` (which holds the live/editable `.pcb` gEDA PCB files). `mech/` has 3D-printable enclosure parts
    (`.stl`/`.f3d`).
 
+This path is how the light-knob part (E-Switch KC14A10.001NPS) was identified and confirmed as
+break-before-make directly from its datasheet — see "Light-knob debounce" below.
+
 ## Architecture
 
 **`src/mrbw-cst.c` is a single large file** (5,000+ lines) containing `main()`, the main polling loop, the
@@ -143,6 +146,27 @@ terminal-width mental model.
 **`src/mrbus/` is a git submodule** providing the shared MRBus/MRBee packet queue, CRC, and radio driver
 (`mrbee-avr.c`) used across the whole ISE product line. Treat it as vendored/external — it must be fetched
 with `make setup` before building.
+
+## Light-knob debounce
+
+The light knob (front and rear, `cst-hardware.c`) is a detented rotary switch read via a resistor ladder —
+confirmed from its datasheet (E-Switch KC14A10.001NPS) to be "TIMING (BBM) NON-SHORTING"
+(break-before-make): twisting between detents involves a real open-circuit moment where the ADC input
+floats and can transiently read as *any* band, including non-adjacent ones like `LIGHT_OFF`. Since
+`LIGHT_OFF` asserts zero function bits and the classification originally had no filtering, a single bad
+sample got transmitted as-is — a visible dark flicker at the decoder.
+
+Hysteresis was rejected (it only stops oscillation *at* a boundary between adjacent states, not a
+transient landing in a non-adjacent one) in favor of **debounce on the already-classified state**: a new
+`frontLight`/`rearLight` value is only committed (and so only transmitted) once the same classification has
+held for roughly `LIGHT_DEBOUNCE_THRESHOLD + 2` consecutive ADC cycles (~5 with the default of 3 — the
+counter saturates at the threshold, then one further matching read commits); a disagreeing candidate
+reading is held, not acted on, until it either repeats enough times to replace the committed value or
+another reading overrides the candidate. Applied via a candidate+counter static pair per channel inside `processADC()`
+(`ADC_STATE_READ_VLIGHT_F`/`ADC_STATE_READ_VLIGHT_R` in `cst-hardware.c`).
+
+The reverser (`ADC_STATE_READ_VREV`) uses the identical raw-threshold-no-smoothing pattern and could in
+principle exhibit the same class of transient glitch — not reported as an issue, not currently addressed.
 
 ## Firmware versioning
 

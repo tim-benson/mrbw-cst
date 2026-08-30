@@ -4,8 +4,10 @@ Hardware + firmware source for the **MRBW-CST** ("Control Stand Throttle") from
 [Iowa Scaled Engineering](https://www.iascaled.com/) — the wireless throttle sold as the **ProtoThrottle**.
 This fork is **ProtoThrottle X** — the `X` is for *Extensions*.
 
-This is a fork of the stock ISE firmware, versioned as `X<major>.<minor>.<commits>` to keep it distinct
-from any numbering the upstream repo might use — see `CLAUDE.md`, "Firmware versioning," for the scheme.
+This is a fork adding:
+
+- **Headlights debounce** — fixes a brief dark-flicker glitch when twisting the front or rear
+  Headlights knob between detents.
 
 ## Repo layout
 
