@@ -103,6 +103,8 @@ char baseString[9];
 #define BRAKE_CONTROL     0x08
 #define BRAKE_OFF_CONTROL 0x10
 #define THR_UNLK_CONTROL  0x80
+// controls widened to uint16_t for this bit - the low byte (0x01-0x80) is fully allocated
+#define HORN2_CONTROL     0x100
 
 #define HORN_HYSTERESIS   5
 #define BRAKE_HYSTERESIS  5
@@ -196,6 +198,10 @@ uint8_t configBits = CONFIGBITS_DEFAULT;
 // with a 5-STEP config, since no prior firmware ever wrote this bit), 1 = 5-STEP.
 #define OPTIONBITS_STACK_5STEP       5
 
+// Horn2 mode: 0 = Additive (default - Horn2 stacks on top of Horn1 past its own threshold),
+// 1 = Exclusive (Horn2 replaces Horn1 past its own threshold). See evaluation near HORN2_CONTROL's use.
+#define OPTIONBITS_HORN_TYPE         6
+
 #define OPTIONBITS_DEFAULT                 (_BV(OPTIONBITS_ESTOP_ON_BRAKE))
 uint8_t optionBits = OPTIONBITS_DEFAULT;
 
@@ -225,6 +231,7 @@ uint16_t locoAddress = 0;
 #define BRAKE_DEAD_ZONE 5
 
 uint8_t hornThreshold;
+uint8_t hornThreshold2;
 uint8_t brakeThreshold;
 uint8_t brakeLowThreshold;
 uint8_t brakeHighThreshold;
@@ -327,7 +334,7 @@ uint32_t functionForceOff = 0;
 #define UP_OPTION_BUTTON   0x01
 #define DOWN_OPTION_BUTTON 0x02
 
-uint8_t controls = 0;
+uint16_t controls = 0;
 
 // STACK 3-STEP/5-STEP: single shared hysteresis-walk algorithm (evaluateStackBrake() below), parameterized
 // by these 3 small accessors rather than duplicated per variant - the two variants are structurally
@@ -981,6 +988,7 @@ void readConfig(void)
 
 	// Thresholds
 	hornThreshold = eeprom_read_byte((uint8_t*)EE_HORN_THRESHOLD);
+	hornThreshold2 = eeprom_read_byte((uint8_t*)EE_HORN_THRESHOLD2);
 	brakeThreshold = eeprom_read_byte((uint8_t*)EE_BRAKE_THRESHOLD);
 	brakeLowThreshold = eeprom_read_byte((uint8_t*)EE_BRAKE_LOW_THRESHOLD);
 	brakeHighThreshold = eeprom_read_byte((uint8_t*)EE_BRAKE_HIGH_THRESHOLD);
@@ -1096,6 +1104,7 @@ void resetConfig(void)
 
 	// Skip the following, since these are specific to each physical device:
 	//    EE_HORN_THRESHOLD
+	//    EE_HORN_THRESHOLD2
 	//    EE_BRAKE_THRESHOLD
 	//    EE_BRAKE_LOW_THRESHOLD
 	//    EE_BRAKE_HIGH_THRESHOLD
@@ -1365,6 +1374,30 @@ int main(void)
 		else if(hornPosition >= hornThreshold)
 		{
 			controls |= HORN_CONTROL;
+		}
+
+		// Second horn stage - independent threshold+hysteresis, same shape as Horn1 above.
+		// hornThreshold2 == 0xFF means "not calibrated". Horn2 calibration is optional, so treat that
+		// as Horn2 disabled - without this, a full-lever reading (hornPosition can reach 255) would
+		// satisfy "hornPosition >= 0xFF" and spuriously assert HORN2_CONTROL.
+		if(0xFF == hornThreshold2)
+		{
+			controls &= ~(HORN2_CONTROL);
+		}
+		else if(hornPosition <= (hornThreshold2 - HORN_HYSTERESIS))
+		{
+			controls &= ~(HORN2_CONTROL);
+		}
+		else if(hornPosition >= hornThreshold2)
+		{
+			controls |= HORN2_CONTROL;
+		}
+
+		// HORN TYPE = Exclusive: Horn2, if active, suppresses Horn1. Stateless - recomputed fresh every
+		// pass from the two independent checks above, so no mode-switch stale-state guard is needed.
+		if((optionBits & _BV(OPTIONBITS_HORN_TYPE)) && (controls & HORN2_CONTROL))
+		{
+			controls &= ~(HORN_CONTROL);
 		}
 
 		// Sanity check brake position and calculate percentage
@@ -2647,13 +2680,14 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 boolean, 0xFC STACK band editor, 0xFD STACK STEPS toggle, 0xFE BRK TYPE 3-way, 0xFF generic numeric
+					uint8_t bitPosition = 0xFF;  // <8 boolean, 0xFB HORN TYPE 2-way, 0xFC STACK band editor, 0xFD STACK STEPS toggle, 0xFE BRK TYPE 3-way, 0xFF generic numeric
 					// STACK's STEPS toggle + band editors only apply when brake is variable AND BRK TYPE = STACK.
 					uint8_t stackModeActive = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) &&
 					                          (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits));
 					uint8_t editableBandCount = stackModeActive ? (stackBandCount() - 1) : 0;
 					uint8_t estopItem    = 4 + editableBandCount;  // BRK ESTP - fixed at 4 outside STACK mode
 					uint8_t revSwapItem  = 5 + editableBandCount;  // REV SWAP - fixed at 5 outside STACK mode
+					uint8_t hornTypeItem = 6 + editableBandCount;  // HORN TYPE - one past REV SWAP, always shown
 					uint8_t stackEditBand = 0;  // set below when bitPosition == 0xFC
 					enableLCDBacklight();
 					lcd_gotoxy(0,0);
@@ -2704,6 +2738,12 @@ int main(void)
 					{
 						lcd_puts("REV SWAP");
 						bitPosition = OPTIONBITS_REVERSER_SWAP;
+						optionsPtr = &optionBits;
+					}
+					else if(subscreenState == hornTypeItem)
+					{
+						lcd_puts("HORNTYPE");
+						bitPosition = 0xFB;
 						optionsPtr = &optionBits;
 					}
 					else
@@ -2759,6 +2799,20 @@ int main(void)
 						lcd_putc((combo & BK2_CONTROL)   ? '2' : '-');
 						lcd_putc((combo & BK3_CONTROL)   ? '3' : '-');
 					}
+					else if(0xFB == bitPosition)
+					{
+						// HORN TYPE 2-way - fixed 8-char width (fills the whole line) so no leftover
+						// characters remain from whichever string was rendered last. Uses the controller's
+						// built-in arrow glyphs (0x7F/0x7E - same ones the rest of the menu system uses for
+						// navigation cues) instead of literal '<'/'-'/'>' ASCII characters.
+						lcd_gotoxy(0,1);
+						lcd_putc('1');
+						lcd_putc(' ');
+						lcd_putc(0x7F);
+						lcd_putc(0x7E);
+						lcd_putc(' ');
+						lcd_puts((*optionsPtr & _BV(OPTIONBITS_HORN_TYPE)) ? "2  " : "1+2");
+					}
 					else if(optionsPtr == &brakePulseWidth)
 					{
 						lcd_gotoxy(4,1);
@@ -2809,6 +2863,13 @@ int main(void)
 									combos[stackEditBand] = stackComboSequence[(comboIndex + 1) & 0x07];
 									ticks_autoincrement = 0;
 								}
+								else if(0xFB == bitPosition)
+								{
+									// Deterministic set-to (not a flip), same idiom as the STACK STEPS toggle -
+									// avoids autorepeat visibly flickering between the two states.
+									*optionsPtr |= _BV(OPTIONBITS_HORN_TYPE);  // Exclusive ("1<->2")
+									ticks_autoincrement = 0;
+								}
 								else
 								{
 									if(*optionsPtr < 0xFF)
@@ -2850,6 +2911,11 @@ int main(void)
 									while((comboIndex < 7) && (stackComboSequence[comboIndex] != combos[stackEditBand]))
 										comboIndex++;
 									combos[stackEditBand] = stackComboSequence[(comboIndex - 1) & 0x07];
+									ticks_autoincrement = 0;
+								}
+								else if(0xFB == bitPosition)
+								{
+									*optionsPtr &= ~_BV(OPTIONBITS_HORN_TYPE);  // Additive, default ("1<->1+2")
 									ticks_autoincrement = 0;
 								}
 								else
@@ -2945,11 +3011,25 @@ int main(void)
 					}
 					else if(2 == subscreenState)
 					{
+						lcd_puts("HORN2");
+						positionPtr = &hornPosition;
+						thresholdPtr = &hornThreshold2;
+						// Two-stage horn only works if Horn2's threshold sits above Horn1's (a harder
+						// pull crosses Horn2 after Horn1). Flag it if not - non-blocking, just a cue.
+						// 0xFF = uncalibrated, skip.
+						lcd_gotoxy(0,1);
+						if((0xFF != hornThreshold2) && (0xFF != hornThreshold) && (hornThreshold2 <= hornThreshold))
+							lcd_puts("<H1");
+						else
+							lcd_puts("   ");
+					}
+					else if(3 == subscreenState)
+					{
 						lcd_puts("BRAKE");
 						positionPtr = &brakePosition;
 						thresholdPtr = &brakeThreshold;
 					}
-					else if(3 == subscreenState)
+					else if(4 == subscreenState)
 					{
 						lcd_puts("BRAKE");
 						lcd_gotoxy(0,1);
@@ -2957,7 +3037,7 @@ int main(void)
 						positionPtr = &brakePosition;
 						thresholdPtr = &brakeLowThreshold;
 					}
-					else if(4 == subscreenState)
+					else if(5 == subscreenState)
 					{
 						lcd_puts("BRAKE");
 						lcd_gotoxy(0,1);
@@ -3000,6 +3080,7 @@ int main(void)
 							if(SELECT_BUTTON != previousButton)
 							{
 								eeprom_write_byte((uint8_t*)EE_HORN_THRESHOLD, hornThreshold);
+								eeprom_write_byte((uint8_t*)EE_HORN_THRESHOLD2, hornThreshold2);
 								eeprom_write_byte((uint8_t*)EE_BRAKE_THRESHOLD, brakeThreshold);
 								eeprom_write_byte((uint8_t*)EE_BRAKE_LOW_THRESHOLD, brakeLowThreshold);
 								eeprom_write_byte((uint8_t*)EE_BRAKE_HIGH_THRESHOLD, brakeHighThreshold);
@@ -3729,6 +3810,8 @@ int main(void)
 							lcd_putc((controls & BELL_CONTROL) ? BELL_CHAR : ' ');
 							lcd_gotoxy(5, 1);
 							lcd_putc((controls & HORN_CONTROL) ? HORN_CHAR : ' ');
+							lcd_gotoxy(6, 1);
+							lcd_putc((controls & HORN2_CONTROL) ? HORN_CHAR : ' ');
 
 							lcd_gotoxy(7, 1);
 							switch(frontLight)
@@ -4072,6 +4155,9 @@ int main(void)
 						// Advanced functions NOT active
 						if(THRESHOLD_CAL_SCREEN == screenState)
 						{
+							// Horn2's threshold is deliberately NOT in this gate - its calibration is
+							// optional (hornThreshold2 == 0xFF just means Horn2 is disabled), so an
+							// upgraded throttle isn't forced back through THRESHOLD CAL for it.
 							if(	(0xFF != hornThreshold) &&
 								(0xFF != brakeThreshold) &&
 								(0xFF != brakeLowThreshold) &&
@@ -4143,15 +4229,31 @@ int main(void)
 		// Figure out which functions should be on and which should be off
 		functionMask = 0;
 		estopStatus &= ~ESTOP_BUTTON;
+		// FORCE FUNC audition (26199c7): while editing an F## (SELECT-ed into the subscreen), the horn
+		// lever momentarily fires that function instead of HORN_FN/HORN2_FN, so you can try it on the
+		// loco before committing. Both stages do it, so it works across the whole lever travel in
+		// either HORNTYPE mode. The `&& subscreenState` keeps it off the FORCE FUNC landing page,
+		// where functionNumber is stale and nothing on screen shows which function it is.
 		if(controls & HORN_CONTROL)
 		{
-			if(FORCE_FUNC_SCREEN == screenState)
+			if((FORCE_FUNC_SCREEN == screenState) && subscreenState)
 			{
 				functionMask |= (uint32_t)1 << (functionNumber);
 			}
 			else
 			{
 				functionMask |= getFunctionMask(HORN_FN);
+			}
+		}
+		if(controls & HORN2_CONTROL)
+		{
+			if((FORCE_FUNC_SCREEN == screenState) && subscreenState)
+			{
+				functionMask |= (uint32_t)1 << (functionNumber);
+			}
+			else
+			{
+				functionMask |= getFunctionMask(HORN2_FN);
 			}
 		}
 		if(controls & BELL_CONTROL)

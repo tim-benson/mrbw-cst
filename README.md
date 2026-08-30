@@ -10,6 +10,8 @@ This is a fork adding:
   Headlights knob between detents.
 - **STACK brake mode** — a fourth brake mode driving up to three stackable DCC brake functions (e.g.
   ESU LokSound/LokPilot V5 Brake1/2/3) from lever position, in 3-step or 5-step variants.
+- **Two-stage horn ("Horn2")** — a second, independently-calibrated horn function, additive or exclusive
+  with the primary horn.
 
 ## Repo layout
 

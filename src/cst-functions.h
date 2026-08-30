@@ -5,6 +5,7 @@
 typedef enum
 {
 	HORN_FN = 0,
+	HORN2_FN,
 	BELL_FN,
 	BRAKE_FN,
 	BK2_FN,

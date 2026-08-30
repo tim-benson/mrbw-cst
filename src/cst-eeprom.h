@@ -20,6 +20,8 @@
 #define EE_BRAKE_HIGH_THRESHOLD       0x23
 #define EE_PRESSURE_CONFIG            0x24
 #define EE_ALERTER_TIMEOUT            0x25
+//                                    0x26
+#define EE_HORN_THRESHOLD2            0x27
 
 // 20 configs * 128 bytes = 2560 bytes
 //  +128 bytes for global = 2688 bytes
@@ -111,5 +113,9 @@
 #define EE_STACK_BAND_COMBOS_3STEP    (0x42 + CONFIG_OFFSET(WORKING_CONFIG))
 //      EE_STACK_BAND_COMBOS_3STEP     0x43
 //      EE_STACK_BAND_COMBOS_3STEP     0x44
+
+// Horn2 (two-stage horn), per-profile DCC function assignment. hornThreshold2 (the calibration point
+// itself) is global, not per-profile - see EE_HORN_THRESHOLD2 above, alongside EE_HORN_THRESHOLD.
+#define EE_HORN2_FUNCTION             (0x4D + CONFIG_OFFSET(WORKING_CONFIG))
 
 #endif

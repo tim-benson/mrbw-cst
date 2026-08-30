@@ -39,6 +39,7 @@ typedef struct
 
 static FunctionData functions[] = {
 	[HORN_FN]                = {.name = "HORN",     .eeAddr = EE_HORN_FUNCTION},
+	[HORN2_FN]               = {.name = "HORN2",    .eeAddr = EE_HORN2_FUNCTION},
 	[BELL_FN]                = {.name = "BELL",     .eeAddr = EE_BELL_FUNCTION},
 	[BRAKE_FN]               = {.name = "BRAKE",    .eeAddr = EE_BRAKE_FUNCTION},
 	[BRAKE_OFF_FN]           = {.name = "BRK OFF",  .eeAddr = EE_BRAKE_OFF_FUNCTION},
@@ -401,6 +402,7 @@ uint32_t getFunctionMask(Functions functionName)
 void resetFunctionConfiguration(void)
 {
 	functions[HORN_FN].fn = F02_MOM;
+	functions[HORN2_FN].fn = FN_OFF;
 	functions[BELL_FN].fn = F01_MOM;
 	functions[FRONT_DIM1_FN].fn = FN_OFF;
 	functions[FRONT_DIM2_FN].fn = FN_OFF;

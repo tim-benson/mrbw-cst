@@ -170,6 +170,38 @@ another reading overrides the candidate. Applied via a candidate+counter static 
 The reverser (`ADC_STATE_READ_VREV`) uses the identical raw-threshold-no-smoothing pattern and could in
 principle exhibit the same class of transient glitch — not reported as an issue, not currently addressed.
 
+## Two-stage horn ("Horn2")
+
+A second, independently-configurable DCC function (`HORN2_FN`, menu name "HORN2") tied to its own calibrated
+lever position (`hornThreshold2`), with a `HORNTYPE` option (`OPTION_SCREEN`) selecting how it relates to the
+primary horn: Additive, default (Horn2 fires on top of Horn1 once the lever passes Horn2's threshold) or
+Exclusive (Horn2 replaces Horn1). On-screen the option reads `1 ←→ 1+2` (Additive) or `1 ←→ 2` (Exclusive).
+Both thresholds use the standard hysteresis dead-band independently. Exclusive mode is a stateless one-line
+override applied after both independent checks (`controls &= ~HORN_CONTROL` whenever `HORN2_CONTROL` is set
+and `HORNTYPE` is Exclusive) — correct as long as the two calibration points are separated by more than the
+hysteresis margin.
+
+**Calibration is optional.** `hornThreshold2 == 0xFF` — a throttle that never calibrated Horn2, or one
+upgraded from stock firmware — simply means Horn2 is disabled. It is deliberately left out of the
+`THRESHOLD CAL` auto-skip gate (unlike `hornThreshold`/`brakeThreshold*`), so an upgraded throttle is not
+forced back through calibration for it. The HORN2 threshold-calibration subscreen shows a non-blocking
+`<H1` cue whenever the captured `hornThreshold2` sits at or below `hornThreshold` (Horn1's point) — a
+misconfiguration that would let Horn2 fire before Horn1.
+
+**Diagnostic display**: the function-status row of `DIAG_SCREEN` shows `HORN_CHAR` (the stock horn/trumpet icon,
+unchanged) at column 5 when Horn1 is active and the same `HORN_CHAR` at column 6, immediately to its right,
+when Horn2 is active — the two columns are independent, so both can be lit at once.
+
+**FORCE FUNC audition**: the stock feature (upstream `26199c7`) where holding the horn lever in the FORCE
+FUNC menu momentarily fires the on-screen function number — for auditioning it on the loco before forcing
+it on/off — now covers both horn stages and is confined to the F## editing subscreen. Crossing either
+`hornThreshold` or `hornThreshold2` asserts `1 << functionNumber` in place of `HORN_FN` / `HORN2_FN`, so
+the audition works across the whole lever travel in Additive or Exclusive HORNTYPE (Exclusive clears
+`HORN_CONTROL` at full lever, so without the Horn2 branch the audition would otherwise drop out there). On
+the FORCE FUNC landing page (`subscreenState == 0`, not yet SELECT-ed in) the horn behaves normally — the
+`&& subscreenState` guard keeps a stale `functionNumber` from firing, which the original `screenState`-only
+check did not.
+
 ## Brake logic
 
 `brakeState` (`BrakeStates` enum: `BRAKE_LOW_BEGIN` ... `BRAKE_FULL_WAIT`, `mrbw-cst.c`) drives two
@@ -217,7 +249,7 @@ brake-mode dispatch) — not a graft onto the `BrakeStates` state machine, which
 on every call: escalate immediately on crossing a threshold going up, de-escalate only once
 `BRAKE_HYSTERESIS` below that same threshold coming back down — the same dead-band idiom basic on/off mode
 uses at its one boundary, generalized to as many boundaries as the active variant has. All 3 combo bits
-live directly in the `controls` byte — `BRAKE_CONTROL` (reused) for Brake1, `BK2_CONTROL`/
+live directly in the `controls` byte (`uint16_t`) — `BRAKE_CONTROL` (reused) for Brake1, `BK2_CONTROL`/
 `BK3_CONTROL` for Brake2/Brake3. A guard right after the brake-mode dispatch clears
 `BK2_CONTROL`/`BK3_CONTROL` (and resets the sticky `currentStackBand`) whenever STACK is not active. Because
 evaluation resolves however many band-boundaries got crossed within a single call, a fast lever sweep drops
