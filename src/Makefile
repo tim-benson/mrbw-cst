@@ -84,6 +84,7 @@ help:
 	@echo "make clean ..... delete objects and hex file"
 	@echo "make release.... produce release tarball"
 	@echo "make terminal... open up avrdude terminal"
+	@echo "cst_cfgtransfer.py .. export/import loco configs to/from JSON, see cst-cfgtransfer/README.md"
 
 hex: $(BASE_NAME).hex
 	@cp $(BASE_NAME).hex hex/$(BASE_NAME)_v$(REV)_$(GITREV).hex
@@ -95,6 +96,7 @@ hex: $(BASE_NAME).hex
 setup:
 	git submodule init
 	git submodule update
+	git config core.hooksPath .githooks
 
 program: fuse flash
 

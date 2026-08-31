@@ -1,0 +1,10 @@
+#!/bin/sh
+# Local safety net wired up by `make setup` (src/Makefile: `git config core.hooksPath .githooks`).
+# `.git/hooks/` itself is never tracked by git, so a committed-and-wired-up directory like this one is
+# the standard way to share a hook across clones. Bypass with `git commit --no-verify`, same as any hook.
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+python3 "$REPO_ROOT/src/cst-cfgtransfer/check_layout_change_bumps_version.py"

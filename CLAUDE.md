@@ -179,7 +179,8 @@ Exclusive (Horn2 replaces Horn1). On-screen the option reads `1 ←→ 1+2` (Add
 Both thresholds use the standard hysteresis dead-band independently. Exclusive mode is a stateless one-line
 override applied after both independent checks (`controls &= ~HORN_CONTROL` whenever `HORN2_CONTROL` is set
 and `HORNTYPE` is Exclusive) — correct as long as the two calibration points are separated by more than the
-hysteresis margin.
+hysteresis margin. `HORNTYPE` is `optionBits` bit 6 (per-profile); it round-trips through
+`cst_cfgtransfer.py` / `cst_cfgnetwork.py` as `options.horn_type` (`"ADDITIVE"`/`"EXCLUSIVE"`).
 
 **Calibration is optional.** `hornThreshold2 == 0xFF` — a throttle that never calibrated Horn2, or one
 upgraded from stock firmware — simply means Horn2 is disabled. It is deliberately left out of the
@@ -463,6 +464,108 @@ is an NMRA convention, not a naming choice made here.
 Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
+
+## PC tooling
+
+A Python 3, stdlib-only tool manipulates stored loco configurations from a PC rather than the on-device
+menu, via `cst_eeprom_layout.py` (offset/enum constants) and `slot_codec.py` (pure decode/encode/validate,
+no hardware dependency) — a **hand-maintained mirror** of `src/cst-eeprom.h` and the decode logic in
+the decode logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte offsets, not the
+bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The `-h`/`--help`
+output — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` — documents every flag in more
+detail than covered below; check there for the exact current option set.
+
+### `cst_cfgtransfer.py` — ISP-based export/import
+
+`src/cst-cfgtransfer/cst_cfgtransfer.py` exports the throttle stored loco configurations to
+hand-editable JSON files and imports them back, entirely over the ISP programmer (`avrdude`/`iseavrprog`) —
+offline EEPROM manipulation with the chip in the programmer, not a wireless or runtime interface.
+
+```bash
+python3 cst_cfgtransfer.py export --out-dir ~/protothrottle-backups/          # all 20 slots + active + device
+python3 cst_cfgtransfer.py import --slot 5 --dry-run edited-slot05.json       # preview, no hardware write
+python3 cst_cfgtransfer.py import --slot 5 edited-slot05.json                 # write it
+python3 cst_cfgtransfer.py import --dir ~/protothrottle-backups/throttle-42/ --yes  # restore a whole folder
+```
+
+`export --out-dir <dir>` creates/reuses `<dir>/throttle-<mrbus-addr>/` (the MRBus device address is the
+throttle identifier, since the ATmega1284P has no factory-unique ID readable over ISP); the working
+profile exports as `slot00_active_addr*.json` (named `slot00` to group with the numbered slots, still
+targeted with `--active`). Import always reads the full current EEPROM, splices in only the
+explicitly-targeted byte range(s), and writes the full image back, so anything not targeted round-trips
+byte-for-byte unchanged. `avrdude_io.py` is the only module that shells out to `avrdude`;
+`cst_cfgtransfer.py` is the argparse CLI tying the pieces together. The JSON mirrors the on-device
+menus — **one object per config menu**, objects and keys in menu order: a slot is `loco_address` /
+`force_functions` (`{on, off}` — the FORCE FUNC menu, distinct from the CONFIG FUNC `functions`) /
+`functions` / `notch_speedstep` / `speed` / `options` (the OPTIONS menu — brake config plus
+`reverser_swap`/`horn_type`; its meta-field is `unset`); `device.json` is `system` (ADV-FUNC battery
+thresholds) / `comm` / `prefs` (`config_bits` nested here) / `calibration`. `encode_slot` /
+`encode_global` also accept the older pre-schema-2 shapes on import (flat device fields,
+`force_function_on`/`off`, `brake` / `options_unset`). `MenuOrderTests` in `test_slot_codec.py` locks
+the ordering so a `slot_codec.py` change is deliberate.
+
+**CNF format version guard**: since the codec is a hand-maintained mirror, a stale copy of this tool run
+against a newer/older device could silently misdecode. `EEPROM_LAYOUT_VERSION` on the chip is compared
+against the tool supported version (`cst_eeprom_layout.SUPPORTED_LAYOUT_VERSION`, itself parsed from
+`cst-eeprom.h` at import so it always tracks the firmware source tree) before either `export` or `import`
+decodes/encodes anything, hard-refusing on any mismatch. A device running firmware from before this field
+existed reads it as `0xFF` until it boots once with newer firmware (`readConfig()` self-heals it on every
+boot).
+
+**`--import-old`**: restores a backup exported under an older schema (e.g. taken just before an
+`EEPROM_LAYOUT_VERSION` bump that added a field) by defaulting any field absent from the file instead of
+rejecting it outright — functions default to `RAW:0xFF` (the same byte a never-written function already
+decodes to), speed fields default to `"UNSET"` (letting `readByteOrDefault()` self-heal on next boot). A
+field that is *present* but invalid is still always a hard error regardless of this flag, and a whole
+missing top-level category (no `"functions"` object at all) is still always a hard error too.
+
+**`dump` / `wipe`**: `dump` is a raw EEPROM readback (hex summary, or `--out FILE` for the full 4096-byte
+image), with no decode and — unlike `export`/`import` — no version gate, so it works against a chip whose
+format this tool would otherwise refuse. `wipe` factory-blanks the EEPROM (every byte `0xFF`) and is also
+un-gated (a wipe is *how* you recover from a version mismatch). It deliberately avoids the `eeprom:w` path
+— a full all-`0xFF` image write hits the exact reliability quirk below — and instead clears the HFUSE
+`EESAVE` bit (`0xD1`→`0xD9`), does a chip erase (which then wipes EEPROM as a side effect), and restores
+`EESAVE`. The restore runs on every exit path and is verified; `blank_eeprom_via_fuse_toggle()` raises
+`EepromWipeError` with the manual-recovery command if it ever fails to put `EESAVE` back, since a cleared
+`EESAVE` would make an ordinary `make flash` wipe the throttle config too. `wipe` erases flash as well —
+the throttle needs re-flashing afterward.
+
+**EEPROM write reliability**: `import` retries the whole write up to 3 times on failure — see
+the module docstring of `avrdude_io.py` for the full story, including a confirmed driver-level mechanism
+(the EEPROM write path of `iseavrprog`/`usbtiny` has a much narrower timing margin than flash, with no retry on
+a dropped USB transfer) and a real-hardware finding that a marginal ISP USB cable was a major contributor
+too — a cable swap took one machine from 3 retries in 4 writes down to 0 in 8. The mitigations here stay in
+place regardless, since this tool has no way to know the cable/port/programmer quality of another user in
+advance. A printed `attempt N/3 failed, retrying...` during a write is expected, not a sign of broken
+hardware; only a failure across all 3 attempts is worth investigating. If every attempt fails, `import`
+reads the chip back and reports exactly which targeted item(s), if any, ended up inconsistent, rather than
+leaving the state ambiguous. A run of failed writes can also make the *next* `avrdude` call hang
+indefinitely (confirmed on real hardware); every `avrdude` call therefore has a 90-second hard timeout, so
+this always surfaces as a clean, immediate error instead of an unbounded hang. This is not a lasting
+hardware fault — no physical power-cycle is needed to recover, just retry the operation (confirmed on real
+hardware: a flash write and a plain EEPROM read both succeeded immediately right after a timeout, with
+nothing unplugged in between).
+
+### Maintenance checklist — follow whenever the EEPROM layout changes
+
+New field, moved offset, or repurposed byte in `cst-eeprom.h`:
+
+1. Add/change the field in `src/cst-eeprom.h` and wire up `readConfig()`/save-path code in `mrbw-cst.c`.
+2. Mirror the same offset/type/decode logic in `cst_eeprom_layout.py` and the
+   `decode_slot()`/`decode_global()`/`encode_slot()`/`encode_global()`.
+3. Bump `EEPROM_LAYOUT_VERSION` in `cst-eeprom.h` — the Python tooling parses that `#define` at import
+   (`cst_eeprom_layout._read_firmware_layout_version()`), so there is no second copy to keep in step.
+4. Add/update the corresponding fixture in `src/cst-cfgtransfer/tests/test_slot_codec.py` (run via
+   `python3 -m unittest discover tests` from `src/cst-cfgtransfer/`, no hardware needed).
+5. Update the field reference in `src/cst-cfgtransfer/README.md` if the field introduces new JSON
+   vocabulary.
+
+One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
+followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped
+`EEPROM_LAYOUT_VERSION` at all, by diffing the `#define` set of `cst-eeprom.h` against its previous committed
+state. It cannot catch a change that reinterprets what an existing, unmoved byte value *means* (a new
+enum numbering, repurposed bits) without changing its offset — that class of drift is only caught by
+careful review, or by the targeted per-field regression tests in `test_slot_codec.py`.
 
 ## Firmware versioning
 

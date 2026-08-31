@@ -4,6 +4,15 @@
 #define EE_VERSION_MAJOR              0x0E
 #define EE_VERSION_MINOR              0x0F
 
+// EEPROM *layout* version, independent of EE_VERSION_MAJOR/MINOR above (those are parsed from
+// VERSION_STRING/git describe --tags, which stays a degenerate ".0+" on a checkout with no tags - not a
+// usable signal for this). EEPROM_LAYOUT_VERSION is a plain hand-bumped integer, incremented only when
+// the EEPROM layout itself changes (new field, moved offset, repurposed byte) - written unconditionally
+// into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
+// (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
+// silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
+#define EEPROM_LAYOUT_VERSION          1
+
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
 #define EE_DEAD_RECKONING_TIME        0x12
@@ -20,7 +29,7 @@
 #define EE_BRAKE_HIGH_THRESHOLD       0x23
 #define EE_PRESSURE_CONFIG            0x24
 #define EE_ALERTER_TIMEOUT            0x25
-//                                    0x26
+#define EE_LAYOUT_VERSION             0x26
 #define EE_HORN_THRESHOLD2            0x27
 
 // 20 configs * 128 bytes = 2560 bytes

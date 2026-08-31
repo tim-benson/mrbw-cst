@@ -15,12 +15,16 @@ This is a fork adding:
 - **Scale-speed simulation ("SPEED")** — replaces the main screen's fast clock with a locally-computed
   scale mph/km-h readout modeling ESU LokSound/LokPilot V4/V5 momentum and brake deceleration, so the display stays in
   visual sync with what the decoder is actually doing.
+- **Offline loco-config export/import (cfgtransfer)** — `cst_cfgtransfer.py`, a Python 3 stdlib-only
+  tool to back up and hand-edit stored loco profiles as JSON over the ISP programmer, with the firmware
+  not running.
 
 ## Repo layout
 
-`src/` is the only directory with code in the normal sense — the AVR firmware. Everything else (`sch/`,
-`pcb/`, `fp/`, `sym/`, `mech/`, `doc/`, `pg/`) is gEDA schematic/PCB CAD, 3D-printable parts, and
-datasheets/manuals for the physical hardware.
+`src/` is the only directory with code in the normal sense — the AVR firmware, plus a Python PC tool
+(`cst-cfgtransfer/`) for offline loco-configuration backup/restore. Everything else (`sch/`, `pcb/`, `fp/`,
+`sym/`, `mech/`, `doc/`, `pg/`) is gEDA schematic/PCB CAD, 3D-printable parts, and datasheets/manuals for
+the physical hardware.
 
 ## Build / flash quick start
 

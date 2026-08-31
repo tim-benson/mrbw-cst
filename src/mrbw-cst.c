@@ -890,6 +890,11 @@ void readConfig(void)
 	if(eeprom_read_byte((uint8_t*)EE_VERSION_MINOR) != minor)
 		eeprom_write_byte((uint8_t*)EE_VERSION_MINOR, minor);
 
+	// EEPROM layout version, independent of the git-tag-derived major/minor above - see the comment by
+	// EEPROM_LAYOUT_VERSION's definition in cst-eeprom.h. Lets offline tooling detect a layout mismatch.
+	if(eeprom_read_byte((uint8_t*)EE_LAYOUT_VERSION) != EEPROM_LAYOUT_VERSION)
+		eeprom_write_byte((uint8_t*)EE_LAYOUT_VERSION, EEPROM_LAYOUT_VERSION);
+
 
 	update_decisecs = (uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_L) | (((uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_H)) << 8);
 	if(update_decisecs < UPDATE_DECISECS_MIN)
