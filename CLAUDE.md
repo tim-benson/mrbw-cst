@@ -465,15 +465,115 @@ Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=5
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
 
+## Shared network CNF store
+
+Lets one loco CNF (configuration profile: DCC function assignments, brake/STACK settings, notch table,
+speed/momentum CVs — the existing 128-byte slot format) be shared wirelessly across multiple ProtoThrottle
+units, instead of requiring physical ISP access to hand-copy JSON between them. **`mrbw-cabbus`** (the
+sibling NCE Cab Bus gateway repo) is the authoritative store, since it is already layout infrastructure
+since it is already layout infrastructure that is powered whenever the layout is. Holds 20 independent network slots (`N01`-`N20`).
+
+No usable time/versioning concept exists anywhere in this firmware family (the fast clock has no date
+fields and is never persisted), so sync uses simple **last-write-wins with no version/generation checking
+enforced** — two throttles saving the same network slot in the same short window will silently have the
+second write win, with no warning to either user. An accepted tradeoff for a low-frequency,
+likely-single-active-editor use case; a generation-counter byte is reserved in the storage layout for a
+possible future optimistic-concurrency conflict *detection* pass.
+
+**Wire protocol**: `'C'`(push, write)/`'D'`(pull, read), one transfer in flight at a time, `BEGIN`→`DATA`
+(×N, 10 payload bytes/chunk)→`COMMIT`(push)/`DONE`(pull) — 13 chunks for the full 128-byte CNF. Push stages
+into a scratch buffer on the receiver and only commits on a matching whole-payload CRC16. Pull snapshots
+the live entry into its own read-scratch buffer at `BEGIN` time (not read live per chunk), so a concurrent
+push from a different throttle cannot hand a puller a torn mix of pre-/post-push bytes; the throttle
+verifies CRC16 locally once all chunks arrive. Busy-locking is table-wide (one transfer across the whole
+table at a time); a `BEGIN` from a different source while busy is refused; no activity for 3s unilaterally
+clears busy state so a throttle that loses power/range mid-transfer cannot wedge the store. Per-chunk ack
+timeout is 300ms/3 retries; COMMIT gets its own larger 800ms budget, since it triggers a real ~132-byte
+EEPROM write (~3.3ms/byte) before it can even queue its reply. These are bench-tuning starting points, not
+precision-measured values.
+
+**Throttle-side UI**: the slot picker of `LOAD_CONFIG_SCREEN`/`SAVE_CONFIG_SCREEN` gained `N01`-`N20` entries
+immediately below local slot 1, using a disjoint internal range decoupled from on-screen order — a
+deliberately distinct zone so there is always a visible cue that a LOAD/SAVE here does a network
+round-trip. Needs zero new EEPROM fields on the throttle side — addressing reuses the existing "base
+station" field as the sync target. Each `N` entry shows a loco-ID preview (`"N01:1823"`-style) before
+committing to LOAD/SAVE, via a lightweight peek query rather than a full pull; the query is gated behind a
+settle delay on UP/DOWN movement so rapidly stepping through the range does not spam the radio or freeze
+the throttle at every slot crossed. While the peek is in flight the `Nnn:` line runs an animated dot field
+(`.`→`..`→`...`→`....`), so a slow or unreachable receiver reads as "working" rather than a frozen screen.
+`cst-sync.c`/`.h` (`syncPushSharedCnf()`/`syncPullSharedCnf()`/
+`syncQuerySharedLocoAddress()`) is the throttle-side client, following the existing modular `cst-*.c`
+convention.
+
+**Storage (mrbw-cabbus side)**: `cnf-store.c`/`.h` own a dedicated EEPROM table (`cabbus-eeprom.h`) — 20
+entries × 196 bytes (4-byte header + 192-byte payload reservation). Each entry: a key byte (occupied/
+unused), a generation counter (reserved, unenforced), a stored CRC16, then the opaque payload — mrbw-cabbus
+never parses the payload itself. The payload reservation (192 bytes) deliberately exceeds the current
+128-byte slot format, so an ordinary future field addition can reach this store without the table needing
+to be resized/reflashed.
+
+**CNF format version guard**: a table-wide pin (ahead of every entry, never moved) records which
+throttle-side `EEPROM_LAYOUT_VERSION` every currently-stored entry payload was written under, and its
+real length. A push `BEGIN` carries the `EEPROM_LAYOUT_VERSION` of the pushing throttle; compared against the
+pin: unset or strictly higher → accepted, and on COMMIT wipes every *other* entry and advances the pin
+(there is no per-entry version tracking, so this is the only safe choice once a newer format is accepted);
+equal → ordinary accept; strictly lower → refused immediately, before any `DATA` traffic. This means an
+ordinary future field addition needs only an `EEPROM_LAYOUT_VERSION` bump on the throttle side — the next
+push from updated firmware auto-advances the pin, no receiver reflash required. A receiver reflash is only
+forced by a change to the wire protocol framing itself, or the payload outgrowing 192 bytes. A separate,
+structural `CNF_TABLE_LAYOUT_VERSION` (the table own byte shape) is distinct from this payload-version
+pin; a mismatch there means the firmware cannot trust the table shape at all, so it wipes everything
+before self-healing.
+
+On the throttle, `SAVE CNF` to a network entry first peeks the pinned version (`syncPeekSharedVersion()`);
+that peek is a hard gate for the destructive path. If it fails (timeout, busy, protocol error) the SAVE is
+refused with a `CHECK` / `RETRY` screen — the firmware will not push blind, since it cannot then tell whether
+the push would advance the pin. If the peek succeeds and the pin is unset or older than the `EEPROM_LAYOUT_VERSION` of this throttle,
+`EEPROM_LAYOUT_VERSION`, a two-stage "UPGRADE" / "WIPE N01-20?" confirmation runs before the real push, so
+the operator is warned before every other stored network slot gets wiped. A dedicated `SUBTYPE_RESET`
+command (`reset-cabbus` in `cst_cfgnetwork.py`) does an immediate whole-table wipe + pin clear, independent
+of any version comparison, for a deliberate human-triggered reset.
+
+**Only real throttle firmware may advance the pin.** `cst_cfgnetwork.py import` refuses outright — before
+touching any entry — whenever the peeked pin is unset or strictly lower than its own
+`SUPPORTED_LAYOUT_VERSION`, rather than offering to push and advance it itself. The reason: the PC tool
+`SUPPORTED_LAYOUT_VERSION` tracks the same source tree the firmware does, not what is actually flashed to
+any physical throttle in the field — it can drift ahead of every deployed throttle from nothing more than a
+source update, no reflash required. If the tool could advance the pin on that basis, a routine tool update
+run before any throttle had been upgraded could push the whole network store to a version nothing deployed
+understands, disabling `N01`-`N20` network-wide until every throttle was individually reflashed. This is a
+policy enforced by the tool, not something the wire protocol itself can verify — the low-level
+low-level `push_entry()` still accepts an arbitrary version number, which remains useful for testing the
+on-device upgrade flow without a special firmware build.
+
+**Untested**: the two-throttle case (a second unit pulling a CNF the first pushed) and the failure-path
+case (receiver unreachable/powered off mid-sync) — both blocked on multi-unit hardware availability.
+
+## Removed: ACCEPT DOWNLOAD / wireless EEPROM write
+
+Stock ISE firmware answers an inbound MRBee `'W'` (EEPROM Extended Write) packet by writing the requested
+bytes straight into EEPROM, gated only by an `enableEepromWrite` flag that the on-device `COMM CFG` →
+`ACCEPT DOWNLOAD` subscreen sets while it is on screen (ISE added that interlock in 2021; before it, `'W'`
+writes were unconditional). The menu item is in the ISE menu-map but undocumented in the user manual, and no
+ISE or fork tool drives it — `cst_cfgtransfer.py` (ISP) and this shared network CNF store (`'C'`/`'D'`)
+together cover offline and wireless config transfer with real integrity checking.
+
+This fork removes the `ACCEPT DOWNLOAD` subscreen and the entire `'W'` packet handler. A `'W'` packet is
+now unmatched in `PktHandler()` and silently dropped — no `'w'` reply, no write. Wireless EEPROM **reads**
+(`'R'`, ungated, used by generic MRBus tooling) and every other stock wire behaviour are unchanged. The
+`'C'`/`'D'` CNF path is independent of `'W'` in every respect: different packet type, its own direct
+`eeprom_write_block()` after a whole-payload CRC16 check, never routed through `PktHandler()` on the
+throttle.
+
 ## PC tooling
 
-A Python 3, stdlib-only tool manipulates stored loco configurations from a PC rather than the on-device
-menu, via `cst_eeprom_layout.py` (offset/enum constants) and `slot_codec.py` (pure decode/encode/validate,
-no hardware dependency) — a **hand-maintained mirror** of `src/cst-eeprom.h` and the decode logic in
-the decode logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte offsets, not the
-bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The `-h`/`--help`
-output — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` — documents every flag in more
-detail than covered below; check there for the exact current option set.
+Two Python 3, stdlib-only tools manipulate stored loco configurations from a PC rather than the on-device
+menu. Both share `cst_eeprom_layout.py` (offset/enum constants) and `slot_codec.py` (pure decode/encode/
+validate, no hardware dependency) — a **hand-maintained mirror** of `src/cst-eeprom.h` and the decode
+the decode logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte offsets,
+not the bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The
+`-h`/`--help` output — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` — documents every
+flag in more detail than covered below; check there for the exact current option set.
 
 ### `cst_cfgtransfer.py` — ISP-based export/import
 
@@ -546,6 +646,72 @@ hardware fault — no physical power-cycle is needed to recover, just retry the 
 hardware: a flash write and a plain EEPROM read both succeeded immediately right after a timeout, with
 nothing unplugged in between).
 
+### `cst_cfgnetwork.py` — wireless PC access to the shared network CNF store
+
+`src/cst-cfgnetwork/cst_cfgnetwork.py` lets a PC export/import loco configurations to/from the
+shared network CNF store (`N01`-`N20`, see "Shared network CNF store" above) directly over a USB-attached
+XBee radio — no physical throttle and no ISP access to any device needed. It imports `slot_codec.py`/
+`cst_eeprom_layout.py` directly from `cst-cfgtransfer/` rather than duplicating the codec, since the
+128-byte network-entry payload is byte-identical to a local slot.
+
+`src/cst-cfgnetwork/cnf_radio_io.py` is a from-scratch, Python-3-only implementation of XBee API-frame
+escaping/framing, MRBus CRC16, and the full `'C'`/`'D'` `BEGIN`/`DATA`/`COMMIT`/`DONE` client state machine
+(`pull_entry()`/`push_entry()`/`peek_loco_address()`), plus two helpers that are not part of the `'C'`/`'D'`
+protocol: `discover_nodes()` (an MRBus presence-ping sweep) behind the `discover` subcommand, and
+`sniff()` + `decode_cst_status()` (a passive, read-only radio listener that decodes the throttle status
+`'S'` packet — loco/direction/speed step/function mask/status flags/battery, and with `--cnf` the
+shared-CNF `'C'`/`'D'` transfer packets too, via `format_cnf_packet()`) behind the `sniff` subcommand.
+Requires a spare XBee3 module joined to the same PAN as the throttle/receiver radios, such as the
+`ckt-xbee` USB-to-XBee adapter.
+
+```bash
+python3 cst_cfgnetwork.py discover --port /dev/cu.usbserial-XXXX --my-addr 0x3F
+python3 cst_cfgnetwork.py sniff --my-addr 0x3F --changes
+python3 cst_cfgnetwork.py list --cabbus-addr 0xD0
+python3 cst_cfgnetwork.py export --entry 1 --out-dir ~/protothrottle-backups/
+python3 cst_cfgnetwork.py import --entry 20 --dry-run edited.json
+python3 cst_cfgnetwork.py reset-cabbus --out-dir ~/protothrottle-backups/pre-reset/
+```
+
+`discover` merges two mechanisms: a broadcast ping (finds throttles, which honor broadcast addressing) plus
+a unicast sweep of the whole base-station address range `0xD0`-`0xEF` (finds receivers, which — like real
+MRBus/MRBee nodes generally — silently drop broadcast packets; only 32 addresses, so a full sweep is cheap).
+The sweep never stops at the first hit, since a layout may have more than one receiver. `sniff` opens no
+transfer at all — it just prints CRC-valid packets as they arrive, decoding the throttle `'S'` status
+packet; `--changes` collapses the ~1 Hz status stream to one line per actual state change (the view for
+catching a transient glitch such as a light-knob flicker), `--status-only` drops non-`'S'` traffic,
+`--cnf` decodes the `'C'`/`'D'` push/pull packets (`BEGIN`/`DATA`/`COMMIT`/`DONE`, entry, offset,
+status) instead of the raw-hex fallback — the view for watching a `SAVE`/`LOAD CNF` transfer. `list`
+gives a fast all-20-entries loco-address overview via `peek_loco_address()` with no full pulls. The default
+integrity check is the same COMMIT CRC gate the push itself already uses on the receiver side; `--verify` adds an opt-in
+pull-and-diff. `export --dir`-style batch imports auto-skip `NONE`/never-configured stub entries (an
+un-decodable-back all-`0xFF` payload) rather than aborting the whole batch on the first one, but a single
+explicitly-named file pointed straight at a stub still errors, since silently doing nothing for the one thing
+explicitly requested would be worse than the error.
+
+If a queried receiver is reachable but running firmware without the shared CNF store (stock ISE firmware,
+or any build predating `cnf-store.c`), every real CNF command times out on its first request — from the
+radio side this looks identical to a dead link or wrong address. `probe_address()` (the same unicast-ping
+primitive the `discover` sweep uses) is fired once, supplementarily, whenever the failing step of a timeout
+is `BEGIN` or `reset`, to distinguish "answers ping but not `BEGIN`" (reachable, incompatible firmware) from
+"answers nothing at all" (not reachable — wrong address, dead radio link, or powered off), reported as two
+distinct clear messages rather than one generic timeout.
+
+**CNF format version guard**: `export`/`list`/`import` each peek the shared network table version pin
+before touching any entry — `export` aborts early on a mismatch, `list` tags each row individually, and
+`import` refuses outright if the pin is unset or behind the tool own `SUPPORTED_LAYOUT_VERSION`. Unlike
+`cst_cfgtransfer.py`, this tool is never allowed to *advance* the pin itself — only real throttle firmware
+may (see "Shared network CNF store" above for the full policy and why).
+
+**`--import-old`**: same flag and `slot_codec.py` defaulting behavior as the `--import-old` flag of
+`--import-old` above — restores a backup exported under an older schema by defaulting any field absent
+from the file rather than rejecting it.
+
+**`reset-cabbus`**: wipes the whole shared network CNF table and clears the version pin via the wire
+protocol `SUBTYPE_RESET` (see "Shared network CNF store" above) — a deliberate, human-triggered reset,
+not something any version mismatch triggers automatically. Backs up all 20 entries by default (`--out-dir`
+required unless `--skip-backup`), reusing the same output-folder convention `export` already uses.
+
 ### Maintenance checklist — follow whenever the EEPROM layout changes
 
 New field, moved offset, or repurposed byte in `cst-eeprom.h`:
@@ -583,3 +749,55 @@ prefix) fits the 8-column LCD in the worst case (`"X9.9.999"` = exactly 8 charac
 of the outgoing MRBus `'v'` status-query response packet — past 255 commits since a tag, that wire-protocol
 byte wraps. Neither this repo nor `mrbw-cabbus` reads/consumes that field from a `'v'` packet today, so
 this is a low-priority, wire-protocol-only quirk rather than a live bug.
+
+## Compatibility: mixing stock ISE firmware with this fork on the same layout
+
+A real deployment will often have a mix of throttles/receivers on different firmware vintages during a
+rollout. This matters most for the shared network CNF store (`'C'`/`'D'` packets), since that is the one
+feature added to the wire protocol of *both* repos. Everything else (DCC status relay, fast clock, EEPROM
+read, ping, version query) is unchanged from stock and was never a compatibility question; the one stock
+behaviour this fork *drops* is the `'W'` wireless-EEPROM-write handler (see "Removed: ACCEPT DOWNLOAD"
+above) — a fork throttle silently ignores a `'W'` packet instead of writing, never a hazard to anything.
+
+**Stock throttle + the receiver of this fork: fully compatible, no caveats.** `PktHandler()` in
+`mrbw-cabbus.c` calls `cnfStoreHandlePacket()` first on every packet, but the first line of that function is
+`if(CNF_PKT_TYPE_PUSH != type && CNF_PKT_TYPE_PULL != type) return 0;` — i.e. `'C'`/`'D'` only. A stock
+throttle never transmits `'C'`/`'D'`, so this is a no-op on every packet it sends; dispatch falls through
+to the unmodified chain exactly as before the CNF store existed.
+
+**The throttle of this fork + stock receiver: fully compatible for everything except network slots, which fail
+cleanly.** All normal operation (DCC relay, status, clock, local slots 1-20) is untouched. Attempting `SAVE
+CNF`/`LOAD CNF` against an `N01`-`N20` entry sends a `'C'`/`'D'` `BEGIN` that a stock receiver silently
+drops (no reply, no NACK); `cst-sync.c` retries 3× at 300ms and returns a timeout after ~900ms, shown
+on-device as a clear, bounded `TIMEOUT` / `NO REPLY` screen — not a hang, not corruption, not a silent
+no-op.
+
+**`cst_cfgtransfer.py` + stock receiver: not applicable — no interaction at all.** This tool is ISP-only;
+it never talks to a receiver over the radio, so receiver firmware version is irrelevant to it.
+
+**`cst_cfgnetwork.py` + stock receiver: reachable, but every CNF command fails — diagnosed clearly rather
+than as a generic timeout.** See "PC tooling" above.
+
+**Net takeaway**: the shared network CNF store was built to degrade gracefully in both directions — a
+version mismatch or a firmware-generation mismatch is always a clean, bounded failure on whichever side
+lacks the feature, never a corruption, hang, or silent misinterpretation of an unrelated packet. Nothing
+about normal DCC operation is ever put at risk by a partial firmware rollout.
+
+## Design decisions not carried into the codebase
+
+**Per-loco speed broadcast (reverted)**: an earlier design had `mrbw-cabbus` broadcast each tracked loco
+commanded speed onto MRBus as a new packet type, received here and displayed on the main screen. Built and
+confirmed working on real hardware, then reverted the same day — not due to a defect. This throttle already
+has zero-latency access to its own commanded speed (the same values used to build its own outgoing status
+packet), which is the same input any speed/momentum model needs, for the one use case that mattered:
+showing the speed of the loco it is currently driving. Computing it locally (see the `SPEED` section above)
+is strictly better than a wireless round trip through the gateway — lower latency, no dependency on that
+gateway being present or in range.
+
+**mrbw-wifi as an alternate shared-network-CNF-store host (evaluated, not implemented)**: `mrbw-wifi` (an
+ESP32-S2 MRBus↔WiFi bridge) was evaluated from source as a second possible host for the shared network CNF
+store, alongside `mrbw-cabbus`. Architecturally sound and arguably a better long-term host (no throttle-side
+change needed at all, and ample flash/RAM headroom), but a genuine from-scratch port rather than a
+code-reuse job, with the storage-placement question (a dedicated flash partition vs. the existing FAT
+partition already used for `config.txt`, which is also exposed raw over USB and so has a real dual-writer
+hazard) left open. Not implemented — blocked on hardware availability to test against.

@@ -46,6 +46,7 @@ LICENSE:
 #include "cst-time.h"
 #include "cst-math.h"
 #include "cst-speed.h"
+#include "cst-sync.h"
 
 //#define FAST_SLEEP
 #ifdef FAST_SLEEP
@@ -57,6 +58,29 @@ LICENSE:
 #define BUTTON_AUTOINCREMENT_10MS_TICKS    50
 #define BUTTON_AUTOINCREMENT_ACCEL         10
 #define BUTTON_AUTOINCREMENT_MINIMUM        5
+
+// LOAD/SAVE CNF picker's N01-N20 loco-address preview settle delay - the query it fires
+// (syncQuerySharedLocoAddress()) is a blocking radio round-trip, so firing it on every single UP/DOWN
+// step during a fast sweep across many shared slots would freeze the throttle for a beat at each one.
+// sharedQuerySettleTicks (reset on every UP/DOWN move into/within the shared range) must reach this
+// many 10ms ticks with no further move before the query is allowed to fire at all - a fast sweep across
+// N slots then never fires it until navigation actually comes to rest on one.
+#define SHARED_QUERY_SETTLE_10MS_TICKS     60
+
+// LOAD/SAVE CONFIG's newConfigNumber selector: 1..MAX_CONFIGS are ordinary local slots (unchanged), sitting
+// above 20 shared/network CNF slots on mrbw-cabbus - a distinct value range, not repurposed local slots, so
+// existing slot data is never silently reinterpreted. Positioned below slot 1 (not above slot MAX_CONFIGS)
+// so shared slot 1 (displayed "N01") has exactly one local neighbor (slot 1) - UP always moves further into
+// local slots 1..MAX_CONFIGS, DOWN from slot 1 reaches N01 first, continuing deeper through N02..N20 (the
+// floor). Raw numeric value order intentionally does NOT match traversal direction here (see the zone-aware
+// UP_BUTTON/DOWN_BUTTON handling in the picker) - local slots keep values 1..MAX_CONFIGS completely
+// unchanged, so no existing CONFIG_OFFSET()/local-slot code needed to change. See CLAUDE.md, "Shared
+// network CNF store".
+#define SHARED_CONFIG_BASE                (MAX_CONFIGS + 1)                          // N01 = entry 0
+#define SHARED_CONFIG_COUNT               20
+#define SHARED_CONFIG_MAX                 (SHARED_CONFIG_BASE + SHARED_CONFIG_COUNT - 1)  // N20 = entry 19
+#define IS_SHARED_CONFIG(n)                ((n) >= SHARED_CONFIG_BASE)
+#define SHARED_CONFIG_ENTRY(n)             ((n) - SHARED_CONFIG_BASE)                // 0-19
 
 #define SLEEP_TMR_RESET_VALUE_MIN           1
 #define SLEEP_TMR_RESET_VALUE_DEFAULT       5
@@ -228,8 +252,6 @@ uint8_t mrbus_base_addr = 0;
 
 uint8_t lastRSSI = 0xFF;
 
-uint8_t enableEepromWrite = 0;
-
 uint16_t locoAddress = 0;
 
 #define BRAKE_DEAD_ZONE 5
@@ -246,6 +268,7 @@ uint8_t notchSpeedStep[8];
 
 volatile uint16_t button_autoincrement_10ms_ticks = BUTTON_AUTOINCREMENT_10MS_TICKS;
 volatile uint16_t ticks_autoincrement = BUTTON_AUTOINCREMENT_10MS_TICKS;
+volatile uint8_t sharedQuerySettleTicks = SHARED_QUERY_SETTLE_10MS_TICKS;
 
 volatile uint8_t ticks;
 volatile uint16_t decisecs = 0;
@@ -600,44 +623,6 @@ void PktHandler(void)
 		txBuffer[MRBUS_PKT_TYPE] = 'a';
 		mrbusPktQueuePush(&mrbeeTxQueue, txBuffer, txBuffer[MRBUS_PKT_LEN]);
 		goto PktIgnore;
-	} 
-	else if ('W' == rxBuffer[MRBUS_PKT_TYPE]) 
-	{
-		// EEPROM Extended WRITE Packet
-		// [dest][src][len][crcL][crcH]['W'] [addrL][addrH] [data0] ... [dataN]
-		// [dest][src][len][crcL][crcH]['w'] [addrL][addrH] [data0] ... [dataN]
-		// Write up to 12 bytes to EEPROM starting at {addrH,addrL}
-		// Number of bytes actually written determined by len
-		// Background write, values are not automatically reloaded
-		uint8_t pktPtr;
-		uint16_t eepAddr = ((uint16_t)rxBuffer[7] * 256) + rxBuffer[6];
-
-		// Reset the timeout if we're doing read/write stuff
-		ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-		{
-			sleepTimeout_decisecs = sleep_tmr_reset_value;
-		}
-
-		txBuffer[MRBUS_PKT_DEST] = rxBuffer[MRBUS_PKT_SRC];
-		txBuffer[MRBUS_PKT_SRC] = mrbus_dev_addr;
-		txBuffer[MRBUS_PKT_LEN] = rxBuffer[MRBUS_PKT_LEN];
-		txBuffer[MRBUS_PKT_TYPE] = 'w';
-
-		if(enableEepromWrite)
-		{
-			for(pktPtr = 0; pktPtr < (rxBuffer[2] - 8); pktPtr++)
-			{
-				eeprom_write_byte((uint8_t*)(eepAddr + pktPtr), rxBuffer[8+pktPtr]);
-			}
-		}
-		txBuffer[6] = rxBuffer[6];  // Reflect starting addr
-		txBuffer[7] = rxBuffer[7];
-		for(pktPtr = 0; pktPtr < (rxBuffer[2] - 8); pktPtr++)
-		{
-			txBuffer[8+pktPtr] = eeprom_read_byte((uint8_t*)(eepAddr + pktPtr));
-		}
-		mrbusPktQueuePush(&mrbeeTxQueue, txBuffer, txBuffer[MRBUS_PKT_LEN]);
-		goto PktIgnore;	
 	}
 	else if ('R' == rxBuffer[MRBUS_PKT_TYPE]) 
 	{
@@ -858,6 +843,9 @@ ISR(TIMER0_COMPA_vect)
 
 	if(ticks_autoincrement < button_autoincrement_10ms_ticks)
 			ticks_autoincrement++;
+
+	if(sharedQuerySettleTicks < SHARED_QUERY_SETTLE_10MS_TICKS)
+		sharedQuerySettleTicks++;
 }
 
 // 0xFF is EEPROM's erased/never-written state - on a chip that was flashed before a given field
@@ -1301,6 +1289,83 @@ void init(void)
 	DDRB |= _BV(PB3);
 }
 
+// Row-1 columns 4-7 for the shared-CNF picker's "working" animation: `dots` (1..4) dots, rest blank.
+// Same dot idiom the local LOAD/SAVE screen already uses to look busy.
+static void printCnfDots(uint8_t dots)
+{
+	uint8_t i;
+	lcd_gotoxy(4, 1);
+	for(i = 0; i < 4; i++)
+		lcd_putc(i < dots ? '.' : ' ');
+}
+
+// Installed as cst-sync.c's progress callback around the blocking N-slot preview query, so the dots
+// keep cycling through it (up to ~1.8s if the receiver is unreachable) instead of freezing.
+static uint8_t cnfSpinnerPhase;
+static void cnfSpinnerTick(void)
+{
+	printCnfDots(((cnfSpinnerPhase++ >> 3) & 0x03) + 1);   // advance one dot ~every 160ms (callback ~20ms)
+}
+
+// Outcome screen for a shared-CNF push/pull. Called from the LOAD/SAVE CNF confirm path and the
+// SAVE-to-SHARED two-stage upgrade path (UPGRADE BASE? / WIPE N01-20?). Success shows the house
+// "SAVED!" / "LOADED!" confirm; every other outcome drops the LOAD/SAVE label (the operator knows
+// which they started) and uses both rows for a plain-language reason. `slot` is the 1-based network
+// slot number (1-20), used only by the SYNC_EMPTY screen.
+static void displaySyncResult(SyncResult result, uint8_t isSave, uint8_t slot)
+{
+	lcd_clrscr();
+
+	if(SYNC_OK == result)
+	{
+		lcd_gotoxy(1,0);
+		lcd_puts(isSave ? "SAVED!" : "LOADED!");
+		wait100ms(7);
+		return;
+	}
+
+	if(SYNC_EMPTY == result)   // LOAD only - the slot has never been saved to
+	{
+		lcd_gotoxy(0,0);
+		lcd_puts("SLOT N");
+		printDec2DigWZero(slot);
+		lcd_gotoxy(0,1);
+		lcd_puts("EMPTY");
+		wait100ms(30);
+		return;
+	}
+
+	const char *line1, *line2;
+	switch(result)
+	{
+		case SYNC_BUSY:             line1 = "BUSY";     line2 = "RETRY";    break;
+		case SYNC_CHECKSUM_FAIL:    line1 = "CRC FAIL"; line2 = "RETRY";    break;
+		case SYNC_TIMEOUT_BEGIN:    line1 = "TIMEOUT";  line2 = "NO REPLY"; break;
+		case SYNC_TIMEOUT_DATA:     line1 = "TIMEOUT";  line2 = "TRANSFER"; break;
+		case SYNC_TIMEOUT_COMMIT:   line1 = "TIMEOUT";  line2 = "COMMIT";   break;  // SAVE only
+		case SYNC_VERSION_MISMATCH: line1 = "FIRMWARE"; line2 = "MISMATCH"; break;
+		case SYNC_BAD_ENTRY:
+		default:                    line1 = "ERROR";    line2 = "RETRY";    break;
+	}
+	lcd_gotoxy(0,0);
+	lcd_puts(line1);
+	lcd_gotoxy(0,1);
+	lcd_puts(line2);
+	// A failure is rare and the operator needs time to read it - much longer dwell than the confirm.
+	wait100ms(30);
+
+	if(SYNC_TIMEOUT_DATA == result)
+	{
+		// Which chunk offset never got an acked reply - kept as a bench-debug diagnostic.
+		lcd_clrscr();
+		lcd_gotoxy(0,0);
+		lcd_puts("OFFSET");
+		lcd_gotoxy(0,1);
+		printDec3Dig(syncGetLastTimeoutOffset());
+		wait100ms(30);
+	}
+}
+
 int main(void)
 {
 	uint16_t decisecs_tmp;
@@ -1357,6 +1422,15 @@ int main(void)
 
 	// Assign after init() so values are read from EEPROM first
 	uint8_t newConfigNumber = 1;
+	// newConfigNumber's most recent non-SHARED value - restored to whenever the CNF picker screen is left
+	// while resting on SHARED, so SHARED can never become a "sticky" default that fires a network query
+	// just from cycling back through the menu (see the screenJustChanged block below).
+	uint8_t lastLocalConfigNumber = 1;
+	// Cached preview of the currently-selected shared entry's loco address in the LOAD/SAVE CNF picker -
+	// queried once per fresh arrival at that entry (see the UP/DOWN cases), not re-queried every render pass.
+	uint8_t sharedLocoQueryValid = 0;
+	uint16_t sharedLocoAddress = 0;
+	SyncResult sharedLocoQueryResult = SYNC_OK;
 	uint16_t newLocoAddress = locoAddress;
 	uint8_t newDevAddr = mrbus_dev_addr;
 	uint8_t newBaseAddr = mrbus_base_addr;
@@ -1364,8 +1438,6 @@ int main(void)
 	uint8_t newSleepTimeout = sleep_tmr_reset_value / 600;
 	uint8_t newAlerterTimeout = alerter_tmr_reset_value / 150;
 	uint8_t newUpdate_seconds = update_decisecs / 10;
-
-	uint8_t dummyPref = 0;
 
 	uint8_t *prefsPtr = &newSleepTimeout;
 	uint8_t *optionsPtr = &optionBits;
@@ -1770,6 +1842,22 @@ int main(void)
 		
 		updateTime();
 
+		// Generic "did we just switch screens this pass" detector. Deliberately screenState-only, not
+		// subscreenState - backing out of a screen's own subscreen (e.g. the CNF confirm screen's
+		// MENU_BUTTON case) doesn't change screenState, so it doesn't retrigger this.
+		static uint8_t lastRenderedScreenState = 0xFF;
+		uint8_t screenJustChanged = (screenState != lastRenderedScreenState);
+		if(screenJustChanged && IS_SHARED_CONFIG(newConfigNumber) &&
+		   ((LOAD_CONFIG_SCREEN == lastRenderedScreenState) || (SAVE_CONFIG_SCREEN == lastRenderedScreenState)))
+		{
+			// Un-stick any shared slot as a resting default - it should only ever be revisited by
+			// deliberate navigation, never by simply cycling back through the menu system while it
+			// happened to be left selected (each such visit would otherwise re-trigger the blocking
+			// network query for no reason).
+			newConfigNumber = lastLocalConfigNumber;
+		}
+		lastRenderedScreenState = screenState;
+
 		switch(screenState)
 		{
 			case MAIN_SCREEN:
@@ -2157,41 +2245,146 @@ int main(void)
 						lcd_puts("SAVE");
 					lcd_puts(" CNF");
 					lcd_gotoxy(0,1);
-					printDec2DigWZero(newConfigNumber);
-					lcd_puts(": ");
+					if(IS_SHARED_CONFIG(newConfigNumber))
 					{
-						uint16_t eepromAddressDelta = CONFIG_OFFSET(WORKING_CONFIG) - CONFIG_OFFSET(newConfigNumber);
-						uint16_t tmpLocoAddress = eeprom_read_word((uint16_t*)(EE_LOCO_ADDRESS - eepromAddressDelta));  // Read loco address of newConfigNumber
-						if(tmpLocoAddress & LOCO_ADDRESS_SHORT)
+						uint8_t sharedEntry = SHARED_CONFIG_ENTRY(newConfigNumber);
+						uint8_t sharedSlotNum = sharedEntry + 1;
+
+						// A fresh arrival at any given shared slot always comes from the UP/DOWN cases below
+						// (which invalidate the cache and reset sharedQuerySettleTicks on every move within
+						// or into the shared range). The blocking query below only actually fires once
+						// navigation has sat still on one slot for SHARED_QUERY_SETTLE_10MS_TICKS with no
+						// further UP/DOWN press - otherwise a fast sweep across many N slots would freeze
+						// the throttle for a beat (up to ~1.8s worst case) at every single one it crosses.
+						if(!sharedLocoQueryValid && sharedQuerySettleTicks < SHARED_QUERY_SETTLE_10MS_TICKS)
 						{
-							if((tmpLocoAddress & ~(LOCO_ADDRESS_SHORT)) > 127)
-							{
-								// Invalid Short Address, reset to a sane value
-								tmpLocoAddress = 127 | LOCO_ADDRESS_SHORT;
-							}
+							// Settle wait: animate the dot field off the 10ms ISR tick (0->60 over 600ms).
+							// >>4 at ~160ms/dot fills once ('.'->'..'->'...'->'....') across the settle with no
+							// wrap; cnfSpinnerTick() then keeps cycling at the same 160ms/dot through the
+							// blocking query below, so it reads as one continuous animation from "landed on
+							// slot" to "result".
+							lcd_puts("N");
+							printDec2DigWZero(sharedSlotNum);
+							lcd_putc(':');
+							printCnfDots(((sharedQuerySettleTicks >> 4) & 0x03) + 1);
 						}
 						else
 						{
-							if(tmpLocoAddress > 9999)
+							if(!sharedLocoQueryValid)
 							{
-								// Invalid Long Address, reset to a sane value
-								tmpLocoAddress = 9999;
+								// The blocking query. cnfSpinnerTick(), installed as cst-sync.c's progress
+								// callback, keeps the dot field cycling for its duration (tens of ms
+								// typically, ~1.8s if cabbus is unreachable) so it doesn't look hung.
+								lcd_puts("N");
+								printDec2DigWZero(sharedSlotNum);
+								lcd_putc(':');
+								printCnfDots(1);
+								cnfSpinnerPhase = 0;
+								syncSetProgressCallback(cnfSpinnerTick);
+								sharedLocoQueryResult = syncQuerySharedLocoAddress(sharedEntry, &sharedLocoAddress);
+								syncSetProgressCallback(NULL);
+								sharedLocoQueryValid = 1;
+								lcd_gotoxy(0,1);
+							}
+
+							// All four cases below print exactly 8 characters total (N + 2-digit + ':' +
+							// 4-char field) - see the LCD-width note in CLAUDE.md's Architecture section on
+							// why that matters (lcd_puts doesn't clear the rest of the line, so a shorter
+							// string would leave stale characters from whatever rendered here before).
+							lcd_puts("N");
+							printDec2DigWZero(sharedSlotNum);
+							lcd_putc(':');
+							switch(sharedLocoQueryResult)
+							{
+								case SYNC_OK:
+									printLocomotiveAddress(sharedLocoAddress);
+									break;
+								case SYNC_BUSY:
+									lcd_puts("BUSY");
+									break;
+								case SYNC_EMPTY:
+									lcd_puts("NONE");
+									break;
+								default:
+									// SYNC_TIMEOUT_BEGIN/_DATA/SYNC_BAD_ENTRY - shouldn't see
+									// SYNC_CHECKSUM_FAIL/SYNC_TIMEOUT_COMMIT from a read-only query.
+									lcd_puts("FAIL");
+									break;
 							}
 						}
-						printLocomotiveAddress(tmpLocoAddress);
+					}
+					else
+					{
+						printDec2DigWZero(newConfigNumber);
+						lcd_puts(": ");
+						{
+							uint16_t eepromAddressDelta = CONFIG_OFFSET(WORKING_CONFIG) - CONFIG_OFFSET(newConfigNumber);
+							uint16_t tmpLocoAddress = eeprom_read_word((uint16_t*)(EE_LOCO_ADDRESS - eepromAddressDelta));  // Read loco address of newConfigNumber
+							if(tmpLocoAddress & LOCO_ADDRESS_SHORT)
+							{
+								if((tmpLocoAddress & ~(LOCO_ADDRESS_SHORT)) > 127)
+								{
+									// Invalid Short Address, reset to a sane value
+									tmpLocoAddress = 127 | LOCO_ADDRESS_SHORT;
+								}
+							}
+							else
+							{
+								if(tmpLocoAddress > 9999)
+								{
+									// Invalid Long Address, reset to a sane value
+									tmpLocoAddress = 9999;
+								}
+							}
+							printLocomotiveAddress(tmpLocoAddress);
+						}
 					}
 					switch(button)
 					{
+						// Zone-aware: local slots (1..MAX_CONFIGS) use plain ++/-- with a ceiling at
+						// MAX_CONFIGS; shared slots (SHARED_CONFIG_BASE..SHARED_CONFIG_MAX) use plain ++/--
+						// with a floor at SHARED_CONFIG_MAX; the two explicit crossing cases (local slot 1
+						// DOWN -> N01, N01 UP -> local slot 1) are what actually keep N01 adjacent to local
+						// slot 1 despite the shared range's raw values sitting above MAX_CONFIGS, not below 1
+						// (uint8_t can't represent "below 1" - see the SHARED_CONFIG_BASE comment above).
 						case UP_BUTTON:
-							if((UP_BUTTON != previousButton) && (newConfigNumber < MAX_CONFIGS))
+							if(UP_BUTTON != previousButton)
 							{
-								newConfigNumber++;
+								if(newConfigNumber > SHARED_CONFIG_BASE)
+								{
+									newConfigNumber--;
+									sharedLocoQueryValid = 0;
+									sharedQuerySettleTicks = 0;
+								}
+								else if(SHARED_CONFIG_BASE == newConfigNumber)
+								{
+									newConfigNumber = 1;
+								}
+								else if(newConfigNumber < MAX_CONFIGS)
+								{
+									newConfigNumber++;
+								}
 							}
 							break;
 						case DOWN_BUTTON:
-							if((DOWN_BUTTON != previousButton) && (newConfigNumber > 1))
+							if(DOWN_BUTTON != previousButton)
 							{
-								newConfigNumber--;
+								if(1 == newConfigNumber)
+								{
+									newConfigNumber = SHARED_CONFIG_BASE;
+									sharedLocoQueryValid = 0;
+									sharedQuerySettleTicks = 0;
+								}
+								else if(newConfigNumber <= MAX_CONFIGS)
+								{
+									newConfigNumber--;
+								}
+								else if(newConfigNumber < SHARED_CONFIG_MAX)
+								{
+									newConfigNumber++;
+									sharedLocoQueryValid = 0;
+									sharedQuerySettleTicks = 0;
+								}
 							}
 							break;
 						case SELECT_BUTTON:
@@ -2205,17 +2398,201 @@ int main(void)
 						case NO_BUTTON:
 							break;
 					}
+					if(!IS_SHARED_CONFIG(newConfigNumber))
+						lastLocalConfigNumber = newConfigNumber;
 				}
-				else
+				else if(1 == subscreenState)
 				{
 					enableLCDBacklight();
-					lcd_gotoxy(0,0);
-					lcd_puts("CONFIRM");
-					lcd_gotoxy(0,1);
-					if(LOAD_CONFIG_SCREEN == screenState)
-						lcd_puts("LOAD? -");
+					if(IS_SHARED_CONFIG(newConfigNumber))
+					{
+						lcd_gotoxy(0,0);
+						lcd_puts(LOAD_CONFIG_SCREEN == screenState ? "LOAD" : "SAVE TO");
+						lcd_gotoxy(0,1);
+						lcd_puts("N");
+						printDec2DigWZero(SHARED_CONFIG_ENTRY(newConfigNumber) + 1);
+						lcd_puts("?  -");
+						lcd_putc(0x7E);
+					}
 					else
-						lcd_puts("SAVE? -");
+					{
+						lcd_gotoxy(0,0);
+						lcd_puts("CONFIRM");
+						lcd_gotoxy(0,1);
+						lcd_puts(LOAD_CONFIG_SCREEN == screenState ? "LOAD? -" : "SAVE? -");
+						lcd_putc(0x7E);
+					}
+					switch(button)
+					{
+						case DOWN_BUTTON:
+							if(DOWN_BUTTON != previousButton)
+							{
+								// A push (SAVE) to a shared entry can silently upgrade/wipe the whole
+								// table (see mrbw-cabbus's version-guard design) if this throttle's own
+								// EEPROM_LAYOUT_VERSION is newer than what's currently pinned there - peek
+								// the pinned version first, and require two extra explicit confirmations
+								// before that happens. The peek is a HARD gate for that destructive path:
+								// if it fails we can't tell whether the push would wipe, so we refuse the
+								// SAVE rather than risk a silent wipe.
+								if(SAVE_CONFIG_SCREEN == screenState && IS_SHARED_CONFIG(newConfigNumber))
+								{
+									uint8_t peekedVersion;
+									lcd_clrscr();
+									lcd_gotoxy(0,0);
+									lcd_puts("CHECKING");
+									SyncResult peekResult = syncPeekSharedVersion(
+										SHARED_CONFIG_ENTRY(newConfigNumber), &peekedVersion);
+									if(SYNC_OK != peekResult)
+									{
+										lcd_clrscr();
+										lcd_gotoxy(0,0);
+										lcd_puts("CHECK");
+										lcd_gotoxy(0,1);
+										lcd_puts("RETRY");
+										wait100ms(30);
+										screenState = LAST_SCREEN;
+										subscreenState = 0;
+										lcd_clrscr();
+										break;
+									}
+									if(0xFF == peekedVersion || peekedVersion < EEPROM_LAYOUT_VERSION)
+									{
+										subscreenState = 2;
+										lcd_clrscr();
+										break;
+									}
+								}
+
+								lcd_clrscr();
+								lcd_gotoxy(0,0);
+
+								if(IS_SHARED_CONFIG(newConfigNumber))
+								{
+									// Network entry - pull/push over the air to mrbw-cabbus's shared CNF
+									// table instead of a local copyConfig(). The engine-state-queue swap
+									// that the local LOAD path does up front is done here after the pull
+									// instead: the incoming loco address isn't known until syncPullSharedCnf()
+									// + readConfig() have run, but by then it's the live locoAddress.
+									SyncResult result;
+									uint8_t sharedEntry = SHARED_CONFIG_ENTRY(newConfigNumber);
+									lcd_puts(LOAD_CONFIG_SCREEN == screenState ? "LOADING" : "SAVING");
+									if(LOAD_CONFIG_SCREEN == screenState)
+									{
+										// Snapshot the loco we're leaving before the pull overwrites WORKING_CONFIG / locoAddress.
+										uint16_t prevLocoAddress = locoAddress;
+										EngineState prevEngineState = engineState;
+										result = syncPullSharedCnf(sharedEntry);
+										if(SYNC_OK == result)
+										{
+											readConfig();  // locoAddress is now the pulled loco; engineState is left alone
+											// Same hand-off the local LOAD path does: look up the incoming
+											// loco first, then save the outgoing one (so the save can't
+											// evict the lookup - see the local path's comment).
+											engineState = engineStatesQueueGetState(locoAddress);
+											if(ENGINE_NOT_INITIALIZED == engineState)
+												engineState = prevEngineState;
+											engineStatesQueueUpdate(prevLocoAddress, prevEngineState);
+										}
+									}
+									else
+									{
+										result = syncPushSharedCnf(sharedEntry);
+									}
+
+									displaySyncResult(result, SAVE_CONFIG_SCREEN == screenState, sharedEntry + 1);
+								}
+								else
+								{
+									// Copy selected config into working config
+									if(LOAD_CONFIG_SCREEN == screenState)
+									{
+										lcd_puts("LOADING");
+										EngineState tmpEngineState = engineState;
+										// Get new engine state before potentially bumping it off the queue when we save the old one
+										uint16_t eepromAddressDelta = CONFIG_OFFSET(WORKING_CONFIG) - CONFIG_OFFSET(newConfigNumber);
+										uint16_t tmpLocoAddress = eeprom_read_word((uint16_t*)(EE_LOCO_ADDRESS - eepromAddressDelta));  // Read loco address of newConfigNumber
+										engineState = engineStatesQueueGetState(tmpLocoAddress);
+										if(ENGINE_NOT_INITIALIZED == engineState)
+											engineState = tmpEngineState;  // Restore old state if new locomotive not found
+										engineStatesQueueUpdate(locoAddress, tmpEngineState);  // Save current engine state
+										copyConfig(newConfigNumber, WORKING_CONFIG);
+									}
+									else
+									{
+										lcd_puts("SAVING");
+										copyConfig(WORKING_CONFIG, newConfigNumber);
+									}
+
+									// Refresh.  Needed for load, not for save
+									readConfig();
+
+									lcd_gotoxy(0,1);
+									for(i=0; i<8; i++)
+									{
+										// Do something to make it look active
+										wait100ms(1);
+										lcd_putc('.');
+									}
+									wait100ms(3);
+								}
+								screenState = LAST_SCREEN;
+								subscreenState = 0;  // Escape submenu
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+							screenState--;  // Back up one screen.  It will increment in the global MENU button handling code since we just pressed MENU.
+							subscreenState = 0;  // Escape submenu
+							lcd_clrscr();
+							break;
+						case SELECT_BUTTON:
+						case UP_BUTTON:
+						case NO_BUTTON:
+							break;
+					}
+				}
+				else if(2 == subscreenState)
+				{
+					// First of two explicit confirmations before a SAVE-to-SHARED push that would
+					// upgrade/wipe the whole shared table (see the DOWN_BUTTON peek above and mrbw-cabbus's
+					// version-guard design) - "N" (MENU_BUTTON) backs all the way out, matching this
+					// screen's existing CONFIRM stage's own escape convention.
+					enableLCDBacklight();
+					lcd_gotoxy(0,0);
+					lcd_puts("UPGRADE");
+					lcd_gotoxy(0,1);
+					lcd_puts("BASE? -");
+					lcd_putc(0x7E);
+					switch(button)
+					{
+						case DOWN_BUTTON:
+							if(DOWN_BUTTON != previousButton)
+							{
+								subscreenState = 3;
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+							screenState--;  // Back up one screen - incremented by the global MENU handling.
+							subscreenState = 0;  // Escape submenu
+							lcd_clrscr();
+							break;
+						case SELECT_BUTTON:
+						case UP_BUTTON:
+						case NO_BUTTON:
+							break;
+					}
+				}
+				else if(3 == subscreenState)
+				{
+					// Second confirmation - only reachable via stage 2's own DOWN_BUTTON, always a SAVE to a
+					// SHARED entry (see the peek gate above; LOAD/local-slot paths never set subscreenState to
+					// 2 or 3 in the first place).
+					enableLCDBacklight();
+					lcd_gotoxy(0,0);
+					lcd_puts("WIPE");
+					lcd_gotoxy(0,1);
+					lcd_puts("N01-20?");
 					lcd_putc(0x7E);
 					switch(button)
 					{
@@ -2224,45 +2601,19 @@ int main(void)
 							{
 								lcd_clrscr();
 								lcd_gotoxy(0,0);
-
-								// Copy selected config into working config
-								if(LOAD_CONFIG_SCREEN == screenState)
-								{
-									lcd_puts("LOADING");
-									EngineState tmpEngineState = engineState;
-									// Get new engine state before potentially bumping it off the queue when we save the old one
-									uint16_t eepromAddressDelta = CONFIG_OFFSET(WORKING_CONFIG) - CONFIG_OFFSET(newConfigNumber);
-									uint16_t tmpLocoAddress = eeprom_read_word((uint16_t*)(EE_LOCO_ADDRESS - eepromAddressDelta));  // Read loco address of newConfigNumber
-									engineState = engineStatesQueueGetState(tmpLocoAddress);
-									if(ENGINE_NOT_INITIALIZED == engineState)
-										engineState = tmpEngineState;  // Restore old state if new locomotive not found
-									engineStatesQueueUpdate(locoAddress, tmpEngineState);  // Save current engine state
-									copyConfig(newConfigNumber, WORKING_CONFIG);
-								}
-								else
-								{
-									lcd_puts("SAVING");
-									copyConfig(WORKING_CONFIG, newConfigNumber);
-								}
-
-								// Refresh.  Needed for load, not for save
-								readConfig();
-
-								lcd_gotoxy(0,1);
-								for(i=0; i<8; i++)
-								{
-									// Do something to make it look active
-									wait100ms(1);
-									lcd_putc('.');
-								}
-								wait100ms(3);
+								// Shown immediately, before the blocking push below - without this the
+								// screen sits blank for the several seconds a real upgrading push takes
+								// (13 DATA chunks + a COMMIT that also wipes every other entry on cabbus).
+								lcd_puts("SAVING");
+								SyncResult result = syncPushSharedCnf(SHARED_CONFIG_ENTRY(newConfigNumber));
+								displaySyncResult(result, 1, SHARED_CONFIG_ENTRY(newConfigNumber) + 1);
 								screenState = LAST_SCREEN;
 								subscreenState = 0;  // Escape submenu
 								lcd_clrscr();
 							}
 							break;
 						case MENU_BUTTON:
-							screenState--;  // Back up one screen.  It will increment in the global MENU button handling code since we just pressed MENU.
+							screenState--;  // Back up one screen - incremented by the global MENU handling.
 							subscreenState = 0;  // Escape submenu
 							lcd_clrscr();
 							break;
@@ -3483,14 +3834,6 @@ int main(void)
 						lcd_gotoxy(7,1);
 						lcd_puts("s");
 					}
-					else if(6 == subscreenState)
-					{
-						lcd_puts("ACCEPT");
-						lcd_gotoxy(0,1);
-						lcd_puts("DOWNLOAD");
-						prefsPtr = &dummyPref;
-						enableEepromWrite = 1;
-					}
 					else
 					{
 						subscreenState = 1;
@@ -3569,7 +3912,6 @@ int main(void)
 								// Menu pressed, advance menu
 								subscreenState++;
 								lcd_clrscr();
-								enableEepromWrite = 0;
 							}
 							break;
 						case NO_BUTTON:
