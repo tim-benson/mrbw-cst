@@ -465,6 +465,63 @@ Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=5
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
 
+## Long-press Menu to cancel a subscreen edit
+
+Every on-device config screen has two ways out: `SELECT` saves the edited values to EEPROM; a long-press
+(~500ms — measured against real hardware, the same threshold and idiom already shared by UP/DOWN autorepeat
+and the SELECT-long-press-to-power-down of the main screen) of the top-left Menu button discards them
+instead and returns to the main screen. Implemented as one new `else` branch alongside the existing
+top-level Menu-cycling logic in `mrbw-cst.c`: on a long-press while inside a subscreen, it calls
+`readConfig()` (already a complete undo, since nothing reaches EEPROM without an explicit `SELECT`-save)
+and resets navigation state back to the main screen.
+
+Two kinds of state need explicit handling, since neither is backed by EEPROM: `systemBits`
+(the menu-lock/advanced-function bits of `SYSTEM_SCREEN`) is a session-only global, restored from a snapshot
+captured whenever `SYSTEM_SCREEN` is entered — taken *after* all the conditional-menu and menu-lock skip
+logic, so no entry path misses it. And the `new*` staging locals of `PREFS_SCREEN` (`SLEEP DLY`/`ALERTER`)
+and `COMM_SCREEN` (`THRTL ID`/`BASE ADR`/`TIME ADR`/`TX INTVL`) — which those screens only push to the real
+values on a `SELECT`-save and never resync on entry — are resynced from the (`readConfig()`-restored) real
+values on cancel, so an abandoned edit cannot linger and be silently committed on a later visit.
+
+Every exit back to the main screen (`case LAST_SCREEN`) also calls `setupLCD(LCD_DEFAULT)` to restore the
+default LCD custom characters. The Brake Test gauge (the pressure subscreen of `SPECFN_SCREEN`) reprograms all
+eight CGRAM slots for its dial and `LCD_DEFAULT` reprograms only six, so a cancel out of that screen used to
+leave gauge fragments in the battery/softkey/clock glyphs of the main screen — its `SELECT`-escape had always
+restored them, the cancel path had not. The `currentMode` guard of `setupLCD()` makes the extra call free on
+every other exit. The cancel path also runs `resetPressure()`/`resetSpeed()` when leaving `SPECFN_SCREEN`
+(matching the `SELECT`-escape of that screen), so `COMPRESSOR_FN` cannot stay asserted after exit and a re-entry
+starts at the prompt rather than mid-simulation.
+
+Screens with their own pre-existing short-press Menu escape (the power-down confirm subscreen, the network
+CNF picker) already reset their subscreen state well before the long-press threshold, so this does not
+interfere there; the blocking radio calls of the shared network CNF sync pause the whole main loop
+(including button polling) for their duration, so they cannot race this either.
+
+## Menu backlight hold
+
+Every non-`MAIN_SCREEN` case in the `switch(screenState)` calls `enableLCDBacklight()` unconditionally each
+pass, so the backlight is lit for as long as you sit on any menu screen. The main screen is the only one
+that honours the `backlight` toggle set by the user (flipped by SELECT), and with the toggle off it called
+`disableLCDBacklight()` immediately, every pass — so the instant a menu cycle wrapped back through the main
+screen the light went dark, strobing off mid-navigation when starting another lap.
+
+`backlightTimeout_decisecs` is a hold countdown (`BACKLIGHT_HOLD_DECISECS`, ~3s) decremented in
+the 10Hz block of `TIMER0_COMPA_vect`, next to `sleepTimeout_decisecs`/`alerterTimeout_decisecs` — a `uint8_t`,
+so reads/writes are atomic on the AVR with no `ATOMIC_BLOCK`. It is re-armed once per main-loop pass
+(beside the sleep/alerter timer resets) whenever the current button is `MENU` *or* the screen is not the
+main screen: menu navigation and MENU presses keep it full, so the light survives the wrap back through the
+main screen for the hold period. The main screen two backlight branches (normal and `holdFunctionActive`)
+gate on `backlight || backlightTimeout_decisecs`; `EMRG`/`ALERTER`-blink/`REV!` are unchanged. UP/DOWN
+function taps on the main screen deliberately do *not* re-arm it (night-operation friendly), and an explicit
+SELECT toggle-to-off also zeroes the countdown so the light drops at once.
+
+**SELECT backlight toggle fires on release, not on the press edge.** Stock firmware toggled `backlight` the
+moment SELECT went down, so beginning a SELECT-long-press to power down always flipped the backlight first
+as a side effect. The toggle now happens when SELECT is released below the long-press threshold, gated by a
+`selectShortPressArmed` flag set only on a genuine main-screen press edge — which also keeps a
+wake-from-sleep SELECT (where `previousButton` is force-synced, so no edge is seen) from spuriously
+toggling.
+
 ## Shared network CNF store
 
 Lets one loco CNF (configuration profile: DCC function assignments, brake/STACK settings, notch table,

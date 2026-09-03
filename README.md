@@ -22,6 +22,9 @@ This is a fork adding:
   stored on the sibling [`mrbw-cabbus`](https://github.com/tim-benson/mrbw-cabbus) gateway and shared
   across throttles over the radio, plus `cst_cfgnetwork.py` for wireless access to the store from a
   computer.
+- **Menu-button refinements** — long-press Menu to cancel an in-progress config edit, a brief backlight
+  hold so the light does not strobe between menu laps, and the SELECT backlight toggle moved to button
+  release.
 
 Everything else — DCC status relay, fast clock, EEPROM read, ping, version query — is unchanged from
 stock ISE firmware; the one stock feature this fork removes is the `ACCEPT DOWNLOAD` menu item and the

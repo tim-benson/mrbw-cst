@@ -59,6 +59,9 @@ LICENSE:
 #define BUTTON_AUTOINCREMENT_ACCEL         10
 #define BUTTON_AUTOINCREMENT_MINIMUM        5
 
+#define BACKLIGHT_HOLD_DECISECS           30   // ~3s the LCD backlight lingers after the last MENU
+                                               // press / return from a menu screen
+
 // LOAD/SAVE CNF picker's N01-N20 loco-address preview settle delay - the query it fires
 // (syncQuerySharedLocoAddress()) is a blocking radio round-trip, so firing it on every single UP/DOWN
 // step during a fast sweep across many shared slots would freeze the throttle for a beat at each one.
@@ -274,6 +277,7 @@ volatile uint8_t ticks;
 volatile uint16_t decisecs = 0;
 volatile uint16_t sleepTimeout_decisecs = 0;
 volatile uint16_t alerterTimeout_decisecs = 0;
+volatile uint8_t backlightTimeout_decisecs = 0;  // uint8_t -> atomic on AVR, no ATOMIC_BLOCK needed
 volatile uint8_t txHoldoff = 0;
 volatile uint8_t status = 0;
 
@@ -819,6 +823,9 @@ ISR(TIMER0_COMPA_vect)
 			alerterTimeout_decisecs--;
 #endif
 		}
+
+		if(backlightTimeout_decisecs)
+			backlightTimeout_decisecs--;
 
 		ledUpdate();
 
@@ -1387,10 +1394,14 @@ int main(void)
 	uint8_t optionButtonState = 0;
 
 	uint8_t backlight = 0;
-	
+	uint8_t selectShortPressArmed = 0;  // Set on a SELECT press edge on the main screen; a release while
+	                                    // still set = short press -> toggle backlight. Cleared when the
+	                                    // power-down long-press fires, so power-down never toggles.
+
 	Screens screenState = LAST_SCREEN;  // Initialize to the last one, since that's the only state guaranteed to be present
 	uint8_t subscreenState = 0;
 	uint8_t subscreenCount = 0;
+	uint8_t systemBitsSnapshot = SYSTEMBITS_DEFAULT;  // Snapshot for reverting SYSTEM_SCREEN's systemBits on menu-cancel
 
 	BrakeStates brakeState = BRAKE_LOW_BEGIN;
 
@@ -1889,7 +1900,7 @@ int main(void)
 					else if(holdFunctionActive)
 					{
 						lcd_puts("HOLD");
-						if(backlight)
+						if(backlight || backlightTimeout_decisecs)
 							enableLCDBacklight();
 						else
 							disableLCDBacklight();
@@ -1897,7 +1908,7 @@ int main(void)
 					else
 					{
 						printLocomotiveAddress(locoAddress);
-						if(backlight)
+						if(backlight || backlightTimeout_decisecs)
 							enableLCDBacklight();
 						else
 							disableLCDBacklight();
@@ -1943,21 +1954,34 @@ int main(void)
 						case SELECT_BUTTON:
 							if(SELECT_BUTTON != previousButton)
 							{
-								if(backlight)
-									backlight = 0;
-								else
-									backlight = 1;
+								selectShortPressArmed = 1;
 								ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
 							}
 							if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
 							{
 								// Trigger power down menu on long press
+								selectShortPressArmed = 0;  // Long press -> power-down, not a backlight toggle
 								subscreenState = 1;
 								lcd_clrscr();
 							}
 							// break;  // Roll through the other cases for cleanup
 						case MENU_BUTTON:
 						case NO_BUTTON:
+							// A SELECT press released before the power-down long-press threshold is a short
+							// press: toggle the LCD backlight on release, so starting a power-down never
+							// flips it as a side effect. selectShortPressArmed gates out wake-from-sleep
+							// SELECT (no press edge seen -> flag stays clear).
+							if((NO_BUTTON == button) && (SELECT_BUTTON == previousButton) && selectShortPressArmed)
+							{
+								selectShortPressArmed = 0;
+								if(backlight)
+								{
+									backlight = 0;
+									backlightTimeout_decisecs = 0;  // Explicit off - drop the light now, don't let the menu hold linger
+								}
+								else
+									backlight = 1;
+							}
 							// Release buttons if momentary
 							if(!(isFunctionLatching(UP_FN)))
 								optionButtonState &= ~UP_OPTION_BUTTON;
@@ -4134,8 +4158,10 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_PRESSURE_CONFIG, getPressureConfig());
 								eeprom_write_byte((uint8_t*)EE_CONFIGBITS, configBits);
 								readConfig();
-								// The only way to escape the prefs menu is by saving the values, so the new* variables don't serve the purpose of allowing the user to cancel a change in this case.
-								// new* values are used because the values used in the program are not the same format as used here.
+								// Resync the new* staging locals from the (readConfig()-restored) real
+								// values. Also done by the long-press-Menu cancel handler in the top-level
+								// Menu logic - the two paths that leave this screen. new* values exist
+								// because the on-screen format differs from the program's.
 								newSleepTimeout = sleep_tmr_reset_value / 600;
 								newAlerterTimeout = alerter_tmr_reset_value / 150;
 								// Reset alerter here so it doesn't trigger the alerter down below when changing from off
@@ -4781,6 +4807,10 @@ int main(void)
 			case LAST_SCREEN:
 				// Clean up and reset
 				lcd_clrscr();
+				// Restore the default custom characters - a screen with its own CGRAM glyphs
+				// (the Brake Test gauge programs all 8 slots) funnels through here on exit, and
+				// setupLCD()'s currentMode guard makes this a no-op when nothing changed.
+				setupLCD(LCD_DEFAULT);
 				screenState = 0;
 				break;
 		}
@@ -4796,7 +4826,7 @@ int main(void)
 					lcd_clrscr();
 					screenState++;  // No range checking needed since LAST_SCREEN will reset the counter
 					ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
-					
+
 					// Check for conditional menus
 					if(!(systemBits & _BV(SYSTEMBITS_ADV_FUNC)))
 					{
@@ -4844,13 +4874,66 @@ int main(void)
 							screenState++;
 						}
 					}
-					
+					if(SYSTEM_SCREEN == screenState)
+					{
+						// systemBits isn't stored in EEPROM, so it needs its own snapshot for the
+						// menu-cancel handler (below) to revert it. Captured here, after every skip
+						// path above (conditional-menu skips, menu-lock skip), so an indirect entry
+						// to SYSTEM_SCREEN can't miss it.
+						systemBitsSnapshot = systemBits;
+					}
 				}
 				if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
 				{
 					// Reset menu on long press
 					screenState = LAST_SCREEN;
 				}
+			}
+		}
+		else if(MENU_BUTTON == button)
+		{
+			// Long-press Menu while inside a subscreen: cancel and discard any
+			// uncommitted edits, then exit all the way to the main screen -
+			// same target as the long-press handler above.
+			if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
+			{
+				// Nothing reaches EEPROM without an explicit SELECT-save, so
+				// reloading from EEPROM is a full undo of any in-progress edit.
+				readConfig();
+
+				// systemBits isn't stored in EEPROM, so readConfig() can't
+				// revert it - restore the snapshot taken on entry to SYSTEM_SCREEN.
+				if(SYSTEM_SCREEN == screenState)
+				{
+					systemBits = systemBitsSnapshot;
+				}
+
+				// PREFS_SCREEN's SLEEP DLY/ALERTER and COMM_SCREEN's THRTL ID/BASE
+				// ADR/TIME ADR/TX INTVL items are staged in these new* locals and
+				// only pushed to the real values on save - neither screen resyncs
+				// them on entry. Resync from the (readConfig()-restored) real values
+				// so a cancelled edit doesn't linger and get silently committed on
+				// the next SELECT-save of that item.
+				newSleepTimeout = sleep_tmr_reset_value / 600;
+				newAlerterTimeout = alerter_tmr_reset_value / 150;
+				newDevAddr = mrbus_dev_addr;
+				newBaseAddr = mrbus_base_addr;
+				newTimeAddr = timeSourceAddress;
+				newUpdate_seconds = update_decisecs / 10;
+
+				// The Brake Test subscreen (SPECFN) runs the pressure/speed sims and
+				// suppresses the brake controls the speed sim reads; its SELECT-escape
+				// resets both on the way out. Do the same on a cancel, or COMPRESSOR_FN
+				// stays asserted and a re-entry lands mid-sim instead of at the prompt.
+				if(SPECFN_SCREEN == screenState)
+				{
+					resetPressure();
+					resetSpeed();
+				}
+
+				subscreenState = 0;
+				screenState = LAST_SCREEN;
+				lcd_clrscr();
 			}
 		}
 
@@ -5133,6 +5216,13 @@ int main(void)
 				alerterTimeout_decisecs = alerter_tmr_reset_value;
 			}
 		}
+
+		// Hold the LCD backlight on while navigating the menus, and for a short grace period after
+		// returning to the main screen, so cycling back through for another pass doesn't strobe the
+		// light off in between. Only MENU arms the hold from the main screen (UP/DOWN function taps
+		// with the backlight off stay dark); every non-main screen keeps it armed continuously.
+		if((MENU_BUTTON == button) || (MAIN_SCREEN != screenState))
+			backlightTimeout_decisecs = BACKLIGHT_HOLD_DECISECS;
 
 		wdt_reset();
 
