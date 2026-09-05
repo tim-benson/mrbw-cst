@@ -25,12 +25,20 @@ This is a fork adding:
 - **Menu-button refinements** — long-press Menu to cancel an in-progress config edit, a brief backlight
   hold so the light does not strobe between menu laps, and the SELECT backlight toggle moved to button
   release.
+- **AIRBRAKE train-brake simulation** — models a locomotive automatic (train) brake — brake pipe, main
+  reservoir, compressor governor — driving the ESU air sound functions from the simulated pressures,
+  with a read-only gauge screen (two-pressure or analogue-dial style). Opt-in via a PREFS toggle;
+  replaces the stock transient "Brake Test" gauge.
 
 Everything else — DCC status relay, fast clock, EEPROM read, ping, version query — is unchanged from
-stock ISE firmware; the one stock feature this fork removes is the `ACCEPT DOWNLOAD` menu item and the
-wireless EEPROM-write (`'W'`) packet it gated, superseded by the config tooling above. A mixed fleet of
-stock and fork-firmware throttles/receivers on the same layout is fully supported; see `CLAUDE.md`,
+stock ISE firmware. The stock features this fork drops: the `ACCEPT DOWNLOAD` menu item and its
+wireless EEPROM-write (`'W'`) packet (superseded by the config tooling above), and the "Special
+Functions" menu whose transient Brake Test gauge AIRBRAKE replaces. A mixed fleet of stock and
+fork-firmware throttles/receivers on the same layout is fully supported; see `CLAUDE.md`,
 "Compatibility," for exactly how each combination behaves.
+
+Upgrading a configured throttle across the AIRBRAKE change bumps `EEPROM_LAYOUT_VERSION` — export with
+`cst_cfgtransfer.py` first, flash, then re-import.
 
 ## Repo layout
 

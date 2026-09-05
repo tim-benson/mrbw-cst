@@ -95,14 +95,16 @@ power-cycle needed to recover from it; just retry.
 `import --import-old` allows a JSON file exported under an OLDER/smaller schema than this copy of the
 tool (e.g. a backup taken before a layout-version bump added a new field, like the shared-network-CNF-table
 version-guard upgrade documented in the top-level `CLAUDE.md`, "Shared network CNF store" section) — a field ABSENT from an existing
-`functions`/`speed`/`options`/`force_functions` object is defaulted (`RAW:0xFF` for a function, `"UNSET"`
-for a speed field, `"ADDITIVE"` for `options.horn_type`, `[]` for `force_functions.on`/`.off`, or the
-existing invalid-value fallback already defined for that field) instead of rejected — this is how a
-pre-schema-2 backup restores. (The old flat/renamed shapes — `force_function_on`/`off`, `brake` /
-`options_unset`, ungrouped device fields — are also accepted, independent of this flag.) A field that is
-*present* but invalid, or a whole missing
+`functions`/`speed`/`airbrake`/`options`/`force_functions` object is defaulted (`RAW:0xFF` for a
+function, `"UNSET"` for a speed/airbrake field, `"ADDITIVE"` for `options.horn_type`, `[]` for
+`force_functions.on`/`.off`, or the existing invalid-value fallback already defined for that field)
+instead of rejected — this is how a pre-schema-2 backup restores. The whole `airbrake` object is also
+new (schema v3) — a v2 backup lacking it entirely restores fine with this flag (every field
+`"UNSET"`), the one whole-category exception. (The old flat/renamed shapes — `force_function_on`/`off`,
+`brake` / `options_unset`, ungrouped device fields — are also accepted, independent of this flag.) A
+field that is *present* but invalid, or any other whole missing
 category (no `"functions"` object at all), is still always rejected regardless of this flag — only
-genuine absence within an already-present category is relaxed. `--dry-run --import-old` shows the real
+genuine absence within an already-present category (or a missing `airbrake`) is relaxed. `--dry-run --import-old` shows the real
 defaulted value in its diff, and every import with this flag set prints an explicit "will be defaulted"
 list before the confirmation prompt.
 
@@ -175,24 +177,39 @@ Every field is written using the same vocabulary — and the same order — as t
 throttle itself, so it is editable without cross-referencing the C source in this codebase. The JSON is
 **grouped one object per config menu**; within each object the keys are in the item order of that menu, and
 the objects follow the top-level menu cycle
-(`loco_address` → `force_functions` → `functions` → `notch_speedstep` → `speed` → `options`).
+(`loco_address` → `force_functions` → `functions` → `notch_speedstep` → `speed` → `airbrake` →
+`options`).
 
 - **`loco_address`**: `{"address": N, "type": "long"|"short"}` — long is 0-9999, short is 0-127.
 - **`force_functions`** (the `FORCE FUNC` menu — separate from `CONFIG FUNC`): `{"on": [...], "off":
   [...]}`, each a list of DCC function numbers (0-28) always forced on / off, independent of any
   physical control.
-- **`functions`**: 26 keys, in `CONFIG FUNC` menu order — `HORN`, `HORN2`, `BELL`, `BRAKE`, `BRAKE2`,
-  `BRAKE3`, `BRAKE_OFF`, `AUX`, `ENGINE_ON`, `ENGINE_OFF`, `THR_UNLOCK`, `REV_SWAP`, `NEUTRAL`, `ALERTER`,
-  `COMPRESSOR`, `BRAKE_TEST`, `FRONT_HEADLIGHT`, `FRONT_DITCH`, `FRONT_DIM1`, `FRONT_DIM2`,
-  `REAR_HEADLIGHT`, `REAR_DITCH`, `REAR_DIM1`, `REAR_DIM2`, `UP_BUTTON`, `DOWN_BUTTON` — each a string:
-  `"OFF"`, `"F00_MOM"`..`"F28_MOM"` (momentary DCC function 0-28), `"F00_LAT"`..`"F28_LAT"` (latching),
-  `"EMRG"` (emergency stop — only valid on `AUX`, `ALERTER`, `UP_BUTTON`, `DOWN_BUTTON`), or `"BRKTEST"`
-  (brake test — only valid on `UP_BUTTON`/`DOWN_BUTTON`).
+- **`functions`**: 28 keys, in `CONFIG FUNC` menu order — `HORN`, `HORN2`, `BELL`, `BRAKE`, `BRAKE2`,
+  `BRAKE3`, `AUX`, `ENGINE_ON`, `ENGINE_OFF`, `THR_UNLOCK`, `REV_SWAP`, `NEUTRAL`, `COMPRESSOR`,
+  `COMPRESSOR2`, `BRAKE_SET`, `BRAKE_REL`, `ALERTER`, `EMERGENCY`, `FRONT_HEADLIGHT`, `FRONT_DITCH`,
+  `FRONT_DIM1`, `FRONT_DIM2`, `REAR_HEADLIGHT`, `REAR_DITCH`, `REAR_DIM1`, `REAR_DIM2`, `UP_BUTTON`,
+  `DOWN_BUTTON` — each a string: `"OFF"`, `"F00_MOM"`..`"F28_MOM"` (momentary DCC function 0-28),
+  `"F00_LAT"`..`"F28_LAT"` (latching), `"EMRG"` (emergency stop — only valid on `AUX`, `ALERTER`,
+  `UP_BUTTON`, `DOWN_BUTTON`), or `"AIRBRAKE"` (opens the AIRBRAKE gauge screen — only valid on
+  `UP_BUTTON`/`DOWN_BUTTON`). `COMPRESSOR2` only appears as a selectable value on-device when
+  `airbrake.COMP_MODE` is `"CONSIST"` and the `airbrake` PREFS bit is on, but is always present in the
+  JSON regardless.
 - **`notch_speedstep`**: 8 entries, 1-126, the reverser-notch-to-DCC-speed-step table.
 - **`speed`**: 19 fields under the exact `SPEED CFG` on-device menu names — `ACCEL`, `DECEL`, `BRK1`,
   `BRK2`, `BRK3`, `DELAY`, `MAXSPEED`, `UNIT` (`"MPH"`/`"KMH"`), `HOLDFN`, `STOPFN`, `OPLOAD`, `OPLOADFN`,
   `PRLOAD`, `PRLOADFN`, `TYPE` (`"V5DCC"`/`"V4V5MULT"`), `ACCPCT`, `ACCTGT`, `DECPCT`, `DECTHR`. Watched-
   function fields (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`) are `"OFF"` or `"F00"`..`"F28"`.
+- **`airbrake`**: 9 fields under the exact `AIRBRAKE CFG` on-device menu names — `BP_CHARGE`, `MR_LOAD`,
+  `MR_LOW`, `MR_HIGH`, `RECHARGE`, `LEAK_RATE`, `PUMP_RATE`, `DISPLAY`, `COMP_MODE` — the per-loco
+  parameters of the AIRBRAKE air-brake model, all always visible on-device (no `ADV FUNC` gating left in
+  this menu). Every field is a plain 0-254 number or `"UNSET"` except two string enums (same `"UNSET"`
+  sentinel handling, matching the `options.horn_type` precedent): `DISPLAY` is `"DUAL"` (the `BP:`/`MR:`
+  two-pressure view) or `"SINGLE"` (the analogue BP dial) — which rendering the AIRBRAKE screen uses;
+  `COMP_MODE` is `"NORMAL"` or `"CONSIST"` — gates the `COMPRSR`/`COMPRSR2` split. `BP_CHARGE` is
+  range-checked 70-110 and `MR_LOAD` 0-100 on import, matching the on-device UP/DOWN ceiling/floor
+  exactly — an out-of-range value is rejected rather than silently clamped. A pre-v3 backup lacking the
+  whole `airbrake` object, or one whose `airbrake` object predates `DISPLAY`, restores fine with
+  `--import-old` (missing fields default to `"UNSET"`).
 - **`options`** (the `OPTIONS` menu — mostly brake, plus reverser/horn), in menu order: `variable_brake`,
   `type` (`"PULSE"`/`"STEP"`/`"STACK"`), `pulse_width` (2-10), `stack_5step`, then
   `stack_band_combos_5step` (5 entries) / `stack_band_combos_3step` (3 entries) — both always present
@@ -221,10 +238,10 @@ Grouped one object per config menu, in top-level-menu-cycle order (`SYSTEM` → 
   `ADV FUNC` is on).
 - **`comm`**: `mrbus_device_address`, `mrbus_base_address`, `time_source_address`,
   `mrbus_update_interval_decisecs`, `tx_holdoff_centisecs`.
-- **`prefs`**: `config_bits` (the four booleans `main_screen_speed`, `led_blink`, `reverser_lock`,
-  `strict_sleep`, in `PREFS` order — `main_screen_speed` false = main screen shows the clock, the
-  default), then `sleep_timeout_minutes`, `alerter_timeout_minutes`, `dead_reckoning_time`,
-  `pressure_config`.
+- **`prefs`**: `config_bits` (the five booleans `main_screen_speed`, `airbrake`, `led_blink`,
+  `reverser_lock`, `strict_sleep`, in `PREFS` order — `main_screen_speed` false = main screen shows the
+  clock, the default; `airbrake` false = AIRBRAKE off, the default), then `sleep_timeout_minutes`,
+  `alerter_timeout_minutes`, `dead_reckoning_time`.
 - **`calibration`**: `horn_threshold`, `horn_threshold2`, `brake_threshold`, `brake_low_threshold`,
   `brake_high_threshold` (the `THRESHOLD CAL` lever-position captures).
 

@@ -42,7 +42,6 @@ LICENSE:
 #include "cst-battery.h"
 #include "cst-engine.h"
 #include "cst-pressure.h"
-#include "cst-tonnage.h"
 #include "cst-time.h"
 #include "cst-math.h"
 #include "cst-speed.h"
@@ -129,7 +128,7 @@ char baseString[9];
 #define BELL_CONTROL      0x02
 #define AUX_CONTROL       0x04
 #define BRAKE_CONTROL     0x08
-#define BRAKE_OFF_CONTROL 0x10
+#define BRAKE_REL_CONTROL 0x10
 #define THR_UNLK_CONTROL  0x80
 // controls widened to uint16_t for this bit - the low byte (0x01-0x80) is fully allocated
 #define HORN2_CONTROL     0x100
@@ -147,7 +146,7 @@ static const uint8_t stackBandThresholds3Step[STACK_BAND_COUNT_3STEP - 1] = { 25
 static const uint8_t stackBandThresholds5Step[STACK_BAND_COUNT_5STEP - 1] = { 17, 33, 50, 67, 83 };
 
 // Brake1 in STACK mode reuses the existing BRAKE_CONTROL/BRAKE_FN plumbing (same DCC function number as
-// standard/pulse/stepped mode's brake), same idea as STACK's Band 0 reusing BRAKE_OFF_CONTROL/BRAKE_OFF_FN.
+// standard/pulse/stepped mode's brake), same idea as STACK's Band 0 reusing BRAKE_REL_CONTROL/BRAKE_REL_FN.
 // Brake2/Brake3 use controls' 2 remaining free bits - no separate control byte needed.
 #define BK2_CONTROL 0x20
 #define BK3_CONTROL 0x40
@@ -204,8 +203,17 @@ uint8_t brakePulseWidth = BRAKE_PULSE_WIDTH_DEFAULT;
 // Bit clear = main screen shows the clock (the pre-fork default - preserved for throttles upgrading
 // from stock firmware, whose stored config byte already has this bit clear); set = show scale speed.
 #define CONFIGBITS_MAIN_SCREEN_SPEED 1
+// Bit clear = AIRBRAKE off (default - the air-brake model still ticks but drives nothing, AIRBRAKE CFG
+// is hidden); set = AIRBRAKE drives BRAKE_REL_FN / BRK SET / COMPRESSOR_FN. See CLAUDE.md "AIRBRAKE".
+#define CONFIGBITS_AIRBRAKE          2
 #define CONFIGBITS_REVERSER_LOCK     4
 #define CONFIGBITS_STRICT_SLEEP      5
+
+// AIRBRAKE stops asserting its non-latching sound functions (COMPRESSOR_FN/COMPRESSOR2_FN / BRK SET)
+// this many decisecs before the throttle sleeps, so a final "off" reaches the loco while packets
+// still flow - otherwise the command station holds the last state it heard and the compressor sound
+// plays forever.
+#define AIRBRAKE_SLEEP_QUIET_DECISECS   3
 
 #define CONFIGBITS_DEFAULT                 (_BV(CONFIGBITS_LED_BLINK) | _BV(CONFIGBITS_REVERSER_LOCK) | _BV(CONFIGBITS_STRICT_SLEEP))
 uint8_t configBits = CONFIGBITS_DEFAULT;
@@ -308,7 +316,7 @@ typedef enum
 {
 	MAIN_SCREEN = 0,
 	ENGINE_SCREEN,
-	SPECFN_SCREEN,
+	AIRBRAKE_SCREEN,        // was AIR_GAUGE_SCREEN
 	LOAD_CONFIG_SCREEN,
 	SAVE_CONFIG_SCREEN,
 	LOCO_SCREEN,
@@ -316,6 +324,7 @@ typedef enum
 	CONFIG_FUNC_SCREEN,
 	NOTCH_CONFIG_SCREEN,
 	SPEED_CONFIG_SCREEN,
+	AIRBRAKE_CONFIG_SCREEN, // was BRAKE_CONFIG_SCREEN
 	OPTION_SCREEN,
 	SYSTEM_SCREEN,
 	COMM_SCREEN,
@@ -324,12 +333,6 @@ typedef enum
 	DIAG_SCREEN,
 	LAST_SCREEN  // Must be the last screen
 } Screens;
-
-enum
-{
-	SPECFN_SUBSCREEN_PRESSURE = 1,
-//	SPECFN_SUBSCREEN_TONNAGE
-};
 
 typedef enum
 {
@@ -376,6 +379,10 @@ volatile uint8_t commandedSpeedStep = 0;
 // Set by TIMER0_COMPA_vect every 100ms; the main loop consumes it and runs updateSpeed10Hz() from
 // there (not the ISR) - its standing-start ramp does 64-bit math that must not stall other interrupts.
 volatile uint8_t speed10HzTick = 0;
+
+// Same idea for the AIRBRAKE model - updateBrake10Hz() runs from the main loop so it can
+// take the lever percentage as a parameter rather than reaching into main()'s locals from the ISR.
+volatile uint8_t brake10HzTick = 0;
 
 // Is the user's SPEED "watched" DCC function (STOPFN) currently part of the outgoing functionMask
 // - regardless of which physical control put it there? functionMask itself is a main()-local, not
@@ -458,15 +465,15 @@ void evaluateStackBrake(uint8_t brakePcnt)
 	currentStackBand = band;
 
 	// Brake1/2/3 combo bits all live directly in controls - Brake1 reuses BRAKE_CONTROL, so this
-	// touches only the 3 combo bits, leaving BRAKE_OFF_CONTROL (set below) and any other bits alone.
+	// touches only the 3 combo bits, leaving BRAKE_REL_CONTROL (set below) and any other bits alone.
 	controls = (controls & ~(BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL)) | combos[band];
 
-	// BRAKE_OFF_FN behaves like standard/pulse mode here (continuous hold), not stepped mode's
+	// BRAKE_REL_FN behaves like standard/pulse mode here (continuous hold), not stepped mode's
 	// one-tick pulse - reuses the existing controls bit/function, no new plumbing needed.
 	if(0 == band)
-		controls |= BRAKE_OFF_CONTROL;
+		controls |= BRAKE_REL_CONTROL;
 	else
-		controls &= ~BRAKE_OFF_CONTROL;
+		controls &= ~BRAKE_REL_CONTROL;
 }
 
 #define ENGINE_TIMER_DECISECS      20
@@ -841,8 +848,8 @@ ISR(TIMER0_COMPA_vect)
 			brakeCounter = 0;
 		
 		updateTime10Hz();
-		updatePressure10Hz();
 		speed10HzTick = 1;   // updateSpeed10Hz() runs from the main loop - see speed10HzTick's use there
+		brake10HzTick = 1;   // updateBrake10Hz() likewise
 	}
 
 	if(txHoldoff)
@@ -887,8 +894,46 @@ void readConfig(void)
 
 	// EEPROM layout version, independent of the git-tag-derived major/minor above - see the comment by
 	// EEPROM_LAYOUT_VERSION's definition in cst-eeprom.h. Lets offline tooling detect a layout mismatch.
-	if(eeprom_read_byte((uint8_t*)EE_LAYOUT_VERSION) != EEPROM_LAYOUT_VERSION)
+	uint8_t oldLayoutVersion = eeprom_read_byte((uint8_t*)EE_LAYOUT_VERSION);
+	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
 		eeprom_write_byte((uint8_t*)EE_LAYOUT_VERSION, EEPROM_LAYOUT_VERSION);
+
+	// The per-slot SPEED + AIRBRAKE config (plus the HORN2/COMPRESSOR2 function slots wedged between
+	// them) was repacked contiguous into bytes 0x3C-0x53 - see cst-eeprom.h - closing the single-byte
+	// holes left by fields removed during their own uncommitted development. A throttle coming from the
+	// last committed layout has its old-offset values sitting where the repacked fields now read, so
+	// force the whole 0x3C-0x53 range back to defaults in every profile slot + the working config.
+	// Harmless on a fresh chip (would self-heal to the same values anyway) and a no-op once past this
+	// version. A configured throttle should be backed up (cst_cfgtransfer.py export) before upgrading
+	// and restored (import) afterward.
+	if(oldLayoutVersion < 2)
+	{
+		// One entry per byte 0x3C..0x53, in EEPROM-byte order.
+		static const uint8_t repackDefault[0x53 - 0x3C + 1] = {
+			SPEED_TYPE_DEFAULT, SPEED_OPLOAD_DEFAULT, SPEED_PRLOAD_DEFAULT,       // 0x3C-0x3E
+			SPEED_OPLOAD_FN_DEFAULT, SPEED_PRLOAD_FN_DEFAULT,                     // 0x3F-0x40
+			STACK_3STEP_DEFAULT_1, STACK_3STEP_DEFAULT_2, STACK_3STEP_DEFAULT_3,  // 0x41-0x43 (3-STEP combos)
+			SPEED_HOLD_WATCH_FN_DEFAULT,                                         // 0x44
+			SPEED_DECEL_THRESHOLD_DEFAULT, SPEED_DECEL_PCT_DEFAULT,              // 0x45-0x46
+			SPEED_ACCEL_PCT_DEFAULT, SPEED_ACCEL_TARGET_DEFAULT,                // 0x47-0x48
+			FN_OFF,                                                             // 0x49 HORN2_FUNCTION
+			AIRBRAKE_CHARGED_DEFAULT, AIRBRAKE_MR_CUTIN_DEFAULT,                // 0x4A-0x4B
+			AIRBRAKE_MR_CUTOUT_DEFAULT, AIRBRAKE_CHARGE_RATE_DEFAULT,           // 0x4C-0x4D
+			AIRBRAKE_LEAK_RATE_DEFAULT, AIRBRAKE_PUMP_RATE_DEFAULT,             // 0x4E-0x4F
+			AIRBRAKE_MR_LOAD_DEFAULT, AIRBRAKE_COMP_MODE_DEFAULT,               // 0x50-0x51
+			FN_OFF,                                                             // 0x52 COMPRESSOR2_FUNCTION
+			AIRBRAKE_DISPLAY_DEFAULT };                                         // 0x53
+		uint8_t s, k;
+		for(s = 1; s <= MAX_CONFIGS; s++)
+		{
+			wdt_reset();
+			for(k = 0; k < sizeof(repackDefault); k++)
+				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x3C + k), repackDefault[k]);
+		}
+		wdt_reset();
+		for(k = 0; k < sizeof(repackDefault); k++)
+			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x3C + k), repackDefault[k]);
+	}
 
 
 	update_decisecs = (uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_L) | (((uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_H)) << 8);
@@ -974,12 +1019,6 @@ void readConfig(void)
 
 	timeSourceAddress = eeprom_read_byte((uint8_t*)EE_TIME_SOURCE_ADDRESS);
 
-	// Pressure
-	uint8_t pressureConfig = eeprom_read_byte((uint8_t*)EE_PRESSURE_CONFIG);
-	setPressureConfig(pressureConfig);
-	if(getPressureConfig() != pressureConfig)
-		eeprom_write_byte((uint8_t*)EE_PRESSURE_CONFIG, getPressureConfig());
-
 	configBits = readByteOrDefault((uint8_t*)EE_CONFIGBITS, CONFIGBITS_DEFAULT);
 
 	// Initialize MRBus address from EEPROM
@@ -1030,9 +1069,16 @@ void readConfig(void)
 		}
 	}
 
-	// Function configs
+	// Function configs. readFunctionConfiguration() reads the raw bytes with no self-heal, so seed a
+	// fresh EMRG FN byte (0x15) and COMPRSR2 byte (0x5B) to FN_OFF first - otherwise CONFIG FUNC shows
+	// "UNKNOWN" until edited. (The commit-time EEPROM_LAYOUT_VERSION migration will do this for every
+	// slot.)
+	if(0xFF == eeprom_read_byte((uint8_t*)EE_EMERGENCY_FUNCTION))
+		eeprom_write_byte((uint8_t*)EE_EMERGENCY_FUNCTION, FN_OFF);
+	if(0xFF == eeprom_read_byte((uint8_t*)EE_COMPRESSOR2_FUNCTION))
+		eeprom_write_byte((uint8_t*)EE_COMPRESSOR2_FUNCTION, FN_OFF);
 	readFunctionConfiguration();
-	
+
 	functionForceOn = eeprom_read_dword((uint32_t*)EE_FORCE_FUNC_ON);
 	functionForceOff = eeprom_read_dword((uint32_t*)EE_FORCE_FUNC_OFF);
 
@@ -1112,6 +1158,17 @@ void readConfig(void)
 	speedSet(SPEED_ITEM_DECEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_TARGET,     readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT));
+
+	// AIRBRAKE per-profile model config (src/cst-pressure.c)
+	airbrakeSet(AIRBRAKE_CHARGED,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_CHARGED,     AIRBRAKE_CHARGED_DEFAULT));
+	airbrakeSet(AIRBRAKE_MR_CUTIN,    readByteOrDefault((uint8_t*)EE_AIRBRAKE_MR_CUTIN,    AIRBRAKE_MR_CUTIN_DEFAULT));
+	airbrakeSet(AIRBRAKE_MR_CUTOUT,   readByteOrDefault((uint8_t*)EE_AIRBRAKE_MR_CUTOUT,   AIRBRAKE_MR_CUTOUT_DEFAULT));
+	airbrakeSet(AIRBRAKE_CHARGE_RATE, readByteOrDefault((uint8_t*)EE_AIRBRAKE_CHARGE_RATE, AIRBRAKE_CHARGE_RATE_DEFAULT));
+	airbrakeSet(AIRBRAKE_LEAK_RATE,   readByteOrDefault((uint8_t*)EE_AIRBRAKE_LEAK_RATE,   AIRBRAKE_LEAK_RATE_DEFAULT));
+	airbrakeSet(AIRBRAKE_PUMP_RATE,   readByteOrDefault((uint8_t*)EE_AIRBRAKE_PUMP_RATE,   AIRBRAKE_PUMP_RATE_DEFAULT));
+	airbrakeSet(AIRBRAKE_MR_LOAD,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_MR_LOAD,     AIRBRAKE_MR_LOAD_DEFAULT));
+	airbrakeSet(AIRBRAKE_DISPLAY,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_DISPLAY,     AIRBRAKE_DISPLAY_DEFAULT));
+	airbrakeSet(AIRBRAKE_COMP_MODE,   readByteOrDefault((uint8_t*)EE_AIRBRAKE_COMP_MODE,   AIRBRAKE_COMP_MODE_DEFAULT));
 }
 
 void copyConfig(uint8_t srcConfig, uint8_t destConfig)
@@ -1161,7 +1218,6 @@ void resetConfig(void)
 	eeprom_write_byte((uint8_t*)EE_DEVICE_SLEEP_TIMEOUT, SLEEP_TMR_RESET_VALUE_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_ALERTER_TIMEOUT, ALERTER_TMR_RESET_VALUE_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_DEAD_RECKONING_TIME, DEAD_RECKONING_TIME_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_PRESSURE_CONFIG, PRESSURE_CONFIG_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_CONFIGBITS, CONFIGBITS_DEFAULT);
 
 	eeprom_write_byte((uint8_t*)MRBUS_EE_DEVICE_ADDR, MRBUS_DEV_ADDR_DEFAULT);
@@ -1290,7 +1346,7 @@ void init(void)
 	initialize100HzTimer();
 
 	engineStatesQueueInitialize();
-	resetPressure();
+	initAirBrake();
 	resetSpeed();
 
 	DDRB |= _BV(PB3);
@@ -1608,11 +1664,11 @@ int main(void)
 			switch(brakeState)
 			{
 				case BRAKE_LOW_BEGIN:
-					controls |= BRAKE_OFF_CONTROL;  // Pulse the "brake off" control
+					controls |= BRAKE_REL_CONTROL;  // Pulse the "brake off" control
 					brakeState = BRAKE_LOW_WAIT;
 					break;
 				case BRAKE_LOW_WAIT:
-					controls &= ~(BRAKE_OFF_CONTROL);
+					controls &= ~(BRAKE_REL_CONTROL);
 					if(brakePcnt >= 20)
 						brakeState = BRAKE_20PCNT_BEGIN;
 					break;
@@ -1687,7 +1743,7 @@ int main(void)
 					brakeState = BRAKE_LOW_WAIT;
 					break;
 				case BRAKE_LOW_WAIT:
-					controls |= BRAKE_OFF_CONTROL;
+					controls |= BRAKE_REL_CONTROL;
 					brakeState = BRAKE_20PCNT_BEGIN;
 					break;
 
@@ -1711,7 +1767,7 @@ int main(void)
 
 				// These two states get "brake on" set by first making sure "brake off" is clear (TCS decoders don't like these changing at the same time)
 				case BRAKE_FULL_BEGIN:
-					controls &= ~(BRAKE_OFF_CONTROL);
+					controls &= ~(BRAKE_REL_CONTROL);
 					brakeState = BRAKE_FULL_WAIT;
 					break;
 				case BRAKE_FULL_WAIT:
@@ -1737,7 +1793,7 @@ int main(void)
 				case BRAKE_LOW_BEGIN:
 				case BRAKE_LOW_WAIT:
 					// Set "brake off" when below the low threshold
-					controls |= BRAKE_OFF_CONTROL;
+					controls |= BRAKE_REL_CONTROL;
 					// Escape logic:
 					//    Go to the middle state if above the brakeLowThreshold
 					if(brakePosition >= brakeLowThreshold)
@@ -1753,7 +1809,7 @@ int main(void)
 				case BRAKE_80PCNT_WAIT:
 					// Disable both "brake on" and "brake off" when between thresholds
 					controls &= ~(BRAKE_CONTROL);
-					controls &= ~(BRAKE_OFF_CONTROL);
+					controls &= ~(BRAKE_REL_CONTROL);
 					if(brakePosition < brakeLowThreshold)
 						brakeState = BRAKE_LOW_BEGIN;
 					else if(brakePosition >= brakeThreshold)
@@ -1773,7 +1829,7 @@ int main(void)
 		}
 
 		// Make sure a stale combo doesn't stick if BRK TYPE is switched away from STACK mid-combo.
-		// BRAKE_CONTROL/BRAKE_OFF_CONTROL are left alone - already owned by whichever mode just ran.
+		// BRAKE_CONTROL/BRAKE_REL_CONTROL are left alone - already owned by whichever mode just ran.
 		if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
 		{
 			controls &= ~(BK2_CONTROL | BK3_CONTROL);
@@ -1991,19 +2047,19 @@ int main(void)
 					}
 					if(optionButtonState & UP_OPTION_BUTTON)
 					{
-						if(isFunctionBrakeTest(UP_FN))
+						if(isFunctionAirBrake(UP_FN))
 						{
-							screenState = SPECFN_SCREEN;
-							subscreenState = SPECFN_SUBSCREEN_PRESSURE;
+							screenState = AIRBRAKE_SCREEN;
+							subscreenState = 0;
 							lcd_clrscr();
 						}
 					}
 					if(optionButtonState & DOWN_OPTION_BUTTON)
 					{
-						if(isFunctionBrakeTest(DOWN_FN))
+						if(isFunctionAirBrake(DOWN_FN))
 						{
-							screenState = SPECFN_SCREEN;
-							subscreenState = SPECFN_SUBSCREEN_PRESSURE;
+							screenState = AIRBRAKE_SCREEN;
+							subscreenState = 0;
 							lcd_clrscr();
 						}
 					}
@@ -2128,131 +2184,68 @@ int main(void)
 
 
 
-			case SPECFN_SCREEN:
+			case AIRBRAKE_SCREEN:
+				// AIRBRAKE - the operator-facing air-brake display, a read-only viewport into the
+				// always-running model. It blocks nothing: the brake lever drives real decoder
+				// braking and the real e-stop from here exactly as from the main screen, and the
+				// speed sim keeps running in parallel. No landing page / subscreen: renders straight
+				// away, so the top-level MENU handler keeps cycling the menu past it.
+				// Two display styles, set by the AIRBRAKE CFG "DISPLAY" item (per-profile):
+				//   DUAL (default) - Row 0: "BP:" + 3-digit brake-pipe PSI + the 2-cell "PSI" glyph
+				//     (cols 6-7). Row 1: "MR:" + 3-digit main-reservoir PSI + the same glyph.
+				//   SINGLE - the original ISE analogue gauge dial (revived from git 3cde842, before
+				//     BRAKESIM replaced it, now wired to BP): dial (cols 0-3, both rows) + a 3-digit
+				//     BP readout + literal " PSI" text (cols 4-7) - the original's own layout.
+				// UP/DOWN do nothing here. The full text/diagnostic readout (lever %, BRK REL /
+				// BRK SET / COMPRESSOR / emergency letters) is the AIRBRAKE DIAGS page under DIAGS.
 				enableLCDBacklight();
-				if(!subscreenState)
+				if(AIRBRAKE_DISPLAY_SINGLE == airbrakeGet(AIRBRAKE_DISPLAY))
 				{
-					lcd_gotoxy(1,0);
-					lcd_puts("SPECIAL");
+					setupLCD(LCD_AIRBRAKE_ALT);   // no-op after the first call - currentMode bookkeeping only
+					setupGaugeChars(airBrakePipePsi(), airbrakeGet(AIRBRAKE_CHARGED));
+					lcd_gotoxy(0,0);
+					lcd_putc(GAUGE_CHAR_A0);
+					lcd_putc(GAUGE_CHAR_A1);
+					lcd_putc(GAUGE_CHAR_A2);
+					lcd_putc(GAUGE_CHAR_A3);
+					lcd_putc(' ');
+					printDec3Dig(airBrakePipePsi());
 					lcd_gotoxy(0,1);
-					lcd_putc(0x7F);
-					lcd_puts("- FUNCS");
-					switch(button)
-					{
-						case SELECT_BUTTON:
-							if(SELECT_BUTTON != previousButton)
-							{
-								subscreenState = 1;
-								lcd_clrscr();
-							}
-							break;
-						case MENU_BUTTON:
-						case UP_BUTTON:
-						case DOWN_BUTTON:
-						case NO_BUTTON:
-							break;
-					}
+					lcd_putc(GAUGE_CHAR_B0);
+					lcd_putc(GAUGE_CHAR_B1);
+					lcd_putc(GAUGE_CHAR_B2);
+					lcd_putc(GAUGE_CHAR_B3);
+					lcd_puts(" PSI");
 				}
 				else
 				{
-					enableLCDBacklight();
+					setupLCD(LCD_DEFAULT);   // CGRAM mode for the DUAL glyph view (PSI_CHAR_L/R et al)
 					lcd_gotoxy(0,0);
-					if(SPECFN_SUBSCREEN_PRESSURE == subscreenState)
-					{
-						if(isPressureIdle())
+					lcd_puts("BP:");
+					printDec3Dig(airBrakePipePsi());
+					lcd_putc(PSI_CHAR_L);
+					lcd_putc(PSI_CHAR_R);
+					lcd_gotoxy(0,1);
+					lcd_puts("MR:");
+					printDec3Dig(airMainResPsi());
+					lcd_putc(PSI_CHAR_L);
+					lcd_putc(PSI_CHAR_R);
+				}
+				switch(button)
+				{
+					case SELECT_BUTTON:
+						if(SELECT_BUTTON != previousButton)
 						{
-							lcd_puts("BRAKE");
-							lcd_gotoxy(0,1);
-							lcd_puts("TEST  -");
-							lcd_putc(0x7E);
+							// Quick exit to the main screen (MENU still cycles the menu normally).
+							screenState = LAST_SCREEN;
+							lcd_clrscr();
 						}
-						else
-						{
-							setupLCD(LCD_PRESSURE);
-							enableLCDBacklight();
-							processPressure(min(brakePcnt,100));
-							printPressure();
-							// Disable normal brake functions to they don't interfere with the brake test sounds as we move the brake lever
-							controls &= ~(BRAKE_OFF_CONTROL);
-							controls &= ~(BRAKE_CONTROL);
-							controls &= ~(BK2_CONTROL | BK3_CONTROL);
-							currentStackBand = 0;
-							// Suppress the lever-triggered estop (BRK ESTP) too - a full-lever brake test shouldn't e-stop the loco
-							estopStatus &= ~ESTOP_BRAKE;
-						}
-						switch(button)
-						{
-							case DOWN_BUTTON:
-								if(DOWN_BUTTON != previousButton)
-									processPressure(min(brakePcnt,100));  // Start pumping
-								break;
-							case UP_BUTTON:
-							case SELECT_BUTTON:
-							case MENU_BUTTON:
-							case NO_BUTTON:
-								break;
-						}
-					}
-/*
-					else if(SPECFN_SUBSCREEN_TONNAGE == subscreenState)
-					{
-						setupLCD(LCD_TONNAGE);
-						enableLCDBacklight();
-						printTonnage();
-						switch(button)
-						{
-							case UP_BUTTON:
-								if(UP_BUTTON != previousButton)
-								{
-									incrementTonnage();
-								}
-								break;
-							case DOWN_BUTTON:
-								if(DOWN_BUTTON != previousButton)
-								{
-									decrementTonnage();
-								}
-								break;
-							case SELECT_BUTTON:
-							case MENU_BUTTON:
-							case NO_BUTTON:
-								break;
-						}
-					}
-*/
-					else
-					{
-						subscreenState = 1;
-					}
-					
-					switch(button)
-					{
-						case SELECT_BUTTON:
-							if(SELECT_BUTTON != previousButton)
-							{
-								// Escape menu system
-								subscreenState = 0;
-								screenState = LAST_SCREEN;
-								setupLCD(LCD_DEFAULT);
-								resetPressure();
-								resetSpeed();
-							}
-							break;
-						case MENU_BUTTON:
-							if(MENU_BUTTON != previousButton)
-							{
-								// Menu pressed, advance menu
-								subscreenState = (subscreenState & 0x7F) + 1;
-								lcd_clrscr();
-								resetPressure();
-								resetSpeed();
-							}
-							break;
-						case UP_BUTTON:
-						case DOWN_BUTTON:
-						case NO_BUTTON:
-							break;
-					}
+						break;
+					case UP_BUTTON:
+					case DOWN_BUTTON:
+					case MENU_BUTTON:
+					case NO_BUTTON:
+						break;
 				}
 				break;
 
@@ -3002,6 +2995,13 @@ int main(void)
 						case SELECT_BUTTON:
 							if(SELECT_BUTTON != previousButton)
 							{
+								// Always start the walk fresh at HORN_FN. Without this, a specific
+								// sequence (navigate to a now-conditionally-hidden function, back out
+								// via long-press-cancel instead of SELECT-save, change the condition
+								// elsewhere, re-enter here) could land directly on a function that
+								// should be hidden - advanceCurrentFunction()'s skip guard only runs
+								// on MENU, not on entry.
+								resetCurrentFunction();
 								subscreenState = 1;
 								lcd_clrscr();
 							}
@@ -3055,7 +3055,7 @@ int main(void)
 						case MENU_BUTTON:
 							if(MENU_BUTTON != previousButton)
 							{
-								advanceCurrentFunction();
+								advanceCurrentFunction((configBits & _BV(CONFIGBITS_AIRBRAKE)) ? 1 : 0);
 								lcd_clrscr();
 							}
 							break;
@@ -3307,6 +3307,145 @@ int main(void)
 								// tunables (SPEED_ITEM_ACCEL_PCT onward) unless ADV FUNC is enabled.
 								if( (subscreenState > SPEED_ITEM_COUNT) ||
 								    ((subscreenState - 1 >= (uint8_t)SPEED_ITEM_ACCEL_PCT) && !(systemBits & _BV(SYSTEMBITS_ADV_FUNC))) )
+									subscreenState = 1;
+								lcd_clrscr();
+							}
+							break;
+						case NO_BUTTON:
+							break;
+					}
+				}
+				break;
+
+			case AIRBRAKE_CONFIG_SCREEN:
+				enableLCDBacklight();
+				if(!subscreenState)
+				{
+					lcd_gotoxy(0,0);
+					lcd_puts("AIRBRAKE");
+					lcd_gotoxy(0,1);
+					lcd_putc(0x7F);
+					lcd_puts("-   CFG");
+					switch(button)
+					{
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								subscreenState = 1;
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+						case UP_BUTTON:
+						case DOWN_BUTTON:
+						case NO_BUTTON:
+							break;
+					}
+				}
+				else
+				{
+					uint8_t airbrakeItem = subscreenState - 1;
+					uint8_t airbrakeVal = airbrakeGet(airbrakeItem);
+
+					lcd_gotoxy(0,0);
+					switch(airbrakeItem)
+					{
+						case AIRBRAKE_CHARGED:     lcd_puts("BPCHARGE"); break;
+						case AIRBRAKE_MR_LOAD:     lcd_puts("MR LOAD "); break;
+						case AIRBRAKE_MR_CUTIN:    lcd_puts("MR LOW  "); break;
+						case AIRBRAKE_MR_CUTOUT:   lcd_puts("MR HIGH "); break;
+						case AIRBRAKE_CHARGE_RATE: lcd_puts("RECHARGE"); break;
+						case AIRBRAKE_LEAK_RATE:   lcd_puts("LEAKRATE"); break;
+						case AIRBRAKE_PUMP_RATE:   lcd_puts("PUMPRATE"); break;
+						case AIRBRAKE_DISPLAY:     lcd_puts("DISPLAY "); break;
+						case AIRBRAKE_COMP_MODE:   lcd_puts("COMPMODE"); break;
+					}
+					// Right-justified to col 7 - gotoxy's column is 8 minus this item's content width.
+					switch(airbrakeItem)
+					{
+						case AIRBRAKE_COMP_MODE:
+							lcd_gotoxy(1,1);
+							lcd_puts(airbrakeVal ? "CONSIST" : "NORMAL ");   // both 7 chars - clean overwrite either way
+							break;
+						case AIRBRAKE_DISPLAY:
+							lcd_gotoxy(1,1);
+							lcd_puts(airbrakeVal ? "SINGLE " : "DUAL   ");   // both 7 chars - clean overwrite either way
+							break;
+						case AIRBRAKE_CHARGED:
+						case AIRBRAKE_MR_CUTIN:
+						case AIRBRAKE_MR_CUTOUT:
+							// Raw PSI values: 3 digits + the 2-cell PSI glyph = 5 chars.
+							lcd_gotoxy(3,1);
+							printDec3Dig(airbrakeVal);
+							lcd_putc(PSI_CHAR_L);
+							lcd_putc(PSI_CHAR_R);
+							break;
+						case AIRBRAKE_MR_LOAD:
+							// A percentage, not PSI: 3 digits + '%' = 4 chars.
+							lcd_gotoxy(4,1);
+							printDec3Dig(airbrakeVal);
+							lcd_putc('%');
+							break;
+						default:   // RECHARGE / LEAKRATE / PUMPRATE - PSI/min: 3 digits + glyph + "/m" = 7 chars.
+							lcd_gotoxy(1,1);
+							printDec3Dig(airbrakeVal);
+							lcd_putc(PSI_CHAR_L);
+							lcd_putc(PSI_CHAR_R);
+							lcd_putc('/');
+							lcd_putc('m');
+							break;
+					}
+
+					switch(button)
+					{
+						case UP_BUTTON:
+							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								// 254, not 255: a stored 0xFF is the "unset" sentinel readByteOrDefault() resets to
+								// the default, so a value cranked to 255 would silently revert on the next load.
+								uint8_t airbrakeMax = ((AIRBRAKE_COMP_MODE == airbrakeItem) || (AIRBRAKE_DISPLAY == airbrakeItem)) ? 1
+								                     : (AIRBRAKE_CHARGED == airbrakeItem) ? AIRBRAKE_CHARGED_MAX
+								                     : (AIRBRAKE_MR_LOAD == airbrakeItem) ? AIRBRAKE_MR_LOAD_MAX : 254;
+								if(airbrakeVal < airbrakeMax)
+									airbrakeSet(airbrakeItem, airbrakeVal + 1);
+								ticks_autoincrement = 0;
+							}
+							break;
+						case DOWN_BUTTON:
+							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+							{
+								uint8_t airbrakeMin = (AIRBRAKE_CHARGED == airbrakeItem) ? AIRBRAKE_CHARGED_MIN : 0;
+								if(airbrakeVal > airbrakeMin)
+									airbrakeSet(airbrakeItem, airbrakeVal - 1);
+								ticks_autoincrement = 0;
+							}
+							break;
+						case SELECT_BUTTON:
+							if(SELECT_BUTTON != previousButton)
+							{
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_CHARGED,     airbrakeGet(AIRBRAKE_CHARGED));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_MR_CUTIN,    airbrakeGet(AIRBRAKE_MR_CUTIN));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_MR_CUTOUT,   airbrakeGet(AIRBRAKE_MR_CUTOUT));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_CHARGE_RATE, airbrakeGet(AIRBRAKE_CHARGE_RATE));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_LEAK_RATE,   airbrakeGet(AIRBRAKE_LEAK_RATE));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_PUMP_RATE,   airbrakeGet(AIRBRAKE_PUMP_RATE));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_MR_LOAD,     airbrakeGet(AIRBRAKE_MR_LOAD));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_DISPLAY,     airbrakeGet(AIRBRAKE_DISPLAY));
+								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_COMP_MODE,   airbrakeGet(AIRBRAKE_COMP_MODE));
+								readConfig();
+								lcd_clrscr();
+								lcd_gotoxy(1,0);
+								lcd_puts("SAVED!");
+								wait100ms(7);
+								subscreenState = 0;
+								lcd_clrscr();
+							}
+							break;
+						case MENU_BUTTON:
+							if(MENU_BUTTON != previousButton)
+							{
+								subscreenState++;
+								if(subscreenState > AIRBRAKE_COUNT)
 									subscreenState = 1;
 								lcd_clrscr();
 							}
@@ -3976,10 +4115,9 @@ int main(void)
 					lcd_gotoxy(0,0);
 
 					// FIXME: These variables serve no real purpose other than indicating which menu is active
-					//         A better solution would be to name the subscreens like in Special Functions
+					//         A better solution would be a named-item enum + label switch, as AIRBRAKE CFG / SPEED CFG do
 					uint8_t maxDeadReckoningTime = getMaxDeadReckoningTime();
-					uint8_t pressureCoefficients = getPressureConfig();
-					
+
 					if(1 == subscreenState)
 					{
 						lcd_puts("DISPLAY");
@@ -3987,6 +4125,12 @@ int main(void)
 						prefsPtr = &configBits;
 					}
 					else if(2 == subscreenState)
+					{
+						lcd_puts("AIRBRAKE");
+						bitPosition = CONFIGBITS_AIRBRAKE;
+						prefsPtr = &configBits;
+					}
+					else if(3 == subscreenState)
 					{
 						lcd_puts("SLEEP");
 						lcd_gotoxy(0,1);
@@ -3997,7 +4141,7 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &newSleepTimeout;
 					}
-					else if(3 == subscreenState)
+					else if(4 == subscreenState)
 					{
 						lcd_puts("ALERTER");
 						lcd_gotoxy(0,1);
@@ -4015,7 +4159,7 @@ int main(void)
 						bitPosition = 0xFF;
 						prefsPtr = &newAlerterTimeout;
 					}
-					else if(4 == subscreenState)
+					else if(5 == subscreenState)
 					{
 						lcd_puts("TIMEOUT");
 						lcd_gotoxy(0,1);
@@ -4025,16 +4169,6 @@ int main(void)
 						lcd_puts("s");
 						bitPosition = 0xFF;
 						prefsPtr = &maxDeadReckoningTime;
-					}
-					else if(5 == subscreenState)
-					{
-						lcd_puts("PUMP");
-						lcd_gotoxy(0,1);
-						lcd_puts("RATE:");
-						lcd_gotoxy(7,1);
-						lcd_putc('1' + getPumpRate());
-						bitPosition = 0xFF;
-						prefsPtr = &pressureCoefficients;
 					}
 					else if(6 == subscreenState)
 					{
@@ -4102,10 +4236,6 @@ int main(void)
 									{
 										incrementMaxDeadReckoningTime();
 									}
-									if(prefsPtr == &pressureCoefficients)
-									{
-										incrementPumpRate();
-									}
 									else
 									{
 										if(*prefsPtr < 0xFF)
@@ -4132,10 +4262,6 @@ int main(void)
 									{
 										decrementMaxDeadReckoningTime();
 									}
-									if(prefsPtr == &pressureCoefficients)
-									{
-										decrementPumpRate();
-									}
 									else
 									{
 										if(*prefsPtr > 0)
@@ -4155,7 +4281,6 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_DEVICE_SLEEP_TIMEOUT, newSleepTimeout);
 								eeprom_write_byte((uint8_t*)EE_ALERTER_TIMEOUT, newAlerterTimeout);
 								eeprom_write_byte((uint8_t*)EE_DEAD_RECKONING_TIME, getMaxDeadReckoningTime());
-								eeprom_write_byte((uint8_t*)EE_PRESSURE_CONFIG, getPressureConfig());
 								eeprom_write_byte((uint8_t*)EE_CONFIGBITS, configBits);
 								readConfig();
 								// Resync the new* staging locals from the (readConfig()-restored) real
@@ -4451,13 +4576,13 @@ int main(void)
 								}
 								else
 								{
-									if( !(controls & BRAKE_CONTROL) && !(controls & BRAKE_OFF_CONTROL) )
+									if( !(controls & BRAKE_CONTROL) && !(controls & BRAKE_REL_CONTROL) )
 										lcd_putc(FUNCTION_INACTIVE_CHAR);
-									else if( (controls & BRAKE_CONTROL) && !(controls & BRAKE_OFF_CONTROL) )
+									else if( (controls & BRAKE_CONTROL) && !(controls & BRAKE_REL_CONTROL) )
 										lcd_putc(FUNCTION_ACTIVE_CHAR);
-									else if( !(controls & BRAKE_CONTROL) && (controls & BRAKE_OFF_CONTROL) )
+									else if( !(controls & BRAKE_CONTROL) && (controls & BRAKE_REL_CONTROL) )
 										lcd_putc('*');
-									else if( (controls & BRAKE_CONTROL) && (controls & BRAKE_OFF_CONTROL) )
+									else if( (controls & BRAKE_CONTROL) && (controls & BRAKE_REL_CONTROL) )
 										lcd_putc('!');  // Invalid condition
 									printDec2Dig((brakePcnt>99)?99:brakePcnt);
 									lcd_putc('%');
@@ -4744,6 +4869,54 @@ int main(void)
 							while(1);  // Force a watchdog reset
 						}
 					}
+					else if((14 == subscreenState) && (configBits & _BV(CONFIGBITS_AIRBRAKE)))
+					{
+						// AIRBRAKE DIAGS - the raw air-brake text readout (was the AIRBRAKE screen's
+						// second line before AIRBRAKE got its own glyph design). Page 14, but the MENU handler
+						// visits it right after the throttle-status page (1), so it reads as the
+						// second diag page. Plain ASCII, so the LCD_DIAGS CGRAM mode loaded on entry
+						// is harmless. SELECT / MENU are handled by the shared DIAGS subscreen switch
+						// below (SELECT -> landing; MENU -> SLEEP page).
+						//   Row 0: P<brake-pipe> R<reservoir>, whole PSI. Pipe is normally 2 digits with a
+						//     blank gap column before R; at 100+ the hundreds digit fills that gap column.
+						//   Row 1: L<lever%> then a letter per AIRBRAKE function while it asserts -
+						//          R = BRK REL, S = BRK SET pulse, C1/C2 = COMPRESSOR (synchronised /
+						//          routine run - digit only shown when COMPMODE = CONSIST, bare C
+						//          otherwise), E = emergency dump. While the compressor is off, the C
+						//          column instead shows '*' (COMPMODE = CONSIST only) when the pending
+						//          consist-sync credit already clears the deep/COMPRSR threshold - lets
+						//          you watch it accumulate and leak away between runs.
+						enableLCDBacklight();
+						uint8_t bpPsi = airBrakePipePsi();
+						lcd_gotoxy(0,0);
+						lcd_putc('P');
+						if(bpPsi >= 100)
+						{
+							// BP CHARGE can exceed 99 - the hundreds digit takes the P/R gap column.
+							printDec3Dig(bpPsi);
+						}
+						else
+						{
+							printDec2Dig(bpPsi);
+							lcd_putc(' ');
+						}
+						lcd_putc('R');
+						printDec3Dig(airMainResPsi());
+						lcd_gotoxy(0,1);
+						lcd_putc('L');
+						printDec2Dig(min(brakePcnt,99));
+						lcd_putc(airBrakeReleased() ? 'R' : ' ');
+						lcd_putc(airBrakeSetPulse() ? 'S' : ' ');
+						if(airCompressorOn())
+							lcd_putc('C');
+						else if((AIRBRAKE_COMP_MODE_CONSIST == airbrakeGet(AIRBRAKE_COMP_MODE)) && airCompressorPendingRelease())
+							lcd_putc('*');
+						else
+							lcd_putc(' ');
+						lcd_putc((airCompressorOn() && (AIRBRAKE_COMP_MODE_CONSIST == airbrakeGet(AIRBRAKE_COMP_MODE)))
+						             ? (airCompressorReleaseRun() ? '1' : '2') : ' ');
+						lcd_putc(airEmergencyActive() ? 'E' : ' ');
+					}
 					else
 					{
 						subscreenState = 1;
@@ -4763,8 +4936,18 @@ int main(void)
 						case MENU_BUTTON:
 							if(MENU_BUTTON != previousButton)
 							{
-								// Menu pressed, advance menu
-								subscreenState++;
+								// Menu pressed, advance to the next diag page. AIRBRAKE DIAGS (page 14) is
+								// slotted in right after the throttle-status page (1) when AIRBRAKE is
+								// enabled, and skipped entirely otherwise; page 13 (FACTORY RESET)
+								// wraps back to 1.
+								if(13 == subscreenState)
+									subscreenState = 1;
+								else if(14 == subscreenState)
+									subscreenState = 2;
+								else if((1 == subscreenState) && (configBits & _BV(CONFIGBITS_AIRBRAKE)))
+									subscreenState = 14;
+								else
+									subscreenState++;
 								subscreenCount = 0;
 								lcd_clrscr();
 								resetCounter = RESET_COUNTER_RESET_VALUE;
@@ -4807,8 +4990,8 @@ int main(void)
 			case LAST_SCREEN:
 				// Clean up and reset
 				lcd_clrscr();
-				// Restore the default custom characters - a screen with its own CGRAM glyphs
-				// (the Brake Test gauge programs all 8 slots) funnels through here on exit, and
+				// Restore the default custom characters - any screen that reprogrammed CGRAM
+				// (e.g. DIAG_SCREEN's LCD_DIAGS glyphs) funnels through here on exit, and
 				// setupLCD()'s currentMode guard makes this a no-op when nothing changed.
 				setupLCD(LCD_DEFAULT);
 				screenState = 0;
@@ -4824,6 +5007,12 @@ int main(void)
 				{
 					// Menu pressed, advance menu
 					lcd_clrscr();
+					// Restore the default CGRAM. AIRBRAKE_SCREEN's DISPLAY=SINGLE view leaves
+					// LCD_AIRBRAKE_ALT active (all 8 slots = gauge artwork); advancing from it via MENU
+					// would otherwise land on AIRBRAKE_CONFIG_SCREEN with slots 6/7 still holding gauge
+					// fragments instead of the PSI glyph. currentMode guard makes this free on every
+					// other menu advance (same backstop as case LAST_SCREEN).
+					setupLCD(LCD_DEFAULT);
 					screenState++;  // No range checking needed since LAST_SCREEN will reset the counter
 					ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
 
@@ -4858,11 +5047,28 @@ int main(void)
 						}
 					}
 
+					// Skip AIRBRAKE / AIRBRAKE CFG when AIRBRAKE is off - the model still ticks but
+					// drives nothing. (AIRBRAKE is still reachable via an AIRBRAKE-bound button.)
+					if(AIRBRAKE_SCREEN == screenState)
+					{
+						if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+						{
+							screenState++;
+						}
+					}
+					if(AIRBRAKE_CONFIG_SCREEN == screenState)
+					{
+						if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+						{
+							screenState++;
+						}
+					}
+
 					if(systemBits & _BV(SYSTEMBITS_MENU_LOCK))
 					{
 						// Menu lock active
 						while( 	(ENGINE_SCREEN != screenState) &&
-								(SPECFN_SCREEN != screenState) &&
+								(AIRBRAKE_SCREEN != screenState) &&
 								(LOAD_CONFIG_SCREEN != screenState) &&
 								(LOCO_SCREEN != screenState) &&
 								(FORCE_FUNC_SCREEN != screenState) &&
@@ -4921,16 +5127,6 @@ int main(void)
 				newTimeAddr = timeSourceAddress;
 				newUpdate_seconds = update_decisecs / 10;
 
-				// The Brake Test subscreen (SPECFN) runs the pressure/speed sims and
-				// suppresses the brake controls the speed sim reads; its SELECT-escape
-				// resets both on the way out. Do the same on a cancel, or COMPRESSOR_FN
-				// stays asserted and a re-entry lands mid-sim instead of at the prompt.
-				if(SPECFN_SCREEN == screenState)
-				{
-					resetPressure();
-					resetSpeed();
-				}
-
 				subscreenState = 0;
 				screenState = LAST_SCREEN;
 				lcd_clrscr();
@@ -4966,6 +5162,42 @@ int main(void)
 			led = LED_OFF;
 		}
 		
+
+		// AIRBRAKE model: once per 10Hz tick (flag from TIMER0_COMPA_vect), run here so it
+		// takes the lever percentage as a parameter. Ticked just before the function mask is built so
+		// its outputs (BRAKE_REL_FN / BRK SET / COMPRESSOR_FN, applied below) are this pass's values.
+		//  arg 2 = independentBrakeAtRest: is the *independent* brake (whichever BRK TYPE is active)
+		//          genuinely at rest right now - reuses each mode's own rest boundary instead of a
+		//          separate AIRBRAKE-only percentage, so the automatic-brake pipe's apply/release
+		//          point tracks how each mode really decides "released". brakeState/currentStackBand
+		//          are already current for this pass (the brake-mode dispatch runs earlier in the same
+		//          loop iteration, ~1645-1821). Step and Stack have real, wide rest zones of their own
+		//          (brakeState holds at BRAKE_LOW_BEGIN/WAIT for the whole 0-20% range in Step;
+		//          currentStackBand==0 for band 0, whose upper edge is 25%/17% for 3-STEP/5-STEP) -
+		//          Standard's own low-threshold state has no usable width (its state machine leaves
+		//          BRAKE_LOW_BEGIN/WAIT the instant brakePosition clears brakeLowThreshold, no margin),
+		//          so it shares Pulse's raw fallback instead (Pulse's own brakeState tracks PWM duty-
+		//          cycle phase, not lever rest, so it was never usable here either). See CLAUDE.md
+		//          "Brake logic".
+		//  arg 3 = the BRK ESTP option is on -> a full-lever slam is an emergency application (pipe
+		//          dumps to 0); the option flag, not ESTOP_BRAKE, so it still models on AIRBRAKE.
+		{
+			uint8_t doBrakeTick;
+			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { doBrakeTick = brake10HzTick; brake10HzTick = 0; }
+			if(doBrakeTick)
+			{
+				uint8_t independentBrakeAtRest;
+				if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
+					independentBrakeAtRest = (BRAKE_LOW_BEGIN == brakeState) || (BRAKE_LOW_WAIT == brakeState);
+				else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+					independentBrakeAtRest = (0 == currentStackBand);
+				else
+					independentBrakeAtRest = (brakePcnt < 20);   // Standard + Pulse - matches Step's own 20% onset
+
+				updateBrake10Hz(min(brakePcnt,100), independentBrakeAtRest,
+				                (optionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE)) ? 1 : 0);
+			}
+		}
 
 		// Figure out which functions should be on and which should be off
 		functionMask = 0;
@@ -5007,8 +5239,44 @@ int main(void)
 		}
 		if(controls & BRAKE_CONTROL)
 			functionMask |= getFunctionMask(BRAKE_FN);
-		if(controls & BRAKE_OFF_CONTROL)
-			functionMask |= getFunctionMask(BRAKE_OFF_FN);
+		if(configBits & _BV(CONFIGBITS_AIRBRAKE))
+		{
+			// AIRBRAKE owns the air functions: BRAKE_REL_FN from the applied latch (its ON edge, a
+			// genuine full release, is the brake-release sound), BRAKE_SET_FN as a ~1 s pulse at the
+			// start of every brake-pipe reduction (the trainline exhaust hiss), COMPRESSOR_FN/
+			// COMPRESSOR2_FN from the reservoir governor. BK2/BK3 and BRAKE_FN stay with the BRK TYPE
+			// machine.
+			//
+			// Heading into sleep: stop asserting the non-latching sound functions (compressor, vent)
+			// a few ticks early, while packets still flow, so a final "off" reaches the loco - once
+			// the radio sleeps the command station just holds the last state it heard and the
+			// compressor sound would play forever. BRAKE_REL_FN is a released/applied state (edge-
+			// triggered decoder sound, not continuous), so it's left as-is.
+			uint16_t sleepLeft;
+			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { sleepLeft = sleepTimeout_decisecs; }
+			uint8_t sleepImminent = (throttleStatus & THROTTLE_STATUS_SLEEP) ||
+			                        (sleepLeft <= AIRBRAKE_SLEEP_QUIET_DECISECS);
+
+			if(airBrakeReleased())
+				functionMask |= getFunctionMask(BRAKE_REL_FN);
+			if(!sleepImminent && airBrakeSetPulse())
+				functionMask |= getFunctionMask(BRAKE_SET_FN);
+			if(!sleepImminent && airCompressorOn())
+			{
+				// COMPMODE = CONSIST: split by whether this run is servicing a deep recharge (see
+				// airCompressorReleaseRun()/cst-pressure.c) - COMPRSR for that, COMPRSR2 for a
+				// routine leak-driven cycle. COMPMODE = NORMAL (default): always COMPRSR, matching
+				// pre-split behaviour exactly.
+				if((AIRBRAKE_COMP_MODE_CONSIST == airbrakeGet(AIRBRAKE_COMP_MODE)) && !airCompressorReleaseRun())
+					functionMask |= getFunctionMask(COMPRESSOR2_FN);
+				else
+					functionMask |= getFunctionMask(COMPRESSOR_FN);
+			}
+		}
+		else if(controls & BRAKE_REL_CONTROL)
+		{
+			functionMask |= getFunctionMask(BRAKE_REL_FN);
+		}
 		if(controls & BK2_CONTROL)
 			functionMask |= getFunctionMask(BK2_FN);
 		if(controls & BK3_CONTROL)
@@ -5028,37 +5296,6 @@ int main(void)
 			functionMask |= getFunctionMask(DOWN_FN);
 			if(isFunctionEstop(DOWN_FN))
 				estopStatus |= ESTOP_BUTTON;
-		}
-
-		if(isCompressorRunning())
-		{
-#ifdef COMPRESSOR_TM
-			lcd_gotoxy(4,0);
-			lcd_putc('C');
-#endif
-			functionMask |= getFunctionMask(COMPRESSOR_FN);
-		}
-#ifdef COMPRESSOR_TM
-		else
-		{
-			lcd_gotoxy(4,0);
-			lcd_putc(' ');
-		}
-#endif
-		if(isBrakeTestActive())
-		{
-#ifdef COMPRESSOR_TM
-			lcd_gotoxy(4,1);
-			lcd_putc('B');
-#endif
-			functionMask |= getFunctionMask(BRAKE_TEST_FN);
-		}
-		else
-		{
-#ifdef COMPRESSOR_TM
-			lcd_gotoxy(4,1);
-			lcd_putc(' ');
-#endif
 		}
 
 		if(controls & THR_UNLK_CONTROL)
@@ -5168,6 +5405,12 @@ int main(void)
 		else
 			throttleStatus &= ~THROTTLE_STATUS_EMERGENCY;
 
+		// EMRG FN: the operator's configured function, asserted for as long as the throttle is in
+		// emergency (any source - brake slam, an FN_EMRG control, alerter-as-estop). Done here, after
+		// the status bit is final and while functionMask is still being built.
+		if(throttleStatus & THROTTLE_STATUS_EMERGENCY)
+			functionMask |= getFunctionMask(EMERGENCY_FN);
+
 		// Scale-speed sim: once per 10Hz tick (flag set by TIMER0_COMPA_vect), but run from here, not
 		// the ISR - its standing-start ramp does 64-bit math that must not stall the radio/encoder
 		// interrupts. Placed after every input it reads is this pass's value (commandedSpeedStep, the
@@ -5182,17 +5425,33 @@ int main(void)
 				                holdFunctionActive);
 		}
 
-		uint8_t inputsChanged =	(activeReverserSetting != lastActiveReverserSetting) ||
+		uint8_t nonFnInputsChanged =	(activeReverserSetting != lastActiveReverserSetting) ||
 									(activeThrottleSetting != lastActiveThrottleSetting) ||
-									(functionMask != lastFunctionMask) ||
 									((throttleStatus & THROTTLE_STATUS_EMERGENCY) != (lastThrottleStatus & THROTTLE_STATUS_EMERGENCY));
 									// Look at just EMERG bit since other bits are used for sleep and alerter
 
+		uint8_t inputsChanged = nonFnInputsChanged || (functionMask != lastFunctionMask);
+
+		// AIRBRAKE's compressor governor and vent one-shot flip their own function bits on internal
+		// timers even while the throttle sits idle. Those changes must still be transmitted (inputsChanged,
+		// above, gates TX), but they must not read as crew activity for the sleep / alerter timeouts, or a
+		// throttle with AIRBRAKE on could never nod off (nor its alerter fire). Everything else - including
+		// BRAKE_REL_FN, which only flips on a real brake apply/release - still counts.
+		uint32_t idleFnMask = (configBits & _BV(CONFIGBITS_AIRBRAKE))
+			? (getFunctionMask(COMPRESSOR_FN) | getFunctionMask(COMPRESSOR2_FN) | getFunctionMask(BRAKE_SET_FN)) : 0;
+		uint8_t activityForTimeout = nonFnInputsChanged ||
+			((functionMask & ~idleFnMask) != (lastFunctionMask & ~idleFnMask));
+
+		// AIRBRAKE is a read-only viewport that suppresses nothing, so working the brake lever
+		// there puts real brake bits into functionMask and already counts as activity above - it
+		// needs no special sleep/alerter hold, and a genuinely idle AIRBRAKE screen times out to
+		// sleep like every other menu screen.
+
 		// Reset sleep timer
 		// Using activeReverserSetting also guarantees the throttle (activeThrottleSetting) was in idle when entering sleep, so it will unsleep in the idle position.
-		if( 
-			(NO_BUTTON != button) || 
-			inputsChanged ||
+		if(
+			(NO_BUTTON != button) ||
+			activityForTimeout ||
 			((configBits & _BV(CONFIGBITS_STRICT_SLEEP)) && ((FORWARD == activeReverserSetting) || (REVERSE == activeReverserSetting)))
 			)
 		{
@@ -5204,9 +5463,9 @@ int main(void)
 
 		// Reset alerter timer
 		// Using activeReverserSetting also guarantees the throttle (activeThrottleSetting) was in idle when entering sleep, so it will unsleep in the idle position.
-		if( 
-			(NO_BUTTON != button) || 
-			inputsChanged ||
+		if(
+			(NO_BUTTON != button) ||
+			activityForTimeout ||
 			(NEUTRAL == activeReverserSetting)
 			)
 		{

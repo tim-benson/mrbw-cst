@@ -121,7 +121,7 @@ then transmitted. There is no "pending pulse" bookkeeping at this stage — a fu
 exactly as long as its underlying condition stays true, and drops the instant it does not. `NEUTRAL_FN`
 ("reverser center") is the clearest example: `if(NEUTRAL == activeReverserSetting) functionMask |=
 getFunctionMask(NEUTRAL_FN);` — continuously held while the reverser sits centered, the same
-*continuous-hold-while-condition-is-true* idiom used by `BRAKE_CONTROL`/`BRAKE_OFF_CONTROL` in
+*continuous-hold-while-condition-is-true* idiom used by `BRAKE_CONTROL`/`BRAKE_REL_CONTROL` in
 standard/pulse brake mode, just checked directly against live state instead of through an intermediate
 `controls` bit set by a state machine. This is the dominant pattern for persistent (non-pulsed) behavior in
 this codebase.
@@ -174,7 +174,7 @@ principle exhibit the same class of transient glitch — not reported as an issu
 
 A second, independently-configurable DCC function (`HORN2_FN`, menu name "HORN2") tied to its own calibrated
 lever position (`hornThreshold2`), with a `HORNTYPE` option (`OPTION_SCREEN`) selecting how it relates to the
-primary horn: Additive, default (Horn2 fires on top of Horn1 once the lever passes Horn2's threshold) or
+primary horn: Additive, default (Horn2 fires on top of Horn1 once the lever passes the Horn2 threshold) or
 Exclusive (Horn2 replaces Horn1). On-screen the option reads `1 ←→ 1+2` (Additive) or `1 ←→ 2` (Exclusive).
 Both thresholds use the standard hysteresis dead-band independently. Exclusive mode is a stateless one-line
 override applied after both independent checks (`controls &= ~HORN_CONTROL` whenever `HORN2_CONTROL` is set
@@ -186,7 +186,7 @@ hysteresis margin. `HORNTYPE` is `optionBits` bit 6 (per-profile); it round-trip
 upgraded from stock firmware — simply means Horn2 is disabled. It is deliberately left out of the
 `THRESHOLD CAL` auto-skip gate (unlike `hornThreshold`/`brakeThreshold*`), so an upgraded throttle is not
 forced back through calibration for it. The HORN2 threshold-calibration subscreen shows a non-blocking
-`<H1` cue whenever the captured `hornThreshold2` sits at or below `hornThreshold` (Horn1's point) — a
+`<H1` cue whenever the captured `hornThreshold2` sits at or below `hornThreshold` (the Horn1 point) — a
 misconfiguration that would let Horn2 fire before Horn1.
 
 **Diagnostic display**: the function-status row of `DIAG_SCREEN` shows `HORN_CHAR` (the stock horn/trumpet icon,
@@ -206,7 +206,7 @@ check did not.
 ## Brake logic
 
 `brakeState` (`BrakeStates` enum: `BRAKE_LOW_BEGIN` ... `BRAKE_FULL_WAIT`, `mrbw-cst.c`) drives two
-outputs, `BRAKE_CONTROL` and `BRAKE_OFF_CONTROL`, which map to the `BRAKE_FN`/`BRAKE_OFF_FN` logical
+outputs, `BRAKE_CONTROL` and `BRAKE_REL_CONTROL`, which map to the `BRAKE_FN`/`BRAKE_REL_FN` logical
 functions. Which variant runs is selected by `BRK TYPE`, a 3-way cycle in `optionBits`
 (`OPTIONBITS_BRK_TYPE_LSB`, bits 3-4; `GET_BRK_TYPE`/`SET_BRK_TYPE` macros), set via the on-device menu:
 
@@ -235,12 +235,13 @@ track the lever symmetrically in both directions, and each combo persists (holds
 pulsing, matching the standard/pulse mode idiom rather than the stepped mode one.
 
 Two step-count variants, selected by a `STEPS` toggle (3-STEP default, 5-STEP option; existing
-combo config for whichever variant is not active stays stored and reactivates if switched back): the lever
-divides into `stackBandCount()` equal-width bands (4 for 3-STEP, 6 for 5-STEP, both counts including band
-0). Band 0 (full-left) and the top band (full-right) are pinned to the lever extremes; band 0 is
-permanently fixed to "no combo" and asserts `BRAKE_OFF_FN` continuously (like the standard/pulse mode
-release, not the stepped mode one-tick pulse) — it is not stored or editable. An interior band combo of
-`0x00` ("none active") is distinct from band 0: it asserts neither a brake-on combo nor `BRAKE_OFF_FN`.
+combo config for whichever variant is not active stays stored and reactivates if switched back): the
+lever divides into `stackBandCount()` equal-width bands (4 for 3-STEP, 6 for 5-STEP, both counts
+including band 0). Band 0 (full-left) and the top band (full-right) are pinned to the lever extremes;
+band 0 is permanently fixed to "no combo" and asserts `BRAKE_REL_FN` continuously (like the standard/
+pulse mode release, not the stepped mode one-tick pulse) — it is not stored or editable. An interior
+band combo of `0x00` ("none active") is distinct from band 0: it asserts neither a brake-on combo nor
+`BRAKE_REL_FN`.
 Band cut-points live in the explicit ordered array in `stackThresholds()` rather than a formula, since
 boundaries could change to become uneven in the future.
 
@@ -264,10 +265,9 @@ pair, all three) via a `stackComboSequence[8]` lookup table. Display is `STEP1`�
 `BRAKE123` — "band" is the internal term (includes the off band); "step" is the on-device end-user term for
 the editable bands only.
 
-The pre-existing Brake Test screen (the pressure-gauge subscreen of `SPECFN_SCREEN`, reached via a control
-configured to `FN_BRKTEST`) suppresses `BRAKE_CONTROL`/`BRAKE_OFF_CONTROL`/`BK2_CONTROL`/`BK3_CONTROL` and
-the lever-triggered e-stop while its simulated pressure/sound sequence is active, so moving the lever
-during a test does not also fire real brake functions or a genuine e-stop.
+The AIRBRAKE screen (see "AIRBRAKE" below) is a read-only viewport onto the air-brake sound model and
+suppresses nothing — working the lever there drives `BRAKE_CONTROL`/`BK2_CONTROL`/`BK3_CONTROL` and the
+real lever e-stop exactly as from the main screen.
 
 **DCC packet economy note**: NMRA DCC groups function numbers into fixed packet groups (F0-F4, F5-F8,
 F9-F12, F13-F20, F21-F28); assigning Brake1/2/3 within one group (F9-F12 fits all three) lets a downstream
@@ -286,17 +286,19 @@ an earlier wireless-received-speed design that was evaluated and not adopted.
 Commanded speed is `notchSpeedStep[activeThrottleSetting-1]` — the same 0-126 DCC speed step already
 transmitted, no new input needed. Scale speed is `speedStep/126 × speedMaxMph`, with `speedMaxMph` a
 per-profile configurable value (`MAXSPEED`), converted to km/h at display time if that unit is selected.
-`src/cst-speed.c`/`.h` (mirroring the shape of `cst-pressure.c`: EEPROM-backed per-profile config, 10Hz update,
-own display printer) holds `simSpeedStepQ8`, an 8.8 fixed-point simulated speed step — chosen over a plain
-integer to avoid per-tick truncation stalling at slow rates, the same class of problem
-`updatePressure10Hz()` works around with its own floor. `updateSpeed10Hz()` runs once per 100ms tick, but
+`src/cst-speed.c`/`.h` (mirroring the shape of `cst-pressure.c`: EEPROM-backed per-profile config, 10Hz
+update, own display printer) holds `simSpeedStepQ8`, an 8.8 fixed-point simulated speed step — chosen
+over a plain integer to avoid per-tick truncation stalling at slow rates, the same class of problem the
+AIRBRAKE brake-pipe recharge works around with its own fixed tail-crawl floor
+(`AIRBRAKE_RECHARGE_TAIL_MPSI`, see "AIRBRAKE" below). `updateSpeed10Hz()` runs once per 100ms tick, but
 from the **main loop**, not the timer ISR: `TIMER0_COMPA_vect` only sets a `speed10HzTick` flag and the
 main loop consumes it. The standing-start ramp does `int64` multiply/divide that must not run inside an ISR
 — it would stall the radio-UART and quadrature-encoder interrupts for its duration (a latency concern, not
-a CPU-load one — the math is a ~0.25% duty cycle). `updateTime10Hz()` and `updatePressure10Hz()` stay in
-the ISR: cheap, and they need precise timing. Brake-active flags and the other inputs are passed to
-`updateSpeed10Hz()` explicitly rather than read via `extern`, so the module has no dependency on
-the internal bit layout of `mrbw-cst.c`.
+a CPU-load one — the math is a ~0.25% duty cycle). `updateBrake10Hz()` runs the same way, from the main
+loop via its own `brake10HzTick` flag — only `updateTime10Hz()` stays in the ISR: cheap, and it needs
+precise timing. Brake-active flags and the other inputs are passed to `updateSpeed10Hz()` explicitly
+rather than read via `extern`, so the module has no dependency on the internal bit layout of
+`mrbw-cst.c`.
 
 **ESU LokSound/LokPilot formulas modeled** (from ESU community documentation — covers both V4 and V5, see
 `TYPE` below):
@@ -347,8 +349,8 @@ standing-start ramp and re-arms the Start Delay, so releasing e-stop/`STOPFN` re
 standing start — not mid-ramp. `HOLDFN` (default F09) freezes the simulation exactly as-is while asserted —
 no state is touched, since `functionMask`/`commandedSpeedStep` are recomputed fresh every pass, so freezing
 is sufficient by construction for "resume based on current state once released." While `HOLDFN` is
-asserted, the loco-address line of the main screen is also replaced with a literal `"HOLD"` on-screen cue — the
-same priority slot the throttle existing reverser-mismatch indicator already uses, checked in order:
+asserted, the loco-address line of the main screen is also replaced with a literal `"HOLD"` on-screen cue
+— the same priority slot the throttle existing reverser-mismatch indicator already uses, checked in order:
 alerter-timeout backlight blink → reverser mismatch → `"HOLD"` → normal loco address/speed display.
 `STOPFN` has no on-screen text of its own — its effect is only visible through the speed readout itself
 snapping to 0mph.
@@ -357,10 +359,11 @@ snapping to 0mph.
 brake lever at max (gated by `OPTIONBITS_ESTOP_ON_BRAKE`), a control configured to `FN_EMRG`, and alerter
 timeout specifically when `ALERTER_FN = FN_EMRG` — an ordinary alerter timeout always forces the throttle
 to zero and applies the brake as a fail-safe regardless of how `ALERTER_FN` is configured, but only feeds
-`THROTTLE_STATUS_EMERGENCY` (and so the display snap-to-zero) in the `FN_EMRG` case. That forced brake
-application asserts the `BRAKE_FN` bit directly in `functionMask` (the alerter-timeout block in
-`mrbw-cst.c`), so the `functionMask`-based Brake1 detection the speed sim already does picks it up
-through the same path as every other brake source.
+`THROTTLE_STATUS_EMERGENCY` (and so the display snap-to-zero) in the `FN_EMRG` case. Either way the
+alerter timeout asserts the `BRAKE_FN` bit directly in `functionMask` (the alerter-timeout block in
+`mrbw-cst.c`), so the simulation ordinary `functionMask`-based Brake1 detection (see "Brake-function
+detection" below) picks it up through the same path as every other brake source — no separate
+mechanism is needed.
 
 ### How the simulation math works
 
@@ -390,13 +393,13 @@ coast or brake, steady-state or interrupting an active climb.
 
 **Standing-start acceleration (`ACCPCT`/`ACCTGT`)**: real locomotives reach any speed below 15mph faster
 than the plain `ACCEL` model predicts, by a roughly constant amount of time (not proportional to distance).
-`ACCPCT` (0-255 = 0-100% of the full-range crossing time of `ACCEL` itself) is that lead-time budget, spent as a
-smooth cubic-Hermite ramp from a genuine stop up to the 15mph-equivalent speed, calibrated from a 30-point
-standing-start hardware sweep. `ACCTGT` (0.1s/unit) is a target time-to-1mph, achieved by generalizing the
-the zero-rate starting boundary condition of the ramp to a configurable nonzero initial slope chosen so the ramp
-hits the target tick exactly — both ramp endpoints are algebraically unaffected by this, so
-the calibrated total time of `ACCPCT` to 15mph never changes regardless of `ACCTGT`. `ACCTGT` can only *shorten*
-the onset from its own natural baseline, never push it later. Very aggressive `ACCTGT` values can make the
+`ACCPCT` (0-255 = 0-100% of the full-range crossing time of `ACCEL` itself) is that lead-time budget, spent
+as a smooth cubic-Hermite ramp from a genuine stop up to the 15mph-equivalent speed, calibrated from a
+30-point standing-start hardware sweep. `ACCTGT` (0.1s/unit) is a target time-to-1mph, achieved by
+generalizing the zero-rate starting boundary condition of the ramp to a configurable nonzero initial slope
+chosen so the ramp hits the target tick exactly — both ramp endpoints are algebraically unaffected by this,
+so the calibrated total time of `ACCPCT` to 15mph never changes regardless of `ACCTGT`. `ACCTGT` can only
+*shorten* the onset from its own natural baseline, never push it later. Very aggressive `ACCTGT` values can make the
 ramp briefly non-monotonic later in its climb (confirmed tiny, below display resolution, at the one extreme
 tested).
 
@@ -465,6 +468,212 @@ Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=5
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
 
+## AIRBRAKE — air-brake simulation
+
+`src/cst-pressure.c` models a locomotive air-brake system — brake pipe + main reservoir — and drives
+DCC sound functions from it. It replaces the old transient "Brake Test" pressure gauge (the
+`PumpState` machine and `LCD_PRESSURE` are gone; the analogue-dial CGRAM canvas itself was later
+revived as the `DISPLAY = SINGLE` gauge view — see below).
+
+`updateBrake10Hz(leverPcnt, independentBrakeAtRest, emergencyBrakeEnabled)` runs once per 10 Hz tick
+**from the main loop** (ISR sets `brake10HzTick`, the loop consumes it — same pattern as the speed
+sim, so the model takes its inputs as parameters rather than reaching into locals inside `main()`).
+It ticks **every pass regardless of the enable bit**; the bit only gates whether the outputs reach
+the DCC packet.
+
+**Automatic vs independent brake.** The ProtoThrottle has one brake lever that plays two real-world
+roles: the *automatic* (train) brake — brake-pipe reductions, whose release recharges the whole
+trainline and the auxiliary reservoir on every car from the main reservoir (a large,
+compressor-running draw) — and the *independent* (loco-only) brake used for everyday graduated
+braking (the Brake1/2/3 combos in STACK mode), which barely touches the reservoir. AIRBRAKE models
+the lever as the automatic brake — the one brake whose pipe-and-reservoir physics this file simulates
+— and every brake-pipe recharge draws the reservoir at the same `MR LOAD` rate regardless of screen
+or brake mode; the AIRBRAKE screen (below) is a read-only viewport onto this model, not a separate
+mode.
+
+**Enable**: `CONFIGBITS_AIRBRAKE` (global `configBits` bit 2), a boolean in the `PREFS` menu right
+after the main-screen `DISPLAY` (clock/speed) toggle, default off — an explicit opt-in, the same way
+that toggle is. When off, the sound functions are simply not emitted and `AIRBRAKE`/`AIRBRAKE CFG`
+are skipped in the top-level menu cycle (still reachable via an `AIRBRAKE`-bound button or
+`AIRBRAKE DIAGS`, since the model itself always ticks).
+
+**Automatic-brake rest point.** The automatic-brake apply/release point tracks whichever `BRK TYPE`
+is actually active, via `independentBrakeAtRest` (computed once per pass in `mrbw-cst.c`, immediately
+before the `updateBrake10Hz()` call): Step reuses the 0-20 % rest zone already tracked by
+`brakeState` (`BRAKE_LOW_BEGIN`/`WAIT`), Stack reuses the real band-0 boundary already given by
+`currentStackBand == 0` (25 % 3-STEP / 17 % 5-STEP), and Standard/Pulse — neither of which has a
+reusable rest-boundary state of its own — share a raw `brakePcnt < 20` fallback.
+
+**Model** (state in milliPSI; no ISR access so no `ATOMIC_BLOCK`):
+- **Brake pipe** tracks a lever-derived target, modelled on a 26L automatic brake:
+  - at rest (`independentBrakeAtRest`) → fully `BP CHARGE` (release).
+  - service zone → at least a **minimum reduction** (`AIRBRAKE_MIN_REDUCTION_PSI`, 7 PSI — a 26L
+    cannot make a smaller one), graduated linearly up to a full-service reduction by
+    `AIRBRAKE_FULLSVC_PCNT` (70 %) lever. The full-service reduction itself (`FULLSVC`) is not a stored
+    field — it is derived fresh every tick as `ceil(2/7 × BP CHARGE)`, so it can never drift out of
+    sync with `BP CHARGE` (26 PSI at the default `BP CHARGE = 90`).
+  - full service → `AIRBRAKE_EMERG_PCNT` → **laps** at `BP CHARGE − FULLSVC`; more lever does nothing
+    (the car aux reservoirs have equalized with their brake cylinders).
+  - `≥ AIRBRAKE_EMERG_PCNT` (95 %) → **emergency**: target dumps to 0 — but *only* when the throttle
+    `BRK ESTP` option is on (`emergencyBrakeEnabled`). It is the option flag, not the `ESTOP_BRAKE`
+    state, so the pipe still models an emergency on the AIRBRAKE screen (which does not suppress the
+    real e-stop either, but the flag is what actually gates this). Hysteretic latch
+    (`emergencyActive`), releases 5 % below.
+
+  It **vents down** toward the target at a hardcoded `AIRBRAKE_VENT_RATE_PSI_S` (6 PSI/s, or
+  `AIRBRAKE_EMERG_VENT_RATE_PSI_S` = 25 PSI/s while `emergencyActive`) while not at rest and above
+  target, and **only recharges** once the independent brake is genuinely at rest again. The recharge
+  is a **first-order taper** toward `BP CHARGE` (`fill = gap/K + AIRBRAKE_RECHARGE_TAIL_MPSI`, like the
+  original ISE sim) rather than linear — `RECHARGE` (PSI/min) is the *initial* rate for a
+  full-service-sized gap (`K = fullSvc/chargeRate`), so a bigger gap (recovering from an emergency)
+  refills faster at first and everything eases as the pipe fills. The tail term is a small fixed
+  crawl (`AIRBRAKE_RECHARGE_TAIL_MPSI`, 0.1 PSI/s, matching the `+10` used by the original), not
+  scaled by `RECHARGE`, so the last PSI genuinely creeps in. Easing the lever back while still
+  applied just holds — the pipe is not a continuous function of lever position.
+- **`appliedLatch`** sets the instant a vent starts and clears only once the independent brake is
+  genuinely at rest again — it drives `BRAKE_REL_FN` (below), not a separate apply threshold.
+- **Main reservoir** leaks continuously at `LEAKRATE`, and every brake-pipe recharge draws it down by
+  `fill × MR LOAD` per tick — a transient trainline-recharge load on the reservoir. Compressor
+  governor: on at `MR LOW`, off at `MR HIGH`. Two defensive floors in `updateBrake10Hz()`: `PUMPRATE`
+  is floored to always out-pace `LEAKRATE` (else the compressor could never cut out), and `MR HIGH` is
+  floored to `MR LOW + 1 PSI` (a `MR LOW ≥ MR HIGH` misconfiguration would otherwise make the two
+  governor comparisons fight every tick, toggling `COMPRESSOR_FN` at ~1-2 Hz and sending a status
+  packet per edge; there is no on-device or import ordering guard). At the defaults: idle compressor
+  cycle ~125 s off / ~24 s on (OFF = `MR HIGH − MR LOW` band ÷ `LEAKRATE` ≈ 120 s, a few seconds
+  longer from milliPSI/tick truncation; ON ÷ `PUMPRATE − LEAKRATE`).
+
+**Outputs** (emitted only while the PREFS bit is set):
+- **`BRAKE_REL_FN`** = `airBrakeReleased()` = `!appliedLatch`. Its OFF edge (a reduction starting) is
+  the counterpart of the brake-set sound; its ON edge (a genuine full release) is the brake-release
+  sound.
+- **`BRAKE_SET_FN`** ("BRK SET" in Configure Function): a ~1 s pulse (`airBrakeSetPulse()`) at the
+  start of **every** brake-pipe reduction, the initial one included — the trainline exhaust hiss.
+- **`COMPRESSOR_FN`** / **`COMPRESSOR2_FN`** — the reservoir governor state, split by `COMPMODE` (see
+  below). Both cycle on their own timers even at idle, so `COMPRESSOR_FN`/`COMPRESSOR2_FN` and
+  `BRAKE_SET_FN` are all excluded from the sleep / alerter activity check in `mrbw-cst.c`
+  (`idleFnMask`) — those bits still go out in the status packet, but a throttle with AIRBRAKE on must
+  still be able to nod off and still time its alerter. `BRAKE_REL_FN` is *not* excluded (it only
+  flips on a real apply/release). The two compressor bits and `BRAKE_SET_FN` are also withheld from
+  the last packet(s) before the throttle sleeps (`AIRBRAKE_SLEEP_QUIET_DECISECS`, ~3 deciseconds
+  before the timeout, or immediately on a POWER DOWN force-sleep) — the compressor functions in
+  particular drive a *continuous* loco sound, and once the radio sleeps the command station just
+  holds the last state it heard, so a final "off" has to reach the loco while packets still flow.
+  `BRAKE_REL_FN` is a released/applied state (an edge-triggered decoder sound, not continuous), so it
+  is left as-is. The underlying model state is untouched by this, so on wake it re-asserts correctly
+  if the reservoir is still low.
+- `BRAKE_FN` / `BK2_FN` / `BK3_FN` are untouched — `BRK TYPE` still owns real decoder braking; AIRBRAKE
+  is sounds only. The override lives in the function-mask assembly in `mrbw-cst.c`, right after the
+  `BRK TYPE` machine runs.
+
+**`COMPRSR`/`COMPRSR2` split (`COMPMODE`)**: `AIRBRAKE_COMP_MODE`, `NORMAL` (default) or `CONSIST`.
+`NORMAL` always asserts `COMPRESSOR_FN`, matching stock single-loco behaviour exactly. `CONSIST`
+splits by whether the current compressor run is servicing a genuinely deep, "synchronised" recharge
+(`COMPRESSOR_FN`) versus a routine idle-leak cycle (`COMPRESSOR2_FN`) — the idea being that a deep
+brake-pipe recharge is a real trainline-wide event the compressor on every loco should respond to
+immediately, while an ordinary idle cycle should stagger per-loco on the decoder/consist side, which
+the throttle cannot itself drive but can flag via a second function. Classification
+(`airCompressorReleaseRun()`) is decided once, at the exact tick a compressor run starts, and never
+changes for the rest of that run — a consist cannot be told "actually, respond as the other case"
+partway through a sound that is already playing. It is driven by a decaying "pending consist-sync
+credit" (`syncDrawMilliPsi`): each release credits its own full, deterministic reservoir draw
+(`gap × MR LOAD`) once, at the instant the release begins — not gradually as the tapered recharge
+happens to deliver it, so the credit does not depend on the reservoir level or on how long delivery
+takes. It decays at `LEAKRATE`, but only during a genuine quiet gap (never while a recharge is
+actively delivering), so several light releases made in quick succession can stack toward the
+threshold while the same releases spaced apart are each judged alone. The accumulated credit is
+capped at twice the governor band (anything past the threshold already counts as deep, so no
+information is lost — a defensive bound against a pathological config where the compressor never cuts
+out and the credit could otherwise creep toward a `uint32_t` wrap). A run counts as deep once the
+pending credit reaches `AIRBRAKE_SYNC_BAND_PCT` (80 %) of the reservoir governor `MR HIGH − MR LOW`
+band — tuned below the full band (which would be the worst-case guarantee regardless of a given
+loco starting phase) so a real full-service release reliably clears it while routine idle cycling
+does not. `airCompressorPendingRelease()` is a read-only, non-latching accessor exposing this pending
+credit for diagnostics (see AIRBRAKE DIAGS below) without affecting the real classification. In
+Configure Function, `COMPRESSOR2_FN` ("COMPRSR2") is hidden from the cycle whenever `AIRBRAKE` is off
+or `COMPMODE` is `NORMAL` (`advanceCurrentFunction()` takes an explicit `airbrakeEnabled` parameter
+rather than reading `configBits` directly, keeping `cst-functions.c` free of any dependency on the
+internal bit layout of `mrbw-cst.c`).
+
+**AIRBRAKE CFG** (`AIRBRAKE_CONFIG_SCREEN`, a top-level menu screen modelled on `SPEED CFG`, in the
+menu cycle right after it): 9 per-profile bytes, all self-healing via `readByteOrDefault()`, all
+always visible (no `ADV FUNC` gating left in this menu) and right-justified to column 7. Items in
+menu order — on-screen name (internal enum), default, display suffix:
+
+| On-screen | Internal | Default | Suffix |
+|---|---|---|---|
+| `BPCHARGE` | `AIRBRAKE_CHARGED` | 90 PSI (range 70-110) | PSI glyph |
+| `MR LOAD` | `AIRBRAKE_MR_LOAD` | 35 % (range 0-100) | `%` |
+| `MR LOW` | `AIRBRAKE_MR_CUTIN` | 130 PSI | PSI glyph |
+| `MR HIGH` | `AIRBRAKE_MR_CUTOUT` | 140 PSI | PSI glyph |
+| `RECHARGE` | `AIRBRAKE_CHARGE_RATE` | 180 PSI/min | PSI glyph + `/m` |
+| `LEAKRATE` | `AIRBRAKE_LEAK_RATE` | 5 PSI/min | PSI glyph + `/m` |
+| `PUMPRATE` | `AIRBRAKE_PUMP_RATE` | 30 PSI/min | PSI glyph + `/m` |
+| `DISPLAY` | `AIRBRAKE_DISPLAY` | DUAL | text (`DUAL   `/`SINGLE `) |
+| `COMPMODE` | `AIRBRAKE_COMP_MODE` | NORMAL | text (`NORMAL `/`CONSIST`) |
+
+`DISPLAY` selects which of the two `AIRBRAKE screen` renderings to show — `DUAL` (the `BP:`/`MR:`
+two-pressure glyph view) or `SINGLE` (the analogue BP dial). Per-profile, like everything else here.
+
+`BPCHARGE` (70-110) and `MR LOAD` (0-100) are the only two items with a meaningful range restriction
+(UP/DOWN clamp on-device; PC tooling enforces the same range on import). The other numeric items
+(`MR LOW`/`MR HIGH`/`RECHARGE`/`LEAKRATE`/`PUMPRATE`) clamp UP at 254, not 255 — a stored `0xFF` is the
+"unset" sentinel `readByteOrDefault()` resets to the default, so a value cranked to 255 would silently
+revert on the next load. `FULL SVC`/`VENT`/`EMRG VNT`/`APPLY`/`DRV LOAD` used to be items here too —
+all removed (see above and the model description) since none were ever usefully varied per-loco, or
+were superseded by deriving/reusing a value that already exists elsewhere.
+
+A layout change here needs the usual `EEPROM_LAYOUT_VERSION` bump (see the maintenance checklist).
+SPEED and AIRBRAKE config share one packed per-slot region (`0x3C-0x53`, with the `HORN2` and
+`COMPRESSOR2` function slots between them); the layout migration in `readConfig()` force-resets that
+whole region to defaults in every profile plus the working config on a version upgrade, so a
+configured throttle should be exported with `cst_cfgtransfer.py` before upgrading and re-imported
+afterward.
+
+**AIRBRAKE screen** (`AIRBRAKE_SCREEN`; reached from the top-level menu when `AIRBRAKE` is on, or any
+time via a control set to `FN_AIRBRAKE`): a read-only viewport into the always-running model — it
+blocks nothing, so the brake lever drives real decoder braking and the real e-stop from here exactly
+as from the main screen, and the speed sim keeps running in parallel. No landing page/subscreen: it
+renders straight away, so the top-level MENU handler keeps cycling the menu past it. UP/DOWN do
+nothing here; the rendering is set by the `DISPLAY` item in `AIRBRAKE CFG` (`DUAL` default /
+`SINGLE`), read fresh on every render pass:
+- **`DISPLAY = DUAL`** (default): row 0 `BP:` + 3-digit brake-pipe PSI + a 2-cell hand-drawn "PSI"
+  glyph (`PSI_CHAR_L`/`R`, CGRAM slots 6-7 under `LCD_DEFAULT`); row 1 `MR:` + 3-digit reservoir PSI +
+  the same glyph. Both readouts (`airBrakePipePsi()`/`airMainResPsi()`) round to the nearest whole PSI
+  rather than truncating, so `MR HIGH`/`MR LOW` visibly dwell at the top/bottom of each idle
+  compressor cycle instead of flashing past — the model never overshoots a governor setpoint by more
+  than a fraction of a PSI, which a truncating display would barely show.
+- **`DISPLAY = SINGLE`**: the original ISE analogue pressure gauge (`Gauge[2][4][8]` dial artwork +
+  Bresenham-plotted needle, recovered from the last pre-AIRBRAKE commit and now wired to the brake
+  pipe instead of the old `PumpState` model) plus a 3-digit BP readout and literal `" PSI"` text —
+  unchanged from the original. Needle sweep range maps `0..BP CHARGE` (the *configured* max,
+  not a hardcoded value) across the dial. Runs in its own CGRAM mode (`LCD_AIRBRAKE_ALT`, all 8 slots
+  — `setupGaugeChars()` rebuilds and re-uploads the needle glyph every render pass, since it moves
+  live). Whichever style the config selects, `setupLCD()` is called with the matching CGRAM mode
+  (`LCD_AIRBRAKE_ALT` / `LCD_DEFAULT`) on every render pass — its `currentMode` guard makes the repeat
+  calls free, and changing `DISPLAY` and returning restores the right glyphs automatically.
+
+The full text/diagnostic readout (lever %, per-function letters) lives on **AIRBRAKE DIAGS**, a
+`DIAG_SCREEN` subscreen (page 14) shown only while `AIRBRAKE` is on — reached via `DIAGS` → `SELECT`
+(lands on the throttle-status page) → `MENU` (advances straight to AIRBRAKE DIAGS, since it is
+slotted in right after the status page) → `MENU` again continues the normal DIAGS cycle. Row 0:
+`P<pipe> R<reservoir>` PSI — the pipe shows two digits with a blank column before `R`, or three
+digits filling that column at 100 and above. Row 1: `L<lever%>` then one column per AIRBRAKE
+function, its letter shown only while asserting — `R` = `BRAKE_REL_FN`, `S` = `BRAKE_SET_FN` pulse,
+`E` = `airEmergencyActive()` (the AIRBRAKE model emergency pipe-dump latch, not the throttle-wide
+`THROTTLE_STATUS_EMERGENCY` that `EMRG FN` tracks). The compressor column is 3-way: `C` while
+`airCompressorOn()`, or `*` while off but `airCompressorPendingRelease()` says the pending
+consist-sync credit already clears the deep/`COMPRSR` threshold (lets you watch it accumulate and
+leak away between runs) — both only meaningful/shown when `COMPMODE = CONSIST`. An adjacent column
+shows `1`/`2` while the compressor is on and `COMPMODE = CONSIST` (which classification the current
+run got), blank in `NORMAL` mode.
+
+**Not yet done**: independent real-hardware validation of the fixed model-shape constants in
+`cst-pressure.c` — `AIRBRAKE_MIN_REDUCTION_PSI`, `AIRBRAKE_FULLSVC_PCNT`, `AIRBRAKE_EMERG_PCNT`,
+`AIRBRAKE_VENT_RATE_PSI_S`/`AIRBRAKE_EMERG_VENT_RATE_PSI_S`, `AIRBRAKE_RECHARGE_TAIL_MPSI`, and
+`AIRBRAKE_SYNC_BAND_PCT` are carried over from real 26L brake-valve convention or the original ISE
+sim rather than independently bench-tuned for this fork (see the comment on each `#define`). The
+per-profile `AIRBRAKE CFG` defaults above, by contrast, have been bench-tuned against real hardware.
+
 ## Long-press Menu to cancel a subscreen edit
 
 Every on-device config screen has two ways out: `SELECT` saves the edited values to EEPROM; a long-press
@@ -476,21 +685,18 @@ top-level Menu-cycling logic in `mrbw-cst.c`: on a long-press while inside a sub
 and resets navigation state back to the main screen.
 
 Two kinds of state need explicit handling, since neither is backed by EEPROM: `systemBits`
-(the menu-lock/advanced-function bits of `SYSTEM_SCREEN`) is a session-only global, restored from a snapshot
-captured whenever `SYSTEM_SCREEN` is entered — taken *after* all the conditional-menu and menu-lock skip
-logic, so no entry path misses it. And the `new*` staging locals of `PREFS_SCREEN` (`SLEEP DLY`/`ALERTER`)
-and `COMM_SCREEN` (`THRTL ID`/`BASE ADR`/`TIME ADR`/`TX INTVL`) — which those screens only push to the real
-values on a `SELECT`-save and never resync on entry — are resynced from the (`readConfig()`-restored) real
-values on cancel, so an abandoned edit cannot linger and be silently committed on a later visit.
+(the menu-lock/advanced-function bits of `SYSTEM_SCREEN`) is a session-only global, restored from a
+snapshot captured whenever `SYSTEM_SCREEN` is entered — taken *after* all the conditional-menu and
+menu-lock skip logic, so no entry path misses it. And the `new*` staging locals of `PREFS_SCREEN`
+(`SLEEP DLY`/`ALERTER`) and `COMM_SCREEN` (`THRTL ID`/`BASE ADR`/`TIME ADR`/`TX INTVL`) — which those
+screens only push to the real values on a `SELECT`-save and never resync on entry — are resynced from
+the (`readConfig()`-restored) real values on cancel, so an abandoned edit cannot linger and be
+silently committed on a later visit.
 
 Every exit back to the main screen (`case LAST_SCREEN`) also calls `setupLCD(LCD_DEFAULT)` to restore the
-default LCD custom characters. The Brake Test gauge (the pressure subscreen of `SPECFN_SCREEN`) reprograms all
-eight CGRAM slots for its dial and `LCD_DEFAULT` reprograms only six, so a cancel out of that screen used to
-leave gauge fragments in the battery/softkey/clock glyphs of the main screen — its `SELECT`-escape had always
-restored them, the cancel path had not. The `currentMode` guard of `setupLCD()` makes the extra call free on
-every other exit. The cancel path also runs `resetPressure()`/`resetSpeed()` when leaving `SPECFN_SCREEN`
-(matching the `SELECT`-escape of that screen), so `COMPRESSOR_FN` cannot stay asserted after exit and a re-entry
-starts at the prompt rather than mid-simulation.
+default LCD custom characters — a defensive backstop for any screen that reprograms CGRAM and any exit
+path (the generic cancel handler has no `currentMode` knowledge), free on every other exit since
+`setupLCD()` already guards against a redundant call.
 
 Screens with their own pre-existing short-press Menu escape (the power-down confirm subscreen, the network
 CNF picker) already reset their subscreen state well before the long-press threshold, so this does not
@@ -505,8 +711,8 @@ that honours the `backlight` toggle set by the user (flipped by SELECT), and wit
 `disableLCDBacklight()` immediately, every pass — so the instant a menu cycle wrapped back through the main
 screen the light went dark, strobing off mid-navigation when starting another lap.
 
-`backlightTimeout_decisecs` is a hold countdown (`BACKLIGHT_HOLD_DECISECS`, ~3s) decremented in
-the 10Hz block of `TIMER0_COMPA_vect`, next to `sleepTimeout_decisecs`/`alerterTimeout_decisecs` — a `uint8_t`,
+`backlightTimeout_decisecs` is a hold countdown (`BACKLIGHT_HOLD_DECISECS`, ~3s) decremented in the 10Hz
+block of `TIMER0_COMPA_vect`, next to `sleepTimeout_decisecs`/`alerterTimeout_decisecs` — a `uint8_t`,
 so reads/writes are atomic on the AVR with no `ATOMIC_BLOCK`. It is re-armed once per main-loop pass
 (beside the sleep/alerter timer resets) whenever the current button is `MENU` *or* the screen is not the
 main screen: menu navigation and MENU presses keep it full, so the light survives the wrap back through the
@@ -528,7 +734,7 @@ Lets one loco CNF (configuration profile: DCC function assignments, brake/STACK 
 speed/momentum CVs — the existing 128-byte slot format) be shared wirelessly across multiple ProtoThrottle
 units, instead of requiring physical ISP access to hand-copy JSON between them. **`mrbw-cabbus`** (the
 sibling NCE Cab Bus gateway repo) is the authoritative store, since it is already layout infrastructure
-since it is already layout infrastructure that is powered whenever the layout is. Holds 20 independent network slots (`N01`-`N20`).
+that is powered whenever the layout is. Holds 20 independent network slots (`N01`-`N20`).
 
 No usable time/versioning concept exists anywhere in this firmware family (the fast clock has no date
 fields and is never persisted), so sync uses simple **last-write-wins with no version/generation checking
@@ -571,8 +777,8 @@ to be resized/reflashed.
 
 **CNF format version guard**: a table-wide pin (ahead of every entry, never moved) records which
 throttle-side `EEPROM_LAYOUT_VERSION` every currently-stored entry payload was written under, and its
-real length. A push `BEGIN` carries the `EEPROM_LAYOUT_VERSION` of the pushing throttle; compared against the
-pin: unset or strictly higher → accepted, and on COMMIT wipes every *other* entry and advances the pin
+real length. A push `BEGIN` carries the `EEPROM_LAYOUT_VERSION` of the pushing throttle; compared against
+the pin: unset or strictly higher → accepted, and on COMMIT wipes every *other* entry and advances the pin
 (there is no per-entry version tracking, so this is the only safe choice once a newer format is accepted);
 equal → ordinary accept; strictly lower → refused immediately, before any `DATA` traffic. This means an
 ordinary future field addition needs only an `EEPROM_LAYOUT_VERSION` bump on the throttle side — the next
@@ -584,9 +790,9 @@ before self-healing.
 
 On the throttle, `SAVE CNF` to a network entry first peeks the pinned version (`syncPeekSharedVersion()`);
 that peek is a hard gate for the destructive path. If it fails (timeout, busy, protocol error) the SAVE is
-refused with a `CHECK` / `RETRY` screen — the firmware will not push blind, since it cannot then tell whether
-the push would advance the pin. If the peek succeeds and the pin is unset or older than the `EEPROM_LAYOUT_VERSION` of this throttle,
-`EEPROM_LAYOUT_VERSION`, a two-stage "UPGRADE" / "WIPE N01-20?" confirmation runs before the real push, so
+refused with a `CHECK` / `RETRY` screen — the firmware will not push blind, since it cannot then tell
+whether the push would advance the pin. If the peek succeeds and the pin is unset or older than the
+`EEPROM_LAYOUT_VERSION` of this throttle, a two-stage "UPGRADE" / "WIPE N01-20?" confirmation runs before the real push, so
 the operator is warned before every other stored network slot gets wiped. A dedicated `SUBTYPE_RESET`
 command (`reset-cabbus` in `cst_cfgnetwork.py`) does an immediate whole-table wipe + pin clear, independent
 of any version comparison, for a deliberate human-triggered reset.
@@ -600,7 +806,7 @@ source update, no reflash required. If the tool could advance the pin on that ba
 run before any throttle had been upgraded could push the whole network store to a version nothing deployed
 understands, disabling `N01`-`N20` network-wide until every throttle was individually reflashed. This is a
 policy enforced by the tool, not something the wire protocol itself can verify — the low-level
-low-level `push_entry()` still accepts an arbitrary version number, which remains useful for testing the
+`push_entry()` in `cnf_radio_io.py` still accepts an arbitrary version number, which remains useful for testing the
 on-device upgrade flow without a special firmware build.
 
 **Untested**: the two-throttle case (a second unit pulling a CNF the first pushed) and the failure-path
@@ -627,10 +833,10 @@ throttle.
 Two Python 3, stdlib-only tools manipulate stored loco configurations from a PC rather than the on-device
 menu. Both share `cst_eeprom_layout.py` (offset/enum constants) and `slot_codec.py` (pure decode/encode/
 validate, no hardware dependency) — a **hand-maintained mirror** of `src/cst-eeprom.h` and the decode
-the decode logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte offsets,
-not the bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The
-`-h`/`--help` output — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` — documents every
-flag in more detail than covered below; check there for the exact current option set.
+logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte
+offsets, not the bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The
+`-h`/`--help` output of both tools — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` —
+documents every flag in more detail than covered below; check there for the exact current option set.
 
 ### `cst_cfgtransfer.py` — ISP-based export/import
 
@@ -654,7 +860,8 @@ byte-for-byte unchanged. `avrdude_io.py` is the only module that shells out to `
 `cst_cfgtransfer.py` is the argparse CLI tying the pieces together. The JSON mirrors the on-device
 menus — **one object per config menu**, objects and keys in menu order: a slot is `loco_address` /
 `force_functions` (`{on, off}` — the FORCE FUNC menu, distinct from the CONFIG FUNC `functions`) /
-`functions` / `notch_speedstep` / `speed` / `options` (the OPTIONS menu — brake config plus
+`functions` / `notch_speedstep` / `speed` / `airbrake` (the `AIRBRAKE CFG` menu — `DISPLAY`/`COMP_MODE`
+are string enums, everything else a plain number) / `options` (the OPTIONS menu — brake config plus
 `reverser_swap`/`horn_type`; its meta-field is `unset`); `device.json` is `system` (ADV-FUNC battery
 thresholds) / `comm` / `prefs` (`config_bits` nested here) / `calibration`. `encode_slot` /
 `encode_global` also accept the older pre-schema-2 shapes on import (flat device fields,
@@ -687,9 +894,9 @@ un-gated (a wipe is *how* you recover from a version mismatch). It deliberately 
 `EESAVE` would make an ordinary `make flash` wipe the throttle config too. `wipe` erases flash as well —
 the throttle needs re-flashing afterward.
 
-**EEPROM write reliability**: `import` retries the whole write up to 3 times on failure — see
-the module docstring of `avrdude_io.py` for the full story, including a confirmed driver-level mechanism
-(the EEPROM write path of `iseavrprog`/`usbtiny` has a much narrower timing margin than flash, with no retry on
+**EEPROM write reliability**: `import` retries the whole write up to 3 times on failure — see the module
+docstring of `avrdude_io.py` for the full story, including a confirmed driver-level mechanism (the EEPROM
+write path of `iseavrprog`/`usbtiny` has a much narrower timing margin than flash, with no retry on
 a dropped USB transfer) and a real-hardware finding that a marginal ISP USB cable was a major contributor
 too — a cable swap took one machine from 3 retries in 4 writes down to 0 in 8. The mitigations here stay in
 place regardless, since this tool has no way to know the cable/port/programmer quality of another user in
@@ -705,11 +912,11 @@ nothing unplugged in between).
 
 ### `cst_cfgnetwork.py` — wireless PC access to the shared network CNF store
 
-`src/cst-cfgnetwork/cst_cfgnetwork.py` lets a PC export/import loco configurations to/from the
-shared network CNF store (`N01`-`N20`, see "Shared network CNF store" above) directly over a USB-attached
-XBee radio — no physical throttle and no ISP access to any device needed. It imports `slot_codec.py`/
-`cst_eeprom_layout.py` directly from `cst-cfgtransfer/` rather than duplicating the codec, since the
-128-byte network-entry payload is byte-identical to a local slot.
+`src/cst-cfgnetwork/cst_cfgnetwork.py` lets a PC export/import loco configurations to/from the shared
+network CNF store of `mrbw-cabbus` (`N01`-`N20`, see "Shared network CNF store" above) directly over a
+USB-attached XBee radio — no physical throttle and no ISP access to any device needed. It imports
+`slot_codec.py`/`cst_eeprom_layout.py` directly from `cst-cfgtransfer/` rather than duplicating the codec,
+since the 128-byte network-entry payload is byte-identical to a local slot.
 
 `src/cst-cfgnetwork/cnf_radio_io.py` is a from-scratch, Python-3-only implementation of XBee API-frame
 escaping/framing, MRBus CRC16, and the full `'C'`/`'D'` `BEGIN`/`DATA`/`COMMIT`/`DONE` client state machine
@@ -719,7 +926,7 @@ protocol: `discover_nodes()` (an MRBus presence-ping sweep) behind the `discover
 `'S'` packet — loco/direction/speed step/function mask/status flags/battery, and with `--cnf` the
 shared-CNF `'C'`/`'D'` transfer packets too, via `format_cnf_packet()`) behind the `sniff` subcommand.
 Requires a spare XBee3 module joined to the same PAN as the throttle/receiver radios, such as the
-`ckt-xbee` USB-to-XBee adapter.
+`ckt-xbee` USB-to-XBee adapter from ISE itself.
 
 ```bash
 python3 cst_cfgnetwork.py discover --port /dev/cu.usbserial-XXXX --my-addr 0x3F
@@ -739,12 +946,13 @@ packet; `--changes` collapses the ~1 Hz status stream to one line per actual sta
 catching a transient glitch such as a light-knob flicker), `--status-only` drops non-`'S'` traffic,
 `--cnf` decodes the `'C'`/`'D'` push/pull packets (`BEGIN`/`DATA`/`COMMIT`/`DONE`, entry, offset,
 status) instead of the raw-hex fallback — the view for watching a `SAVE`/`LOAD CNF` transfer. `list`
-gives a fast all-20-entries loco-address overview via `peek_loco_address()` with no full pulls. The default
-integrity check is the same COMMIT CRC gate the push itself already uses on the receiver side; `--verify` adds an opt-in
-pull-and-diff. `export --dir`-style batch imports auto-skip `NONE`/never-configured stub entries (an
-un-decodable-back all-`0xFF` payload) rather than aborting the whole batch on the first one, but a single
-explicitly-named file pointed straight at a stub still errors, since silently doing nothing for the one thing
-explicitly requested would be worse than the error.
+gives a fast all-20-entries loco-address overview via `peek_loco_address()` with no full pulls. The
+default integrity check for `import` is the same COMMIT CRC gate the push itself already uses on the
+receiver side; `--verify` adds an opt-in pull-and-diff. `export --dir`-style batch imports auto-skip
+`NONE`/never-configured stub entries (an un-decodable-back all-`0xFF` payload) rather than aborting the
+whole batch on the first one, but a single explicitly-named file pointed straight at a stub still
+errors, since silently doing nothing for the one thing explicitly requested would be worse than the
+error.
 
 If a queried receiver is reachable but running firmware without the shared CNF store (stock ISE firmware,
 or any build predating `cnf-store.c`), every real CNF command times out on its first request — from the
@@ -761,8 +969,8 @@ before touching any entry — `export` aborts early on a mismatch, `list` tags e
 may (see "Shared network CNF store" above for the full policy and why).
 
 **`--import-old`**: same flag and `slot_codec.py` defaulting behavior as the `--import-old` flag of
-`--import-old` above — restores a backup exported under an older schema by defaulting any field absent
-from the file rather than rejecting it.
+`cst_cfgtransfer.py` above — restores a backup exported under an older schema by defaulting any field
+absent from the file rather than rejecting it.
 
 **`reset-cabbus`**: wipes the whole shared network CNF table and clears the version pin via the wire
 protocol `SUBTYPE_RESET` (see "Shared network CNF store" above) — a deliberate, human-triggered reset,
@@ -775,7 +983,7 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 
 1. Add/change the field in `src/cst-eeprom.h` and wire up `readConfig()`/save-path code in `mrbw-cst.c`.
 2. Mirror the same offset/type/decode logic in `cst_eeprom_layout.py` and the
-   `decode_slot()`/`decode_global()`/`encode_slot()`/`encode_global()`.
+   `decode_slot()`/`decode_global()`/`encode_slot()`/`encode_global()` functions of `slot_codec.py`.
 3. Bump `EEPROM_LAYOUT_VERSION` in `cst-eeprom.h` — the Python tooling parses that `#define` at import
    (`cst_eeprom_layout._read_firmware_layout_version()`), so there is no second copy to keep in step.
 4. Add/update the corresponding fixture in `src/cst-cfgtransfer/tests/test_slot_codec.py` (run via
@@ -785,10 +993,10 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 
 One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
 followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped
-`EEPROM_LAYOUT_VERSION` at all, by diffing the `#define` set of `cst-eeprom.h` against its previous committed
-state. It cannot catch a change that reinterprets what an existing, unmoved byte value *means* (a new
-enum numbering, repurposed bits) without changing its offset — that class of drift is only caught by
-careful review, or by the targeted per-field regression tests in `test_slot_codec.py`.
+`EEPROM_LAYOUT_VERSION` at all, by diffing the `#define` set of `cst-eeprom.h` against its previous
+committed state. It cannot catch a change that reinterprets what an existing, unmoved byte value *means*
+(a new enum numbering, repurposed bits) without changing its offset — that class of drift is only caught
+by careful review, or by the targeted per-field regression tests in `test_slot_codec.py`.
 
 ## Firmware versioning
 
@@ -817,10 +1025,10 @@ behaviour this fork *drops* is the `'W'` wireless-EEPROM-write handler (see "Rem
 above) — a fork throttle silently ignores a `'W'` packet instead of writing, never a hazard to anything.
 
 **Stock throttle + the receiver of this fork: fully compatible, no caveats.** `PktHandler()` in
-`mrbw-cabbus.c` calls `cnfStoreHandlePacket()` first on every packet, but the first line of that function is
-`if(CNF_PKT_TYPE_PUSH != type && CNF_PKT_TYPE_PULL != type) return 0;` — i.e. `'C'`/`'D'` only. A stock
-throttle never transmits `'C'`/`'D'`, so this is a no-op on every packet it sends; dispatch falls through
-to the unmodified chain exactly as before the CNF store existed.
+`mrbw-cabbus.c` calls `cnfStoreHandlePacket()` first on every packet, but the first line of that
+function is `if(CNF_PKT_TYPE_PUSH != type && CNF_PKT_TYPE_PULL != type) return 0;` — i.e. `'C'`/`'D'`
+only. A stock throttle never transmits `'C'`/`'D'`, so this is a no-op on every packet it sends;
+dispatch falls through to the unmodified chain exactly as before the CNF store existed.
 
 **The throttle of this fork + stock receiver: fully compatible for everything except network slots, which fail
 cleanly.** All normal operation (DCC relay, status, clock, local slots 1-20) is untouched. Attempting `SAVE
@@ -852,7 +1060,7 @@ is strictly better than a wireless round trip through the gateway — lower late
 gateway being present or in range.
 
 **mrbw-wifi as an alternate shared-network-CNF-store host (evaluated, not implemented)**: `mrbw-wifi` (an
-ESP32-S2 MRBus↔WiFi bridge) was evaluated from source as a second possible host for the shared network CNF
+ESP32-S2 MRBus↔WiFi bridge from ISE) was evaluated from source as a second possible host for the shared network CNF
 store, alongside `mrbw-cabbus`. Architecturally sound and arguably a better long-term host (no throttle-side
 change needed at all, and ample flash/RAM headroom), but a genuine from-scratch port rather than a
 code-reuse job, with the storage-placement question (a dedicated flash partition vs. the existing FAT

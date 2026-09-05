@@ -52,8 +52,8 @@ MRBEE_PINS =
 #COMPILE_OPTIONS = -DDEMO_8290
 
 DEFINES := -DGIT_REV=0x$(GITREV)L -D'VERSION_STRING="$(REV)"' -DENABLE_WATCHDOG -DWATCHDOG_TIMEOUT=WDTO_1S -DHWREV_MAJOR=1 -DHWREV_MINOR=2 $(MRBEE_DEFINES) $(MRBEE_PINS) $(COMPILE_OPTIONS)
-SRCS = $(BASE_NAME).c lcd.c cst-common.c cst-lcd.c cst-math.c cst-hardware.c cst-functions.c cst-engine.c cst-pressure.c cst-tonnage.c cst-time.c cst-battery.c cst-speed.c cst-sync.c $(MRBUS_LIB)/mrbee-avr.c $(MRBUS_LIB)/mrbus-crc.c $(MRBUS_LIB)/mrbus-queue.c
-INCS = $(MRBUS_LIB)/mrbee.h $(MRBUS_LIB)/mrbee-avr.h lcd.h cst-hardware.h
+SRCS = $(BASE_NAME).c lcd.c cst-common.c cst-lcd.c cst-math.c cst-hardware.c cst-functions.c cst-engine.c cst-pressure.c cst-time.c cst-battery.c cst-speed.c cst-sync.c $(MRBUS_LIB)/mrbee-avr.c $(MRBUS_LIB)/mrbus-crc.c $(MRBUS_LIB)/mrbus-queue.c
+INCS = $(MRBUS_LIB)/mrbee.h $(MRBUS_LIB)/mrbee-avr.h $(wildcard *.h)
 
 AVRDUDE = avrdude -P $(PROGRAMMER_PORT) -c $(PROGRAMMER_TYPE) -p $(DEVICE) -B1
 AVRDUDE_SLOW = avrdude -P $(PROGRAMMER_PORT) -c $(PROGRAMMER_TYPE) -p $(DEVICE) -B32
@@ -134,8 +134,16 @@ clean:
 	rm -f $(BASE_NAME).hex $(BASE_NAME).lst $(BASE_NAME).obj $(BASE_NAME).cof $(BASE_NAME).list $(BASE_NAME).map $(BASE_NAME).eep.hex $(BASE_NAME).elf $(BASE_NAME).s $(OBJS) *.o *.tgz *~
 
 # Generic rule for compiling C files:
-.c.o: $(INCS)
+.c.o:
 	$(COMPILE) -c $< -o $@
+
+# There is no per-file dependency tracking. GNU Make 3.81 does NOT honour prerequisites written
+# on a suffix rule ("`.c.o: $(INCS)`" makes `.c.o` a dead literal target, not a dep-carrying rule),
+# so instead make every object depend on every local header explicitly. Coarse (any header edit
+# rebuilds all objects, ~10 s) but correct - without it, editing a header alone (e.g. reordering
+# the Functions enum in cst-functions.h) leaves the .o files stale and `make flash` silently
+# flashes old code.
+$(OBJS): $(INCS)
 
 # Generic rule for assembling Assembler source files:
 .S.o:

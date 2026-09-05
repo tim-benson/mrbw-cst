@@ -11,7 +11,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          1
+#define EEPROM_LAYOUT_VERSION          2
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -27,7 +27,7 @@
 #define EE_BRAKE_THRESHOLD            0x21
 #define EE_BRAKE_LOW_THRESHOLD        0x22
 #define EE_BRAKE_HIGH_THRESHOLD       0x23
-#define EE_PRESSURE_CONFIG            0x24
+#define EE_PRESSURE_CONFIG            0x24  // legacy ISE brake-test gauge pump-rate; inert - unused by the firmware (AIRBRAKE superseded it) and no longer round-tripped by the PC tooling.
 #define EE_ALERTER_TIMEOUT            0x25
 #define EE_LAYOUT_VERSION             0x26
 #define EE_HORN_THRESHOLD2            0x27
@@ -68,9 +68,9 @@
 #define EE_UP_BUTTON_FUNCTION         (0x10 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_DOWN_BUTTON_FUNCTION       (0x11 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_THR_UNLOCK_FUNCTION        (0x12 + CONFIG_OFFSET(WORKING_CONFIG))
-#define EE_BRAKE_OFF_FUNCTION         (0x13 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_BRAKE_REL_FUNCTION         (0x13 + CONFIG_OFFSET(WORKING_CONFIG))  // "BRK REL" (was BRK OFF)
 #define EE_REV_SWAP_FUNCTION          (0x14 + CONFIG_OFFSET(WORKING_CONFIG))
-//                                     0x15
+#define EE_EMERGENCY_FUNCTION         (0x15 + CONFIG_OFFSET(WORKING_CONFIG))  // "EMRG FN" - asserted while THROTTLE_STATUS_EMERGENCY
 #define EE_BRAKE_PULSE_WIDTH          (0x16 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_OPTIONBITS                 (0x17 + CONFIG_OFFSET(WORKING_CONFIG))
 
@@ -103,7 +103,7 @@
 //                                     0x2F
 
 #define EE_COMPRESSOR_FUNCTION        (0x30 + CONFIG_OFFSET(WORKING_CONFIG))
-#define EE_BRAKE_TEST_FUNCTION        (0x31 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_BRAKE_SET_FUNCTION         (0x31 + CONFIG_OFFSET(WORKING_CONFIG))  // "BRK SET" - AIRBRAKE brake-pipe-reduction pulse (was BRK VENT / BRK TEST)
 #define EE_NEUTRAL_FUNCTION           (0x32 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_ALERTER_FUNCTION           (0x33 + CONFIG_OFFSET(WORKING_CONFIG))
 
@@ -131,46 +131,63 @@
 #define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126
 #define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH
 #define EE_SPEED_STOP_WATCH_FN        (0x3B + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
-// 0x3C free (was EE_SPEED_RAMP_PCT/RAMPUP, itself a reuse of the freed PADDING byte - RAMPUP removed,
-// fully inert all session, see CLAUDE.md).
-#define EE_SPEED_TYPE                 (0x3D + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_V5DCC/_V4V5MULT
-#define EE_SPEED_OPLOAD               (0x3E + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV103
-#define EE_SPEED_PRLOAD               (0x3F + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV104
-#define EE_SPEED_OPLOAD_FN            (0x40 + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
-#define EE_SPEED_PRLOAD_FN            (0x41 + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
+#define EE_SPEED_TYPE                 (0x3C + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_V5DCC/_V4V5MULT
+#define EE_SPEED_OPLOAD               (0x3D + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV103
+#define EE_SPEED_PRLOAD               (0x3E + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV104
+#define EE_SPEED_OPLOAD_FN            (0x3F + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
+#define EE_SPEED_PRLOAD_FN            (0x40 + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
 
 // STACK brake mode's 3-STEP band->combo mapping, one byte per band 1-3 (band 0 is fixed to "none" and
 // isn't stored) - stored separately from EE_STACK_BAND_COMBOS (the 5-STEP variant), see that comment above.
-#define EE_STACK_BAND_COMBOS_3STEP    (0x42 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_STACK_BAND_COMBOS_3STEP    (0x41 + CONFIG_OFFSET(WORKING_CONFIG))
+//      EE_STACK_BAND_COMBOS_3STEP     0x42
 //      EE_STACK_BAND_COMBOS_3STEP     0x43
-//      EE_STACK_BAND_COMBOS_3STEP     0x44
 
 // ESU Drive Hold: watched DCC function (0-28, 255=OFF) that freezes the speed simulation while active -
 // see cst-speed.c's updateSpeed10Hz(). Defaults to F09 (SPEED_HOLD_WATCH_FN_DEFAULT), not OFF like the
 // other watched-function fields, since Drive Hold should work out of the box.
-#define EE_SPEED_HOLD_WATCH_FN        (0x45 + CONFIG_OFFSET(WORKING_CONFIG))
-
-// 0x46 free (was EE_SPEED_WINDUP_PCT/WINDUP - removed after hardware testing found DECTHR/DECPCT/SSFLOOR,
-// applied unconditionally to any deceleration, already covers what WINDUP was for, see CLAUDE.md).
+#define EE_SPEED_HOLD_WATCH_FN        (0x44 + CONFIG_OFFSET(WORKING_CONFIG))
 
 // Steady-state deceleration lag: raw speed-step threshold (0-126) below which no lag applies, and
 // 0-255=0-100% scale for the lag above it - approximates PID wind-up when decelerating from a genuine
 // steady state (no prior acceleration). See cst-speed.c's updateSpeed10Hz().
-#define EE_SPEED_DECEL_THRESHOLD      (0x47 + CONFIG_OFFSET(WORKING_CONFIG))
-#define EE_SPEED_DECEL_PCT            (0x48 + CONFIG_OFFSET(WORKING_CONFIG))
-
-// 0x49/0x4A free (were EE_SPEED_SS_FLOOR/EE_SPEED_SS_FLOORCUT - removed).
+#define EE_SPEED_DECEL_THRESHOLD      (0x45 + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_SPEED_DECEL_PCT            (0x46 + CONFIG_OFFSET(WORKING_CONFIG))
 
 // 0-255=0-100%, standing-start head-start correction - see cst-speed.c's updateSpeed10Hz().
-#define EE_SPEED_ACCEL_PCT            (0x4B + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_SPEED_ACCEL_PCT            (0x47 + CONFIG_OFFSET(WORKING_CONFIG))
 
-// Target time-to-1mph, in ticks (0.1s/tick) - reuses the byte freed by LIFTOFF's removal above. See
-// cst-speed.c's solveRampR0() and cst-speed.h's SPEED_ACCEL_TARGET_DEFAULT for the full mechanism (a
-// nonzero initial ramp slope solved to hit this target exactly) and why this is a separate knob from ACCPCT.
-#define EE_SPEED_ACCEL_TARGET         (0x4C + CONFIG_OFFSET(WORKING_CONFIG))
+// Target time-to-1mph, in ticks (0.1s/tick). See cst-speed.c's solveRampR0() and cst-speed.h's
+// SPEED_ACCEL_TARGET_DEFAULT for the full mechanism (a nonzero initial ramp slope solved to hit this
+// target exactly) and why this is a separate knob from ACCPCT.
+#define EE_SPEED_ACCEL_TARGET         (0x48 + CONFIG_OFFSET(WORKING_CONFIG))
 
 // Horn2 (two-stage horn), per-profile DCC function assignment. hornThreshold2 (the calibration point
 // itself) is global, not per-profile - see EE_HORN_THRESHOLD2 above, alongside EE_HORN_THRESHOLD.
-#define EE_HORN2_FUNCTION             (0x4D + CONFIG_OFFSET(WORKING_CONFIG))
+#define EE_HORN2_FUNCTION             (0x49 + CONFIG_OFFSET(WORKING_CONFIG))
+
+// AIRBRAKE per-profile model config (src/cst-pressure.c), raw 0-255 bytes. Edited on-device via
+// AIRBRAKE_CONFIG_SCREEN; read through readByteOrDefault() so a blank/upgraded chip self-heals to the
+// AIRBRAKE_*_DEFAULT values. The rate items (CHARGE_RATE/LEAK_RATE/PUMP_RATE) are PSI/min, scaled to
+// per-tick milliPSI in updateBrake10Hz(); the PSI/s items (VENT/EMERG) are hardcoded, not stored - see
+// AIRBRAKE_VENT_RATE_PSI_S/AIRBRAKE_EMERG_VENT_RATE_PSI_S in cst-pressure.c - and FULLSVC is derived
+// from CHARGED at runtime, also not stored. DISPLAY and COMP_MODE are NORMAL/CONSIST-style toggles.
+// EE_COMPRESSOR2_FUNCTION (the "COMPRSR2" Functions-enum slot) lives inside this block because the
+// 0x30 function region is fully packed. The old global EE_PRESSURE_CONFIG (0x24) is superseded/unused.
+#define EE_AIRBRAKE_CHARGED          (0x4A + CONFIG_OFFSET(WORKING_CONFIG))  // brake-pipe charged pressure, PSI
+#define EE_AIRBRAKE_MR_CUTIN         (0x4B + CONFIG_OFFSET(WORKING_CONFIG))  // reservoir governor cut-in, PSI
+#define EE_AIRBRAKE_MR_CUTOUT        (0x4C + CONFIG_OFFSET(WORKING_CONFIG))  // reservoir governor cut-out, PSI
+#define EE_AIRBRAKE_CHARGE_RATE      (0x4D + CONFIG_OFFSET(WORKING_CONFIG))  // brake-pipe recharge rate, PSI/min
+#define EE_AIRBRAKE_LEAK_RATE        (0x4E + CONFIG_OFFSET(WORKING_CONFIG))  // reservoir base leak, PSI/min
+#define EE_AIRBRAKE_PUMP_RATE        (0x4F + CONFIG_OFFSET(WORKING_CONFIG))  // compressor fill rate, PSI/min
+#define EE_AIRBRAKE_MR_LOAD          (0x50 + CONFIG_OFFSET(WORKING_CONFIG))  // reservoir draw per PSI of pipe recharge, %
+#define EE_AIRBRAKE_COMP_MODE        (0x51 + CONFIG_OFFSET(WORKING_CONFIG))  // NORMAL(0)/CONSIST(1) - see AIRBRAKE_COMP_MODE
+#define EE_COMPRESSOR2_FUNCTION      (0x52 + CONFIG_OFFSET(WORKING_CONFIG))  // "COMPRSR2" - routine/staggered compressor event
+#define EE_AIRBRAKE_DISPLAY          (0x53 + CONFIG_OFFSET(WORKING_CONFIG))  // DUAL(0)/SINGLE(1) - see AIRBRAKE_DISPLAY
+
+// 0x54-0x7F: unused per-slot padding. SPEED and AIRBRAKE development each left freed single-byte
+// holes scattered through 0x3C-0x5C during their uncommitted iteration; those were repacked contiguous
+// (0x00-0x53 now fully packed). The EEPROM_LAYOUT_VERSION 1->2 migration in readConfig() force-resets
+// 0x3C-0x53 on every profile slot for a throttle coming from the last committed layout.
 
 #endif

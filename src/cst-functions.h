@@ -10,16 +10,19 @@ typedef enum
 	BRAKE_FN,
 	BK2_FN,
 	BK3_FN,
-	BRAKE_OFF_FN,
 	AUX_FN,
 	ENGINE_ON_FN,
 	ENGINE_OFF_FN,
 	THR_UNLOCK_FN,
 	REV_SWAP_FN,
 	NEUTRAL_FN,
-	ALERTER_FN,
 	COMPRESSOR_FN,
-	BRAKE_TEST_FN,
+	COMPRESSOR2_FN,     // "COMPRSR2" - routine/staggered compressor event; hidden in CONFIG FUNC unless
+	                    // AIRBRAKE CFG's COMPMODE = CONSIST (EEPROM 0x5B)
+	BRAKE_SET_FN,       // "BRK SET"  - AIRBRAKE brake-pipe-reduction pulse (was BRK VENT / BRK TEST, EEPROM 0x31)
+	BRAKE_REL_FN,       // "BRK REL"  - brake released (was BRK OFF, EEPROM 0x13)
+	ALERTER_FN,         // "ALERTER"  - grouped with the throttle-status functions, just above EMRG FN
+	EMERGENCY_FN,       // "EMRG FN"  - asserted while THROTTLE_STATUS_EMERGENCY (EEPROM 0x15)
 	FRONT_HEADLIGHT_FN,
 	FRONT_DITCH_FN,
 	FRONT_DIM1_FN,
@@ -59,12 +62,12 @@ typedef enum
 	F09_LAT = 0x49, F19_LAT = 0x53,
 	FN_OFF  = 0x80,
 	FN_EMRG = 0x81,
-	FN_BRKTEST = 0xC0,
+	FN_AIRBRAKE = 0xC0,   // UP/DOWN BTN value: opens the AIRBRAKE screen (was FN_AIRGAUGE / FN_BRKTEST / "BRK TEST")
 } FunctionValues;
 
 void printCurrentFunctionName(void);
 void printCurrentFunctionValue(void);
-void advanceCurrentFunction(void);
+void advanceCurrentFunction(uint8_t airbrakeEnabled);
 void resetCurrentFunction(void);
 void incrementCurrentFunctionValue(void);
 void decrementCurrentFunctionValue(void);
@@ -72,7 +75,7 @@ void readFunctionConfiguration(void);
 void writeFunctionConfiguration(void);
 uint8_t isFunctionOff(Functions functionName);
 uint8_t isFunctionEstop(Functions functionName);
-uint8_t isFunctionBrakeTest(Functions functionName);
+uint8_t isFunctionAirBrake(Functions functionName);
 uint8_t isFunctionLatching(Functions functionName);
 uint32_t getFunctionMask(Functions functionName);
 void resetFunctionConfiguration(void);

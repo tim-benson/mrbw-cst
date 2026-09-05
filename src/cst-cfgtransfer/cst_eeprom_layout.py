@@ -81,7 +81,9 @@ EE_HORN_THRESHOLD = 0x20
 EE_BRAKE_THRESHOLD = 0x21
 EE_BRAKE_LOW_THRESHOLD = 0x22
 EE_BRAKE_HIGH_THRESHOLD = 0x23
-EE_PRESSURE_CONFIG = 0x24
+# 0x24 free (was EE_PRESSURE_CONFIG, the original stock ISE gauge's global pump-rate byte - inert
+# since AIRBRAKE superseded it, dropped from device.json entirely rather than kept as a byte-exact
+# backup exception).
 EE_ALERTER_TIMEOUT = 0x25
 EE_HORN_THRESHOLD2 = 0x27
 
@@ -99,6 +101,7 @@ TX_HOLDOFF_MIN = 10
 
 CONFIGBITS_LED_BLINK = 0
 CONFIGBITS_MAIN_SCREEN_SPEED = 1  # bit clear = clock (default), set = scale speed
+CONFIGBITS_AIRBRAKE = 2  # bit clear = AIRBRAKE off (default); set = drives air sound functions
 CONFIGBITS_REVERSER_LOCK = 4
 CONFIGBITS_STRICT_SLEEP = 5
 
@@ -111,7 +114,7 @@ LOCO_ADDRESS_LONG_MAX = 9999
 # Function-assignment fields: (json_key, offset, attributes).
 # attributes mirrors cst-functions.c's FunctionData.attributes bitfield:
 #   FUNC_SPECIAL -> may be set to EMRG (FN_EMRG)
-#   FUNC_MENU    -> may be set to BRKTEST (FN_BRKTEST)
+#   FUNC_MENU    -> may be set to AIRBRAKE (FN_AIRBRAKE)
 # (FUNC_LATCH/SOFTWARE_LATCH only gates what the on-device increment/decrement UI can reach; it doesn't
 # restrict what byte value is valid, so it's not enforced by this tool's validation.)
 FUNC_SPECIAL = 0x02
@@ -126,21 +129,23 @@ FUNC_MENU = 0x04
 FUNCTION_FIELDS = [
     # (json_key,         offset, attributes)
     ("HORN",             0x02, 0),
-    ("HORN2",            0x4D, 0),
+    ("HORN2",            0x49, 0),
     ("BELL",             0x03, 0),
     ("BRAKE",            0x04, 0),
     ("BRAKE2",           0x29, 0),
     ("BRAKE3",           0x2A, 0),
-    ("BRAKE_OFF",        0x13, 0),
     ("AUX",              0x05, FUNC_SPECIAL),
     ("ENGINE_ON",        0x06, 0),
     ("ENGINE_OFF",       0x07, 0),
     ("THR_UNLOCK",       0x12, 0),
     ("REV_SWAP",         0x14, 0),
     ("NEUTRAL",          0x32, 0),
-    ("ALERTER",          0x33, FUNC_SPECIAL),
     ("COMPRESSOR",       0x30, 0),
-    ("BRAKE_TEST",       0x31, 0),
+    ("COMPRESSOR2",      0x52, 0),
+    ("BRAKE_SET",        0x31, 0),
+    ("BRAKE_REL",        0x13, 0),
+    ("ALERTER",          0x33, FUNC_SPECIAL),
+    ("EMERGENCY",        0x15, 0),
     ("FRONT_HEADLIGHT",  0x0A, 0),
     ("FRONT_DITCH",      0x0B, 0),
     ("FRONT_DIM1",       0x08, 0),
@@ -178,17 +183,33 @@ EE_STACK_BAND_COMBOS = 0x34  # 5 bytes, bands 1-5 (band 0 fixed/not stored)
 EE_SPEED_MAX_MPH = 0x39
 EE_SPEED_UNIT_KMH = 0x3A
 EE_SPEED_STOP_WATCH_FN = 0x3B
-EE_SPEED_TYPE = 0x3D
-EE_SPEED_OPLOAD = 0x3E
-EE_SPEED_PRLOAD = 0x3F
-EE_SPEED_OPLOAD_FN = 0x40
-EE_SPEED_PRLOAD_FN = 0x41
-EE_STACK_BAND_COMBOS_3STEP = 0x42  # 3 bytes, bands 1-3
-EE_SPEED_HOLD_WATCH_FN = 0x45
-EE_SPEED_DECEL_THRESHOLD = 0x47
-EE_SPEED_DECEL_PCT = 0x48
-EE_SPEED_ACCEL_PCT = 0x4B
-EE_SPEED_ACCEL_TARGET = 0x4C
+EE_SPEED_TYPE = 0x3C
+EE_SPEED_OPLOAD = 0x3D
+EE_SPEED_PRLOAD = 0x3E
+EE_SPEED_OPLOAD_FN = 0x3F
+EE_SPEED_PRLOAD_FN = 0x40
+EE_STACK_BAND_COMBOS_3STEP = 0x41  # 3 bytes, bands 1-3
+EE_SPEED_HOLD_WATCH_FN = 0x44
+EE_SPEED_DECEL_THRESHOLD = 0x45
+EE_SPEED_DECEL_PCT = 0x46
+EE_SPEED_ACCEL_PCT = 0x47
+EE_SPEED_ACCEL_TARGET = 0x48
+
+# AIRBRAKE per-profile air-brake model config (src/cst-pressure.c / AIRBRAKE_CONFIG_SCREEN), raw
+# 0-255 bytes, all self-healing via readByteOrDefault(). 0x49 is EE_HORN2_FUNCTION and 0x52 is
+# EE_COMPRESSOR2_FUNCTION (both in FUNCTION_FIELDS - wedged in this block because the 0x30 function
+# region is fully packed). The SPEED (0x3C-0x48) and AIRBRAKE (0x4A-0x53) bytes were repacked
+# contiguous - the single-byte holes left by fields removed during development are gone, so 0x00-0x53
+# is now fully packed; 0x54-0x7F is per-slot padding.
+EE_AIRBRAKE_CHARGED = 0x4A
+EE_AIRBRAKE_MR_CUTIN = 0x4B
+EE_AIRBRAKE_MR_CUTOUT = 0x4C
+EE_AIRBRAKE_CHARGE_RATE = 0x4D
+EE_AIRBRAKE_LEAK_RATE = 0x4E
+EE_AIRBRAKE_PUMP_RATE = 0x4F
+EE_AIRBRAKE_MR_LOAD = 0x50
+EE_AIRBRAKE_COMP_MODE = 0x51  # NORMAL(0)/CONSIST(1) - gates the COMPRSR/COMPRSR2 split
+EE_AIRBRAKE_DISPLAY = 0x53    # DUAL(0)/SINGLE(1) - which AIRBRAKE_SCREEN rendering
 
 STACK_BAND_COUNT_3STEP = 4  # bands 0-3 (3 editable)
 STACK_BAND_COUNT_5STEP = 6  # bands 0-5 (5 editable)
@@ -216,7 +237,7 @@ HORN_TYPE_FROM_NAME = {v: k for k, v in HORN_TYPE_TO_NAME.items()}
 
 # controls-byte bits (mrbw-cst.c), reused directly as the STACK band-combo byte encoding
 BRAKE_CONTROL = 0x08
-BRAKE_OFF_CONTROL = 0x10
+BRAKE_REL_CONTROL = 0x10
 BK2_CONTROL = 0x20
 BK3_CONTROL = 0x40
 STACK_COMBO_MASK = BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL
@@ -299,6 +320,53 @@ SPEED_FIELDS = [
 SPEED_PLAIN_NUMERIC_FIELDS = {"ACCEL", "DECEL", "BRK1", "BRK2", "BRK3", "DELAY", "MAXSPEED",
                                "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"}
 SPEED_WATCHED_FN_FIELDS = {"HOLDFN", "STOPFN", "OPLOADFN", "PRLOADFN"}
+
+# --- AIRBRAKE (AIRBRAKE CFG) per-profile fields ---
+# Named defaults mirror cst-pressure.h's AIRBRAKE_*_DEFAULT constants (readByteOrDefault fallbacks).
+# FULLSVC/VENT/EMRG/APPLY/DRV_LOAD no longer exist here - FULLSVC is derived from BP_CHARGE at
+# runtime (never stored), VENT/EMRG are hardcoded constants, APPLY/DRV_LOAD were removed outright -
+# see cst-pressure.c/cst-eeprom.h. DISPLAY (which AIRBRAKE_SCREEN rendering) and COMP_MODE (the
+# COMPRSR/COMPRSR2 split toggle) are string enums, not plain numbers - see the *_TO_NAME/FROM_NAME
+# maps below.
+AIRBRAKE_FIELD_DEFAULTS = {
+    "BP_CHARGE": 90,          # PSI, range AIRBRAKE_BP_CHARGE_MIN-MAX
+    "MR_LOAD": 35,            # % of pipe recharge drawn from the reservoir, range 0-AIRBRAKE_MR_LOAD_MAX
+    "MR_LOW": 130,            # PSI, reservoir governor cut-in
+    "MR_HIGH": 140,           # PSI, reservoir governor cut-out
+    "RECHARGE": 180,          # PSI/min, brake-pipe recharge rate (initial rate of the taper)
+    "LEAK_RATE": 5,           # PSI/min, reservoir base leak
+    "PUMP_RATE": 30,          # PSI/min, compressor fill rate
+    "DISPLAY": "DUAL",        # "DUAL" (BP:/MR: glyph view) or "SINGLE" (analogue BP dial)
+    "COMP_MODE": "NORMAL",    # "NORMAL" or "CONSIST"
+}
+
+AIRBRAKE_BP_CHARGE_MIN = 70   # on-device editing range
+AIRBRAKE_BP_CHARGE_MAX = 110
+AIRBRAKE_MR_LOAD_MAX = 100    # on-device editing range is 0-100
+
+AIRBRAKE_COMP_MODE_NORMAL = 0
+AIRBRAKE_COMP_MODE_CONSIST = 1
+AIRBRAKE_COMP_MODE_TO_NAME = {AIRBRAKE_COMP_MODE_NORMAL: "NORMAL", AIRBRAKE_COMP_MODE_CONSIST: "CONSIST"}
+AIRBRAKE_COMP_MODE_FROM_NAME = {v: k for k, v in AIRBRAKE_COMP_MODE_TO_NAME.items()}
+
+AIRBRAKE_DISPLAY_DUAL = 0
+AIRBRAKE_DISPLAY_SINGLE = 1
+AIRBRAKE_DISPLAY_TO_NAME = {AIRBRAKE_DISPLAY_DUAL: "DUAL", AIRBRAKE_DISPLAY_SINGLE: "SINGLE"}
+AIRBRAKE_DISPLAY_FROM_NAME = {v: k for k, v in AIRBRAKE_DISPLAY_TO_NAME.items()}
+
+# (json_key, eeprom offset) for each AIRBRAKE CFG field, in on-device AIRBRAKE_CONFIG_SCREEN menu
+# order. All are plain 0-254-or-"UNSET" numbers except DISPLAY and COMP_MODE (string enums).
+AIRBRAKE_FIELDS = [
+    ("BP_CHARGE", EE_AIRBRAKE_CHARGED),
+    ("MR_LOAD",   EE_AIRBRAKE_MR_LOAD),
+    ("MR_LOW",    EE_AIRBRAKE_MR_CUTIN),
+    ("MR_HIGH",   EE_AIRBRAKE_MR_CUTOUT),
+    ("RECHARGE",  EE_AIRBRAKE_CHARGE_RATE),
+    ("LEAK_RATE", EE_AIRBRAKE_LEAK_RATE),
+    ("PUMP_RATE", EE_AIRBRAKE_PUMP_RATE),
+    ("DISPLAY",   EE_AIRBRAKE_DISPLAY),
+    ("COMP_MODE", EE_AIRBRAKE_COMP_MODE),
+]
 # Note: STOPFN/OPLOADFN/PRLOADFN's readByteOrDefault() default IS WATCHED_FN_OFF (255/0xFF) itself, so a
 # raw 0xFF and an explicit "OFF" are the same byte and decode identically as "UNSET" either way - this is
 # a real firmware property (the self-heal is a no-op for these three), not a codec bug. HOLDFN's default
@@ -307,7 +375,7 @@ SPEED_WATCHED_FN_FIELDS = {"HOLDFN", "STOPFN", "OPLOADFN", "PRLOADFN"}
 # --- FunctionValues encoding (cst-functions.h) ---
 FN_OFF = 0x80
 FN_EMRG = 0x81
-FN_BRKTEST = 0xC0
+FN_AIRBRAKE = 0xC0  # was FN_BRKTEST - value unchanged
 FN_MAX_NUM = 28
 
 
@@ -323,10 +391,10 @@ def _build_function_value_maps():
         name_to_value[lat_name] = 0x40 + n
     value_to_name[FN_OFF] = "OFF"
     value_to_name[FN_EMRG] = "EMRG"
-    value_to_name[FN_BRKTEST] = "BRKTEST"
+    value_to_name[FN_AIRBRAKE] = "AIRBRAKE"
     name_to_value["OFF"] = FN_OFF
     name_to_value["EMRG"] = FN_EMRG
-    name_to_value["BRKTEST"] = FN_BRKTEST
+    name_to_value["AIRBRAKE"] = FN_AIRBRAKE
     return value_to_name, name_to_value
 
 

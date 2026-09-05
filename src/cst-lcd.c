@@ -20,6 +20,7 @@ LICENSE:
 *************************************************************************/
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "lcd.h"
 
@@ -28,9 +29,8 @@ LICENSE:
 #include "cst-lcd.h"
 #include "cst-hardware.h"
 #include "cst-battery.h"
+#include "cst-math.h"
 #include "cst-time.h"
-#include "cst-pressure.h"
-#include "cst-tonnage.h"
 
 const uint8_t Bell[8] =
 {
@@ -106,6 +106,257 @@ void setupSoftkeyChars(void)
 void setupAuxChars(void)
 {
 	lcd_setup_custom(AUX_CHAR, Aux);
+}
+
+// "PSI" unit label for the AIRBRAKE screen - a hand-drawn 2-cell glyph (P S I across 10x8).
+const uint8_t PsiCharL[8] =
+{
+	0b00000110,
+	0b00000101,
+	0b00000101,
+	0b00000110,
+	0b00000100,
+	0b00000100,
+	0b00000100,
+	0b00000000
+};
+
+const uint8_t PsiCharR[8] =
+{
+	0b00001001,
+	0b00010101,
+	0b00010001,
+	0b00001001,
+	0b00000101,
+	0b00010101,
+	0b00001001,
+	0b00000000
+};
+
+void setupPsiChars(void)
+{
+	lcd_setup_custom(PSI_CHAR_L, PsiCharL);
+	lcd_setup_custom(PSI_CHAR_R, PsiCharR);
+}
+
+// --- AIRBRAKE ALT: the original ISE analogue pressure gauge, revived from the last commit before
+// BRAKESIM replaced it (git 3cde842:src/cst-pressure.c) and rewired to the new sim's BP value. The
+// dial artwork, canvas geometry, and Bresenham needle plotter are unchanged from the original -
+// only the value driving the needle angle changed (was PumpState's milliPressure, now
+// airBrakePipePsi()/AIRBRAKE_CHARGED, passed in by the caller so this file has no dependency on
+// cst-pressure.c's internals).
+
+#define GAUGE_CANVAS_ROWS       16
+#define GAUGE_CANVAS_COLS       20
+#define GAUGE_ROWS_PER_CHAR      8
+#define GAUGE_COLS_PER_CHAR      5
+
+// East = 0deg, South = 90deg, West = 180deg, North = 270deg
+#define GAUGE_MIN_ANGLE        112
+#define GAUGE_MAX_ANGLE        300
+#define GAUGE_ORIGIN_X          10
+#define GAUGE_ORIGIN_Y           8
+#define GAUGE_NEEDLE_LENGTH      7
+
+static uint8_t gaugeCanvas[GAUGE_CANVAS_ROWS / GAUGE_ROWS_PER_CHAR][GAUGE_CANVAS_COLS / GAUGE_COLS_PER_CHAR][GAUGE_ROWS_PER_CHAR];
+
+const uint8_t Gauge[GAUGE_CANVAS_ROWS / GAUGE_ROWS_PER_CHAR][GAUGE_CANVAS_COLS / GAUGE_COLS_PER_CHAR][GAUGE_ROWS_PER_CHAR] =
+{
+	{
+		{
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000001,
+			0b00000011,
+			0b00000010,
+			0b00000010,
+			0b00000010
+		},
+		{
+			0b00000111,
+			0b00001000,
+			0b00011000,
+			0b00000100,
+			0b00000000,
+			0b00010000,
+			0b00000000,
+			0b00000000
+		},
+		{
+			0b00011110,
+			0b00010001,
+			0b00010001,
+			0b00000010,
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000000
+		},
+		{
+			0b00000000,
+			0b00000000,
+			0b00010000,
+			0b00001000,
+			0b00001100,
+			0b00010100,
+			0b00000100,
+			0b00000100
+		}
+	},
+	{
+		{
+			0b00000011,
+			0b00000010,
+			0b00000010,
+			0b00000010,
+			0b00000001,
+			0b00000000,
+			0b00000000,
+			0b00000000
+		},
+		{
+			0b00010000,
+			0b00000000,
+			0b00000000,
+			0b00001000,
+			0b00010000,
+			0b00010010,
+			0b00001100,
+			0b00000111
+		},
+		{
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000000,
+			0b00000001,
+			0b00011110
+		},
+		{
+			0b00011100,
+			0b00000100,
+			0b00000100,
+			0b00000100,
+			0b00001000,
+			0b00010000,
+			0b00000000,
+			0b00000000
+		}
+	}
+};
+
+static void gaugePlot(uint8_t x, uint8_t y)
+{
+	uint8_t row = y / GAUGE_ROWS_PER_CHAR;
+	if(row >= (GAUGE_CANVAS_ROWS / GAUGE_ROWS_PER_CHAR))
+		return;
+	uint8_t col = x / GAUGE_COLS_PER_CHAR;
+	if(col >= (GAUGE_CANVAS_COLS / GAUGE_COLS_PER_CHAR))
+		return;
+	gaugeCanvas[row][col][y % GAUGE_ROWS_PER_CHAR] |= 1 << ((GAUGE_COLS_PER_CHAR - 1) - (x % GAUGE_COLS_PER_CHAR));
+}
+
+/* https://en.wikipedia.org/wiki/Bresenham's_line_algorithm */
+static void gaugePlotLineLow(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
+{
+	int8_t dx = x1 - x0;
+	int8_t dy = y1 - y0;
+	int8_t yi = 1;
+	if(dy < 0)
+	{
+		yi = -1;
+		dy = -dy;
+	}
+	int8_t D = 2*dy - dx;
+	int8_t y = y0;
+	int8_t x;
+
+	for(x=x0; x<=x1; x++)
+	{
+		gaugePlot(x,y);
+		if(D > 0)
+		{
+			y = y + yi;
+			D = D - 2*dx;
+		}
+		D = D + 2*dy;
+	}
+}
+
+/* https://en.wikipedia.org/wiki/Bresenham's_line_algorithm */
+static void gaugePlotLineHigh(uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1)
+{
+	int8_t dx = x1 - x0;
+	int8_t dy = y1 - y0;
+	int8_t xi = 1;
+	if(dx < 0)
+	{
+		xi = -1;
+		dx = -dx;
+	}
+	int8_t D = 2*dx - dy;
+	int8_t x = x0;
+	int8_t y;
+
+	for(y=y0; y<=y1; y++)
+	{
+		gaugePlot(x,y);
+		if(D > 0)
+		{
+			x = x + xi;
+			D = D - 2*dy;
+		}
+		D = D + 2*dx;
+	}
+}
+
+/* https://en.wikipedia.org/wiki/Bresenham's_line_algorithm */
+static void gaugePlotLine(int8_t x0, int8_t y0, int8_t x1, int8_t y1)
+{
+	if(abs(y1 - y0) < abs(x1 - x0))
+	{
+		if(x0 > x1)
+			gaugePlotLineLow(x1, y1, x0, y0);
+		else
+			gaugePlotLineLow(x0, y0, x1, y1);
+	}
+	else
+	{
+		if(y0 > y1)
+			gaugePlotLineHigh(x1, y1, x0, y0);
+		else
+			gaugePlotLineHigh(x0, y0, x1, y1);
+	}
+}
+
+// Redraws the needle at an angle proportional to psi/maxPsi (clamped by construction - the sim never
+// lets BP exceed the configured charge) and uploads all 8 CGRAM cells. Called every render pass while
+// AIRBRAKE ALT is on screen - the needle moves live, so unlike the rest of this file's setupXxxChars()
+// helpers (called once per LcdMode change via setupLCD()), this one is not gated by currentMode.
+void setupGaugeChars(uint8_t psi, uint8_t maxPsi)
+{
+	float ratio = (maxPsi > 0) ? ((float)psi / (float)maxPsi) : 0.0;
+	float degrees = ((GAUGE_MAX_ANGLE - GAUGE_MIN_ANGLE) * ratio) + GAUGE_MIN_ANGLE;
+	float radians = degrees * PI / 180.0;
+
+	int8_t x = round(cos_32(radians) * GAUGE_NEEDLE_LENGTH);
+	int8_t y = round(sin_32(radians) * GAUGE_NEEDLE_LENGTH);
+
+	memcpy(gaugeCanvas, Gauge, sizeof(gaugeCanvas));
+
+	gaugePlotLine(GAUGE_ORIGIN_X, GAUGE_ORIGIN_Y, GAUGE_ORIGIN_X + x, GAUGE_ORIGIN_Y + y);
+
+	lcd_setup_custom(GAUGE_CHAR_A0, gaugeCanvas[0][0]);
+	lcd_setup_custom(GAUGE_CHAR_A1, gaugeCanvas[0][1]);
+	lcd_setup_custom(GAUGE_CHAR_A2, gaugeCanvas[0][2]);
+	lcd_setup_custom(GAUGE_CHAR_A3, gaugeCanvas[0][3]);
+	lcd_setup_custom(GAUGE_CHAR_B0, gaugeCanvas[1][0]);
+	lcd_setup_custom(GAUGE_CHAR_B1, gaugeCanvas[1][1]);
+	lcd_setup_custom(GAUGE_CHAR_B2, gaugeCanvas[1][2]);
+	lcd_setup_custom(GAUGE_CHAR_B3, gaugeCanvas[1][3]);
 }
 
 // Splash Screen Characters
@@ -342,17 +593,17 @@ void setupLCD(LcdMode mode)
 				setupSoftkeyChars();
 				setupClockChars();
 				setupAuxChars();
+				setupPsiChars();
 				break;
 			case LCD_DIAGS:
 				setupSoftkeyChars();
 				setupDiagChars();
 				break;
-			case LCD_TONNAGE:
-				setupTonnageChars();
-				break;
-			case LCD_PRESSURE:
-				setupSoftkeyChars();  // FIXME: Needed?
-				setupPressureChars();
+			case LCD_AIRBRAKE_ALT:
+				// No static setup here - all 8 cells are rewritten every render pass by
+				// setupGaugeChars() instead (the needle moves live). This case only exists so
+				// currentMode tracks reality, letting a later setupLCD(LCD_DEFAULT) correctly
+				// detect the change and reload the battery/softkey/clock/aux/PSI glyphs.
 				break;
 		}
 		currentMode = mode;

@@ -18,7 +18,7 @@ def _valid_functions():
     d = {}
     for key, _offset, attrs in layout.FUNCTION_FIELDS:
         if attrs & layout.FUNC_MENU:
-            d[key] = "BRKTEST"
+            d[key] = "AIRBRAKE"
         elif attrs & layout.FUNC_SPECIAL:
             d[key] = "EMRG"
         else:
@@ -55,6 +55,13 @@ def _valid_speed():
     return d
 
 
+def _valid_airbrake():
+    # 80 satisfies every numeric field's range at once (BP_CHARGE 70-110, MR_LOAD 0-100, everything
+    # else plain 0-254) so one value covers the numeric dict; DISPLAY and COMP_MODE are string enums.
+    _strings = {"DISPLAY": "SINGLE", "COMP_MODE": "CONSIST"}
+    return {key: _strings.get(key, 80) for key in layout.AIRBRAKE_FIELD_DEFAULTS}
+
+
 def _valid_slot_dict(brk_type="PULSE"):
     return {
         "schema_version": slot_codec.SLOT_SCHEMA_VERSION,
@@ -64,6 +71,7 @@ def _valid_slot_dict(brk_type="PULSE"):
         "functions": _valid_functions(),
         "notch_speedstep": [10, 25, 40, 55, 70, 90, 110, 126],
         "speed": _valid_speed(),
+        "airbrake": _valid_airbrake(),
         "options": _valid_options(brk_type),
     }
 
@@ -99,12 +107,11 @@ def _valid_global_dict():
             "tx_holdoff_centisecs": 15,
         },
         "prefs": {
-            "config_bits": {"main_screen_speed": False, "led_blink": True, "reverser_lock": True,
-                             "strict_sleep": True},
+            "config_bits": {"main_screen_speed": False, "airbrake": False, "led_blink": True,
+                             "reverser_lock": True, "strict_sleep": True},
             "sleep_timeout_minutes": 5,
             "alerter_timeout_minutes": 0,
             "dead_reckoning_time": 10,
-            "pressure_config": 0,
         },
         "calibration": {
             "horn_threshold": 100,
@@ -126,9 +133,9 @@ def _legacy_flat_global_dict():
 
 class LayoutVersionRegressionTests(unittest.TestCase):
     """Guards that every EEPROM field the two-stage horn introduced is actually mirrored in this codec.
-    The two-stage horn claims two bytes the codec would otherwise never touch - EE_HORN2_FUNCTION at
-    0x4D (previously inert slot padding) and EE_HORN_THRESHOLD2 at 0x27 (a global calibration point) -
-    and an incomplete mirror of either would silently misdecode. The CNF format version is no help
+    The two-stage horn claims two bytes the codec would otherwise never touch - EE_HORN2_FUNCTION (at
+    0x49 after the SPEED/AIRBRAKE hole repack, 0x4D before it) and EE_HORN_THRESHOLD2 at 0x27 (a global
+    calibration point) - and an incomplete mirror of either would silently misdecode. The CNF format version is no help
     against that: it only says "the layout changed", not "each field is present". Those are the checks
     that caught the real 2026-08-25 bug.
 
@@ -138,8 +145,8 @@ class LayoutVersionRegressionTests(unittest.TestCase):
     """
 
     def test_function_fields_includes_horn2(self):
-        self.assertEqual(len(layout.FUNCTION_FIELDS), 26)
-        self.assertIn(("HORN2", 0x4D, 0), layout.FUNCTION_FIELDS)
+        self.assertEqual(len(layout.FUNCTION_FIELDS), 28)
+        self.assertIn(("HORN2", 0x49, 0), layout.FUNCTION_FIELDS)
 
     def test_horn_threshold2_is_mirrored(self):
         self.assertEqual(layout.EE_HORN_THRESHOLD2, 0x27)
@@ -172,9 +179,10 @@ class MenuOrderTests(unittest.TestCase):
 
     def test_functions_match_config_func_menu_order(self):
         # = the Functions enum in src/cst-functions.h, which advanceCurrentFunction() iterates.
-        expected = ["HORN", "HORN2", "BELL", "BRAKE", "BRAKE2", "BRAKE3", "BRAKE_OFF", "AUX",
-                    "ENGINE_ON", "ENGINE_OFF", "THR_UNLOCK", "REV_SWAP", "NEUTRAL", "ALERTER",
-                    "COMPRESSOR", "BRAKE_TEST", "FRONT_HEADLIGHT", "FRONT_DITCH", "FRONT_DIM1",
+        expected = ["HORN", "HORN2", "BELL", "BRAKE", "BRAKE2", "BRAKE3", "AUX",
+                    "ENGINE_ON", "ENGINE_OFF", "THR_UNLOCK", "REV_SWAP", "NEUTRAL",
+                    "COMPRESSOR", "COMPRESSOR2", "BRAKE_SET", "BRAKE_REL", "ALERTER",
+                    "EMERGENCY", "FRONT_HEADLIGHT", "FRONT_DITCH", "FRONT_DIM1",
                     "FRONT_DIM2", "REAR_HEADLIGHT", "REAR_DITCH", "REAR_DIM1", "REAR_DIM2",
                     "UP_BUTTON", "DOWN_BUTTON"]
         self.assertEqual([k for k, _off, _a in layout.FUNCTION_FIELDS], expected)
@@ -192,14 +200,23 @@ class MenuOrderTests(unittest.TestCase):
                     "DECPCT", "DECTHR"]
         self.assertEqual([k for k, _off in layout.SPEED_FIELDS], expected)
 
+    def test_airbrake_keys_match_airbrake_cfg_menu_order(self):
+        # = AIRBRAKE_CONFIG_SCREEN item order (cst-pressure.h AIRBRAKE_* enum) - all 9 always visible,
+        # no ADV-FUNC gating left in this menu. DISPLAY sits immediately above COMP_MODE.
+        expected = ["BP_CHARGE", "MR_LOAD", "MR_LOW", "MR_HIGH", "RECHARGE", "LEAK_RATE", "PUMP_RATE",
+                    "DISPLAY", "COMP_MODE"]
+        self.assertEqual([k for k, _off in layout.AIRBRAKE_FIELDS], expected)
+        self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["airbrake"]), expected)
+
     def test_config_bits_match_prefs_menu_order(self):
         self.assertEqual(list(slot_codec.CONFIGBITS_NAMED),
-                         ["main_screen_speed", "led_blink", "reverser_lock", "strict_sleep"])
+                         ["main_screen_speed", "airbrake", "led_blink", "reverser_lock", "strict_sleep"])
 
     def test_slot_top_level_sections_in_menu_order(self):
-        # One object per menu: LOCO -> FORCE FUNC -> CONFIG FUNC -> NOTCH -> SPEED CFG -> OPTIONS.
+        # One object per menu: LOCO -> FORCE FUNC -> CONFIG FUNC -> NOTCH -> SPEED CFG -> AIRBRAKE CFG
+        # -> OPTIONS.
         expected = ["schema_version", "source", "loco_address", "force_functions", "functions",
-                    "notch_speedstep", "speed", "options"]
+                    "notch_speedstep", "speed", "airbrake", "options"]
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})), expected)
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["force_functions"]),
                          ["on", "off"])
@@ -215,8 +232,7 @@ class MenuOrderTests(unittest.TestCase):
                                             "tx_holdoff_centisecs"])
         self.assertEqual(list(g["prefs"])[0], "config_bits")  # DISPLAY is PREFS item 1
         self.assertEqual(list(g["prefs"]), ["config_bits", "sleep_timeout_minutes",
-                                             "alerter_timeout_minutes", "dead_reckoning_time",
-                                             "pressure_config"])
+                                             "alerter_timeout_minutes", "dead_reckoning_time"])
         self.assertEqual(list(g["calibration"]), ["horn_threshold", "horn_threshold2", "brake_threshold",
                                                    "brake_low_threshold", "brake_high_threshold"])
 
@@ -261,6 +277,8 @@ class SlotRoundTripTests(unittest.TestCase):
             self.assertEqual(v, slot_codec.UNSET)
         for key in layout.SPEED_FIELD_DEFAULTS:
             self.assertEqual(decoded["speed"][key], slot_codec.UNSET)
+        for key, _off in layout.AIRBRAKE_FIELDS:
+            self.assertEqual(decoded["airbrake"][key], slot_codec.UNSET)
         # Function bytes have no self-heal - an unrecognized raw byte round-trips as a RAW: passthrough.
         for key in decoded["functions"]:
             self.assertEqual(decoded["functions"][key], "RAW:0xFF")
@@ -311,13 +329,13 @@ class SlotRoundTripTests(unittest.TestCase):
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_slot(d2)
 
-    def test_brktest_valid_on_menu_func_only(self):
+    def test_airbrake_fn_valid_on_menu_func_only(self):
         d = _valid_slot_dict()
-        d["functions"]["UP_BUTTON"] = "BRKTEST"
+        d["functions"]["UP_BUTTON"] = "AIRBRAKE"
         slot_codec.encode_slot(d)  # should not raise
 
         d2 = _valid_slot_dict()
-        d2["functions"]["AUX"] = "BRKTEST"  # SPECIAL but not MENU
+        d2["functions"]["AUX"] = "AIRBRAKE"  # SPECIAL but not MENU
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_slot(d2)
 
@@ -371,6 +389,65 @@ class SlotRoundTripTests(unittest.TestCase):
             slot_codec.encode_slot(d)
 
 
+class AirbrakeFieldTests(unittest.TestCase):
+    """DISPLAY and COMP_MODE are string enums rather than plain ints; BP_CHARGE and MR_LOAD are the two
+    range-checked against the on-device UP/DOWN ceiling/floor rather than the generic 0-254 every other
+    field gets. These pin that validation - see _encode_airbrake()."""
+
+    def test_comp_mode_round_trips_both_values(self):
+        for value in ("NORMAL", "CONSIST"):
+            d = _valid_slot_dict()
+            d["airbrake"]["COMP_MODE"] = value
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["airbrake"]["COMP_MODE"], value)
+
+    def test_comp_mode_invalid_string_rejected(self):
+        d = _valid_slot_dict()
+        d["airbrake"]["COMP_MODE"] = "MAYBE"
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+
+    def test_display_round_trips_both_values(self):
+        for value in ("DUAL", "SINGLE"):
+            d = _valid_slot_dict()
+            d["airbrake"]["DISPLAY"] = value
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["airbrake"]["DISPLAY"], value)
+
+    def test_display_invalid_string_rejected(self):
+        d = _valid_slot_dict()
+        d["airbrake"]["DISPLAY"] = "TRIPLE"
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+
+    def test_bp_charge_out_of_range_rejected(self):
+        for value in (layout.AIRBRAKE_BP_CHARGE_MIN - 1, layout.AIRBRAKE_BP_CHARGE_MAX + 1):
+            d = _valid_slot_dict()
+            d["airbrake"]["BP_CHARGE"] = value
+            with self.assertRaises(slot_codec.SlotValidationError):
+                slot_codec.encode_slot(d)
+
+    def test_bp_charge_boundaries_accepted(self):
+        for value in (layout.AIRBRAKE_BP_CHARGE_MIN, layout.AIRBRAKE_BP_CHARGE_MAX):
+            d = _valid_slot_dict()
+            d["airbrake"]["BP_CHARGE"] = value
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["airbrake"]["BP_CHARGE"], value)
+
+    def test_mr_load_out_of_range_rejected(self):
+        d = _valid_slot_dict()
+        d["airbrake"]["MR_LOAD"] = layout.AIRBRAKE_MR_LOAD_MAX + 1
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+
+    def test_mr_load_boundaries_accepted(self):
+        for value in (0, layout.AIRBRAKE_MR_LOAD_MAX):
+            d = _valid_slot_dict()
+            d["airbrake"]["MR_LOAD"] = value
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["airbrake"]["MR_LOAD"], value)
+
+
 class GlobalRoundTripTests(unittest.TestCase):
 
     def test_round_trip(self):
@@ -420,6 +497,27 @@ class AllowMissingTests(unittest.TestCase):
         encoded = slot_codec.encode_slot(d, allow_missing=True)
         decoded = slot_codec.decode_slot(encoded, source=d["source"])
         self.assertEqual(decoded["speed"]["ACCEL"], slot_codec.UNSET)
+
+    def test_missing_airbrake_key_allowed_and_decodes_to_unset(self):
+        d = _valid_slot_dict()
+        del d["airbrake"]["LEAK_RATE"]
+        encoded = slot_codec.encode_slot(d, allow_missing=True)
+        decoded = slot_codec.decode_slot(encoded, source=d["source"])
+        self.assertEqual(decoded["airbrake"]["LEAK_RATE"], slot_codec.UNSET)
+
+    def test_missing_whole_airbrake_section_allowed_pre_v3_backup(self):
+        # airbrake is the one whole-category exception - a v2 backup lacks it entirely.
+        d = _valid_slot_dict()
+        del d["airbrake"]
+        encoded = slot_codec.encode_slot(d, allow_missing=True)
+        decoded = slot_codec.decode_slot(encoded, source=d["source"])
+        for key, _off in layout.AIRBRAKE_FIELDS:
+            self.assertEqual(decoded["airbrake"][key], slot_codec.UNSET)
+        # ...but still rejected without the flag
+        d2 = _valid_slot_dict()
+        del d2["airbrake"]
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d2)
 
     def test_missing_options_subfield_allowed(self):
         d = _valid_slot_dict()

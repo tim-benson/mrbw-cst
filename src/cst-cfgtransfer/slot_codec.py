@@ -19,8 +19,14 @@ UNSET = "UNSET"
 # config menu - slot: force_functions{on,off}, options (the OPTIONS menu, was `brake`; its meta-field
 # `unset` was `options_unset`); device.json: system / comm / prefs (config_bits nested) / calibration.
 # Informational only - import does not gate on it, and both encoders still accept the older flat/renamed
-# shapes (see _normalize_legacy_slot / _flatten_global).
-SLOT_SCHEMA_VERSION = 2
+# shapes (see _normalize_legacy_slot / _flatten_global). v3 adds the `airbrake` slot section (AIRBRAKE
+# CFG - BP_CHARGE/MR_LOAD/MR_LOW/MR_HIGH/RECHARGE/LEAK_RATE/PUMP_RATE/DISPLAY/COMP_MODE) - squashed from
+# several uncommitted intermediate shapes (including a since-abandoned `brakesim` key/field-name scheme)
+# into the one bump a v2 backup actually needs; a v2 backup lacking the section restores fine with
+# --import-old. (DISPLAY was added to the airbrake section after v3 without a bump - the feature has
+# only ever run on one test throttle, nothing in the wild; an older export whose airbrake object lacks
+# DISPLAY needs --import-old on a plain import.)
+SLOT_SCHEMA_VERSION = 3
 
 
 class SlotValidationError(ValueError):
@@ -75,8 +81,8 @@ def _encode_functions(d, errors, allow_missing=False):
         if value == layout.FN_EMRG and not (attrs & layout.FUNC_SPECIAL):
             errors.append("functions.%s: EMRG is not valid here (only AUX, ALERTER, UP_BUTTON, "
                            "DOWN_BUTTON support it)" % key)
-        if value == layout.FN_BRKTEST and not (attrs & layout.FUNC_MENU):
-            errors.append("functions.%s: BRKTEST is not valid here (only UP_BUTTON, DOWN_BUTTON "
+        if value == layout.FN_AIRBRAKE and not (attrs & layout.FUNC_MENU):
+            errors.append("functions.%s: AIRBRAKE is not valid here (only UP_BUTTON, DOWN_BUTTON "
                            "support it)" % key)
         out[offset] = value
     unknown = set(d.keys()) - keys_seen
@@ -351,6 +357,86 @@ def _encode_speed(d, errors, allow_missing=False):
     return out
 
 
+# --- airbrake (AIRBRAKE CFG menu) ---
+
+def _decode_airbrake(raw):
+    out = {}
+    for key, offset in layout.AIRBRAKE_FIELDS:
+        val = raw[offset]
+        if val == 0xFF:
+            out[key] = UNSET
+        elif key == "COMP_MODE":
+            out[key] = layout.AIRBRAKE_COMP_MODE_TO_NAME.get(val, "RAW:%d" % val)
+        elif key == "DISPLAY":
+            out[key] = layout.AIRBRAKE_DISPLAY_TO_NAME.get(val, "RAW:%d" % val)
+        else:
+            out[key] = val
+    return out
+
+
+def _encode_airbrake(d, errors, allow_missing=False):
+    """AIRBRAKE CFG fields are plain 0-254 numbers or "UNSET" (0xFF - self-healed by the firmware's
+    readByteOrDefault on next load), except DISPLAY (the string "DUAL"/"SINGLE", or "UNSET") and
+    COMP_MODE (the string "NORMAL"/"CONSIST", or "UNSET").
+    BP_CHARGE and MR_LOAD are additionally range-checked to match the on-device UP/DOWN ceiling/floor
+    (the on-device UI cannot produce a byte outside these ranges once saved, so an import outside them
+    could only come from a hand-edited file). allow_missing defaults an absent key to UNSET; see
+    _encode_speed."""
+    if not isinstance(d, dict):
+        errors.append("airbrake: must be an object")
+        d = {}
+    known_keys = {key for key, _ in layout.AIRBRAKE_FIELDS}
+    for key in set(d.keys()) - known_keys:
+        errors.append("airbrake.%s: unknown field" % key)
+
+    out = {}
+    for key, offset in layout.AIRBRAKE_FIELDS:
+        if key not in d:
+            if not allow_missing:
+                errors.append("airbrake.%s: missing" % key)
+            out[offset] = 0xFF
+            continue
+        val = d[key]
+        label = "airbrake.%s" % key
+        if val == UNSET:
+            out[offset] = 0xFF
+        elif key == "COMP_MODE":
+            if val not in layout.AIRBRAKE_COMP_MODE_FROM_NAME:
+                errors.append("%s: must be one of %s, or \"UNSET\"" %
+                               (label, sorted(layout.AIRBRAKE_COMP_MODE_FROM_NAME)))
+                out[offset] = 0
+            else:
+                out[offset] = layout.AIRBRAKE_COMP_MODE_FROM_NAME[val]
+        elif key == "DISPLAY":
+            if val not in layout.AIRBRAKE_DISPLAY_FROM_NAME:
+                errors.append("%s: must be one of %s, or \"UNSET\"" %
+                               (label, sorted(layout.AIRBRAKE_DISPLAY_FROM_NAME)))
+                out[offset] = 0
+            else:
+                out[offset] = layout.AIRBRAKE_DISPLAY_FROM_NAME[val]
+        elif key == "BP_CHARGE":
+            if not (isinstance(val, int) and not isinstance(val, bool) and
+                    layout.AIRBRAKE_BP_CHARGE_MIN <= val <= layout.AIRBRAKE_BP_CHARGE_MAX):
+                errors.append("%s: must be an integer %d-%d, or \"UNSET\"" %
+                               (label, layout.AIRBRAKE_BP_CHARGE_MIN, layout.AIRBRAKE_BP_CHARGE_MAX))
+                out[offset] = layout.AIRBRAKE_BP_CHARGE_MIN
+            else:
+                out[offset] = val
+        elif key == "MR_LOAD":
+            if not (isinstance(val, int) and not isinstance(val, bool) and
+                    0 <= val <= layout.AIRBRAKE_MR_LOAD_MAX):
+                errors.append("%s: must be an integer 0-%d, or \"UNSET\"" % (label, layout.AIRBRAKE_MR_LOAD_MAX))
+                out[offset] = 0
+            else:
+                out[offset] = val
+        elif isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 254:
+            out[offset] = val
+        else:
+            errors.append("%s: must be an integer 0-254, or \"UNSET\"" % label)
+            out[offset] = 0
+    return out
+
+
 # --- force_functions (FORCE FUNC menu) ---
 
 def _decode_force_mask(raw_dword):
@@ -449,6 +535,13 @@ def describe_missing_fields(d):
         for key, _offset in layout.SPEED_FIELDS:
             if key not in speed:
                 notices.append("speed.%s: not in file, defaulting to UNSET" % key)
+    airbrake = d.get("airbrake")
+    if isinstance(airbrake, dict):
+        for key, _offset in layout.AIRBRAKE_FIELDS:
+            if key not in airbrake:
+                notices.append("airbrake.%s: not in file, defaulting to UNSET" % key)
+    elif "airbrake" not in d:
+        notices.append("airbrake: whole section not in file (pre-v3 backup), every field defaulting to UNSET")
     options = d.get("options")
     if isinstance(options, dict):
         for key in _OPTIONS_FIELDS:
@@ -465,7 +558,7 @@ def describe_missing_fields(d):
 # --- top-level slot decode/encode ---
 
 SLOT_TOP_LEVEL_KEYS = {"schema_version", "source", "loco_address", "force_functions", "functions",
-                        "notch_speedstep", "speed", "options"}
+                        "notch_speedstep", "speed", "airbrake", "options"}
 
 
 def decode_slot(raw_128_bytes, source):
@@ -475,9 +568,10 @@ def decode_slot(raw_128_bytes, source):
     raw = raw_128_bytes
     loco_word = struct.unpack_from("<H", raw, layout.EE_LOCO_ADDRESS)[0]
     # Top-level key order follows the top-level menu cycle: LOCO -> FORCE FUNC -> CONFIG FUNC ->
-    # NOTCH -> SPEED CFG -> OPTIONS (schema_version/source are file metadata and lead). One object
-    # per menu - FORCE FUNC is `force_functions` (distinct from CONFIG FUNC's `functions`), and the
-    # OPTIONS menu is `options` (its object holds `reverser_swap`/`horn_type` too, not just brake).
+    # NOTCH -> SPEED CFG -> AIRBRAKE CFG -> OPTIONS (schema_version/source are file metadata and lead).
+    # One object per menu - FORCE FUNC is `force_functions` (distinct from CONFIG FUNC's `functions`),
+    # and the OPTIONS menu is `options` (its object holds `reverser_swap`/`horn_type` too, not just
+    # brake).
     return {
         "schema_version": SLOT_SCHEMA_VERSION,
         "source": source,
@@ -489,6 +583,7 @@ def decode_slot(raw_128_bytes, source):
         "functions": _decode_functions(raw),
         "notch_speedstep": _decode_notch(raw[layout.EE_NOTCH_SPEEDSTEP:layout.EE_NOTCH_SPEEDSTEP + 8]),
         "speed": _decode_speed(raw),
+        "airbrake": _decode_airbrake(raw),
         "options": _decode_options(
             raw[layout.EE_OPTIONBITS],
             raw[layout.EE_BRAKE_PULSE_WIDTH],
@@ -502,16 +597,17 @@ def encode_slot(d, base=None, allow_missing=False):
     """dict (as produced by decode_slot, or hand-edited) -> a 128-byte bytearray for one slot.
 
     `base`, if given, must be the slot's CURRENT 128 raw bytes on the device - fields this schema
-    doesn't model (currently just the 0x4E-0x7F padding range, which nothing in firmware reads) are
-    preserved from it rather than zero-filled. Pass the real on-device bytes here before writing to
-    hardware; omitting it (e.g. for offline validation/tests, where no "current" bytes exist) zero-fills
-    unmodeled bytes instead.
+    doesn't model (the 0x54-0x7F per-slot padding range, which nothing in firmware reads; 0x00-0x53 is
+    fully packed - see cst_eeprom_layout.py) are preserved from it rather than zero-filled. Pass the
+    real on-device bytes here before writing to hardware; omitting it (e.g. for offline validation/
+    tests, where no "current" bytes exist) zero-fills unmodeled bytes instead.
 
     `allow_missing=True` (the `--import-old` CLI flag) is for restoring a JSON backup taken under an
     OLDER codec than this one, after a layout-version bump added new fields - a field ABSENT from a
-    "functions"/"speed"/"options" object present in `d` is defaulted rather than raising (see
-    _encode_functions()/_encode_speed()/_encode_options() for each field's specific default). This does
-    NOT relax SLOT_TOP_LEVEL_KEYS: if "functions"/"options"/"speed"/etc. is missing ENTIRELY, that's still
+    "functions"/"speed"/"airbrake"/"options" object present in `d` is defaulted rather than raising (see
+    _encode_functions()/_encode_speed()/_encode_airbrake()/_encode_options() for each field's specific
+    default). This does NOT relax SLOT_TOP_LEVEL_KEYS: if "functions"/"options"/"speed"/etc. is missing
+    ENTIRELY, that's still
     a hard error regardless of this flag - those categories have all existed since long before any field
     was added to them, so a whole missing category means a genuinely bad file, not merely "predates a
     newer field."
@@ -529,6 +625,10 @@ def encode_slot(d, base=None, allow_missing=False):
     for key in unknown:
         errors.append("%s: unknown top-level field" % key)
     missing = SLOT_TOP_LEVEL_KEYS - {"schema_version", "source"} - set(d.keys())
+    if allow_missing:
+        # `airbrake` is a whole section added by the EEPROM_LAYOUT_VERSION 1->2 bump, so a backup
+        # taken under the older codec legitimately lacks it - default it to all-UNSET rather than raise.
+        missing = missing - {"airbrake"}
     for key in missing:
         errors.append("%s: missing" % key)
 
@@ -574,6 +674,10 @@ def encode_slot(d, base=None, allow_missing=False):
         for offset, value in _encode_speed(d["speed"], errors, allow_missing).items():
             out[offset] = value
 
+    if "airbrake" in d or allow_missing:
+        for offset, value in _encode_airbrake(d.get("airbrake", {}), errors, allow_missing).items():
+            out[offset] = value
+
     if errors:
         raise SlotValidationError(errors)
     return out
@@ -593,7 +697,7 @@ GLOBAL_FIELD_KEYS = {
     "mrbus_update_interval_decisecs", "sleep_timeout_minutes", "alerter_timeout_minutes",
     "dead_reckoning_time", "time_source_address", "tx_holdoff_centisecs",
     "battery_okay_decivolts", "battery_warn_decivolts", "battery_critical_decivolts",
-    "pressure_config", "horn_threshold", "horn_threshold2", "brake_threshold", "brake_low_threshold",
+    "horn_threshold", "horn_threshold2", "brake_threshold", "brake_low_threshold",
     "brake_high_threshold", "config_bits",
 }
 
@@ -613,10 +717,11 @@ def _flatten_global(d):
 
 
 # Order = on-device PREFS menu order (DISPLAY, then LED BLNK / REV LOCK / STRICT SLP; the SLEEP /
-# ALERTER / TIMEOUT / PUMP items in between are device-level, not config bits). Both decode and encode
+# ALERTER / TIMEOUT items in between are device-level, not config bits). Both decode and encode
 # iterate this dict; encode keys off the explicit bit number, so the order only sets how the JSON reads.
 CONFIGBITS_NAMED = {
     "main_screen_speed": layout.CONFIGBITS_MAIN_SCREEN_SPEED,
+    "airbrake": layout.CONFIGBITS_AIRBRAKE,
     "led_blink": layout.CONFIGBITS_LED_BLINK,
     "reverser_lock": layout.CONFIGBITS_REVERSER_LOCK,
     "strict_sleep": layout.CONFIGBITS_STRICT_SLEEP,
@@ -666,9 +771,9 @@ def decode_global(raw_128_bytes, source):
     update_decisecs = struct.unpack_from(">H", raw, layout.EE_MRBUS_DEVICE_UPDATE_H)[0]
     # One object per config menu, in top-level-menu-cycle order: SYSTEM (BAT OKAY/WARN/CRIT, ADV-FUNC
     # gated) -> COMM (THRTL ID, BASE ADR, TIME ADR, TX INTVL, TX HLDOF) -> PREFS (DISPLAY+LED BLNK/REV
-    # LOCK/STRICT SLP = config_bits, then SLEEP, ALERTER, TIMEOUT=dead_reckoning, PUMP=pressure) ->
-    # THRESHOLD CAL (HORN, HORN2, BRAKE, BRAKE LOW, BRAKE HIGH). Keys within each object are in that
-    # menu's item order. encode_global() accepts this shape or the older flat one (via _flatten_global).
+    # LOCK/STRICT SLP = config_bits, then SLEEP, ALERTER, TIMEOUT=dead_reckoning) -> THRESHOLD CAL
+    # (HORN, HORN2, BRAKE, BRAKE LOW, BRAKE HIGH). Keys within each object are in that menu's item
+    # order. encode_global() accepts this shape or the older flat one (via _flatten_global).
     return {
         "schema_version": SLOT_SCHEMA_VERSION,
         "source": source,
@@ -689,7 +794,6 @@ def decode_global(raw_128_bytes, source):
             "sleep_timeout_minutes": raw[layout.EE_DEVICE_SLEEP_TIMEOUT],
             "alerter_timeout_minutes": raw[layout.EE_ALERTER_TIMEOUT],
             "dead_reckoning_time": raw[layout.EE_DEAD_RECKONING_TIME],
-            "pressure_config": raw[layout.EE_PRESSURE_CONFIG],
         },
         "calibration": {
             "horn_threshold": raw[layout.EE_HORN_THRESHOLD],
@@ -760,7 +864,6 @@ def encode_global(d, base=None):
     _encode_u8_field(d, "battery_okay_decivolts", 0, 255, errors, out, layout.EE_BATTERY_OKAY)
     _encode_u8_field(d, "battery_warn_decivolts", 0, 255, errors, out, layout.EE_BATTERY_WARN)
     _encode_u8_field(d, "battery_critical_decivolts", 0, 255, errors, out, layout.EE_BATTERY_CRITICAL)
-    _encode_u8_field(d, "pressure_config", 0, 255, errors, out, layout.EE_PRESSURE_CONFIG)
     _encode_u8_field(d, "horn_threshold", 0, 255, errors, out, layout.EE_HORN_THRESHOLD)
     _encode_u8_field(d, "horn_threshold2", 0, 255, errors, out, layout.EE_HORN_THRESHOLD2)
     _encode_u8_field(d, "brake_threshold", 0, 255, errors, out, layout.EE_BRAKE_THRESHOLD)
