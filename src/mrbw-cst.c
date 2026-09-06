@@ -334,6 +334,25 @@ typedef enum
 	LAST_SCREEN  // Must be the last screen
 } Screens;
 
+// PREFS_SCREEN items, in on-screen (subscreenState - 1) order. Three kinds: a configBits bit
+// (DISPLAY/AIRBRAKE/LED_BLINK/REV_LOCK/STRICT_SLEEP - see prefsItemIsBit()), a staged uint8_t
+// (SLEEP/ALERTER, held in new* locals and only pushed to the real values on SELECT-save), and
+// the one opaque item (TIMEOUT, edited through the cst-time.c increment/decrement helpers).
+// Named-item + switch pattern, replacing the old if(N == subscreenState) chain and the
+// bitPosition/prefsPtr scratch dance - same direction as SPEED CFG / AIRBRAKE CFG.
+enum
+{
+	PREFS_ITEM_DISPLAY = 0,   // configBits: CLOCK / SPEED main-screen readout
+	PREFS_ITEM_AIRBRAKE,      // configBits: AIRBRAKE sound model on/off
+	PREFS_ITEM_SLEEP,         // staged: newSleepTimeout (minutes)
+	PREFS_ITEM_ALERTER,       // staged: newAlerterTimeout (x15 s, 0 = OFF)
+	PREFS_ITEM_TIMEOUT,       // opaque: fast-clock dead-reckoning timeout (cst-time.c)
+	PREFS_ITEM_LED_BLINK,     // configBits
+	PREFS_ITEM_REV_LOCK,      // configBits
+	PREFS_ITEM_STRICT_SLEEP,  // configBits
+	PREFS_ITEM_COUNT
+};
+
 typedef enum
 {
 	NO_BUTTON = 0,
@@ -438,6 +457,24 @@ static uint8_t speedItemIsWatchFn(uint8_t item)
 {
 	return (SPEED_ITEM_HOLD_FN == item) || (SPEED_ITEM_STOP_FN == item)
 	    || (SPEED_ITEM_OPLOAD_FN == item) || (SPEED_ITEM_PRLOAD_FN == item);
+}
+
+// PREFS_SCREEN: the three value items (SLEEP/ALERTER/TIMEOUT) are contiguous in the enum;
+// every other item toggles the configBits bit given by prefsItemBit().
+static uint8_t prefsItemIsBit(uint8_t item)
+{
+	return (item < PREFS_ITEM_SLEEP) || (item > PREFS_ITEM_TIMEOUT);
+}
+static uint8_t prefsItemBit(uint8_t item)
+{
+	switch(item)
+	{
+		case PREFS_ITEM_AIRBRAKE:     return CONFIGBITS_AIRBRAKE;
+		case PREFS_ITEM_LED_BLINK:    return CONFIGBITS_LED_BLINK;
+		case PREFS_ITEM_REV_LOCK:     return CONFIGBITS_REVERSER_LOCK;
+		case PREFS_ITEM_STRICT_SLEEP: return CONFIGBITS_STRICT_SLEEP;
+		default:                      return CONFIGBITS_MAIN_SCREEN_SPEED;  // PREFS_ITEM_DISPLAY
+	}
 }
 
 // STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
@@ -4110,140 +4147,96 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 means boolean
+					uint8_t prefsItem = subscreenState - 1;
 					enableLCDBacklight();
+
 					lcd_gotoxy(0,0);
-
-					// FIXME: These variables serve no real purpose other than indicating which menu is active
-					//         A better solution would be a named-item enum + label switch, as AIRBRAKE CFG / SPEED CFG do
-					uint8_t maxDeadReckoningTime = getMaxDeadReckoningTime();
-
-					if(1 == subscreenState)
+					switch(prefsItem)
 					{
-						lcd_puts("DISPLAY");
-						bitPosition = CONFIGBITS_MAIN_SCREEN_SPEED;
-						prefsPtr = &configBits;
-					}
-					else if(2 == subscreenState)
-					{
-						lcd_puts("AIRBRAKE");
-						bitPosition = CONFIGBITS_AIRBRAKE;
-						prefsPtr = &configBits;
-					}
-					else if(3 == subscreenState)
-					{
-						lcd_puts("SLEEP");
-						lcd_gotoxy(0,1);
-						lcd_puts("DLY:");
-						lcd_gotoxy(4,1);
-						printDec3Dig(*prefsPtr);
-						lcd_puts("M");
-						bitPosition = 0xFF;
-						prefsPtr = &newSleepTimeout;
-					}
-					else if(4 == subscreenState)
-					{
-						lcd_puts("ALERTER");
-						lcd_gotoxy(0,1);
-						lcd_puts("DLY:");
-						lcd_gotoxy(4,1);
-						if(newAlerterTimeout)
-						{
-							printDec3Dig(newAlerterTimeout * 15);
-							lcd_puts("s");
-						}
-						else
-						{
-							lcd_puts(" OFF");
-						}
-						bitPosition = 0xFF;
-						prefsPtr = &newAlerterTimeout;
-					}
-					else if(5 == subscreenState)
-					{
-						lcd_puts("TIMEOUT");
-						lcd_gotoxy(0,1);
-						lcd_puts("CLK:");
-						lcd_gotoxy(4,1);
-						printDec3Dig(convertMaxDeadReckoningToDecisecs() / 10);
-						lcd_puts("s");
-						bitPosition = 0xFF;
-						prefsPtr = &maxDeadReckoningTime;
-					}
-					else if(6 == subscreenState)
-					{
-						lcd_puts("LED BLNK");
-						bitPosition = CONFIGBITS_LED_BLINK;
-						prefsPtr = &configBits;
-					}
-					else if(7 == subscreenState)
-					{
-						lcd_puts("REV LOCK");
-						bitPosition = CONFIGBITS_REVERSER_LOCK;
-						prefsPtr = &configBits;
-					}
-					else if(8 == subscreenState)
-					{
-						lcd_puts("STRICT");
-						lcd_gotoxy(0,1);
-						lcd_puts("SLP");
-						bitPosition = CONFIGBITS_STRICT_SLEEP;
-						prefsPtr = &configBits;
-					}
-					else
-					{
-						bitPosition = 8;
-						subscreenState = 1;
+						case PREFS_ITEM_DISPLAY:      lcd_puts("DISPLAY"); break;
+						case PREFS_ITEM_AIRBRAKE:     lcd_puts("AIRBRAKE"); break;
+						case PREFS_ITEM_SLEEP:        lcd_puts("SLEEP"); break;
+						case PREFS_ITEM_ALERTER:      lcd_puts("ALERTER"); break;
+						case PREFS_ITEM_TIMEOUT:      lcd_puts("TIMEOUT"); break;
+						case PREFS_ITEM_LED_BLINK:    lcd_puts("LED BLNK"); break;
+						case PREFS_ITEM_REV_LOCK:     lcd_puts("REV LOCK"); break;
+						case PREFS_ITEM_STRICT_SLEEP: lcd_puts("STRICT"); break;
 					}
 
-					if(bitPosition < 8)
+					switch(prefsItem)
 					{
-						if(CONFIGBITS_MAIN_SCREEN_SPEED == bitPosition)
-						{
-							// This item has no row-1 prefix (unlike e.g. STRICT SLP's "SLP"), so unlike
-							// the shared column-4 slot below, columns 0-7 are all free here - room
-							// enough for the full word rather than the other boolean items' 4-char cap.
+						case PREFS_ITEM_DISPLAY:
+							// No row-1 prefix here, so columns 0-7 are all free - room for the full word
+							// rather than the other boolean items' 4-char " ON "/" OFF" cap.
 							lcd_gotoxy(0,1);
-							lcd_puts((*prefsPtr & _BV(bitPosition)) ? "SPEED" : "CLOCK");
-						}
-						else
-						{
+							lcd_puts((configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? "SPEED" : "CLOCK");
+							break;
+						case PREFS_ITEM_SLEEP:
+							lcd_gotoxy(0,1);
+							lcd_puts("DLY:");
 							lcd_gotoxy(4,1);
-							if(*prefsPtr & _BV(bitPosition))
-								lcd_puts(" ON ");
+							printDec3Dig(newSleepTimeout);
+							lcd_puts("M");
+							break;
+						case PREFS_ITEM_ALERTER:
+							lcd_gotoxy(0,1);
+							lcd_puts("DLY:");
+							lcd_gotoxy(4,1);
+							if(newAlerterTimeout)
+							{
+								printDec3Dig(newAlerterTimeout * 15);
+								lcd_puts("s");
+							}
 							else
+							{
 								lcd_puts(" OFF");
-						}
+							}
+							break;
+						case PREFS_ITEM_TIMEOUT:
+							lcd_gotoxy(0,1);
+							lcd_puts("CLK:");
+							lcd_gotoxy(4,1);
+							printDec3Dig(convertMaxDeadReckoningToDecisecs() / 10);
+							lcd_puts("s");
+							break;
+						case PREFS_ITEM_STRICT_SLEEP:
+							lcd_gotoxy(0,1);
+							lcd_puts("SLP");
+							lcd_gotoxy(4,1);
+							lcd_puts((configBits & _BV(CONFIGBITS_STRICT_SLEEP)) ? " ON " : " OFF");
+							break;
+						case PREFS_ITEM_AIRBRAKE:
+						case PREFS_ITEM_LED_BLINK:
+						case PREFS_ITEM_REV_LOCK:
+							lcd_gotoxy(4,1);
+							lcd_puts((configBits & _BV(prefsItemBit(prefsItem))) ? " ON " : " OFF");
+							break;
 					}
-					else if(8 == bitPosition)
-					{
-						// Do nothing
-					}
-					
 
 					switch(button)
 					{
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								if(prefsItemIsBit(prefsItem))
 								{
-									*prefsPtr |= _BV(bitPosition);
+									configBits |= _BV(prefsItemBit(prefsItem));
 								}
 								else
 								{
-									if(prefsPtr == &maxDeadReckoningTime)
+									switch(prefsItem)
 									{
-										incrementMaxDeadReckoningTime();
-									}
-									else
-									{
-										if(*prefsPtr < 0xFF)
-											(*prefsPtr)++;
-										if(newSleepTimeout > SLEEP_TMR_RESET_VALUE_MAX)
-											newSleepTimeout = SLEEP_TMR_RESET_VALUE_MAX;
-										if(newAlerterTimeout > ALERTER_TMR_RESET_VALUE_MAX)
-											newAlerterTimeout = ALERTER_TMR_RESET_VALUE_MAX;
+										case PREFS_ITEM_SLEEP:
+											if(newSleepTimeout < SLEEP_TMR_RESET_VALUE_MAX)
+												newSleepTimeout++;
+											break;
+										case PREFS_ITEM_ALERTER:
+											if(newAlerterTimeout < ALERTER_TMR_RESET_VALUE_MAX)
+												newAlerterTimeout++;
+											break;
+										case PREFS_ITEM_TIMEOUT:
+											incrementMaxDeadReckoningTime();
+											break;
 									}
 									ticks_autoincrement = 0;
 								}
@@ -4252,24 +4245,25 @@ int main(void)
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								if(prefsItemIsBit(prefsItem))
 								{
-									*prefsPtr &= ~_BV(bitPosition);
+									configBits &= ~_BV(prefsItemBit(prefsItem));
 								}
 								else
 								{
-									if(prefsPtr == &maxDeadReckoningTime)
+									switch(prefsItem)
 									{
-										decrementMaxDeadReckoningTime();
-									}
-									else
-									{
-										if(*prefsPtr > 0)
-											(*prefsPtr)--;
-										if(newSleepTimeout < SLEEP_TMR_RESET_VALUE_MIN)
-											newSleepTimeout = SLEEP_TMR_RESET_VALUE_MIN;
-										if(newAlerterTimeout < ALERTER_TMR_RESET_VALUE_MIN)
-											newAlerterTimeout = ALERTER_TMR_RESET_VALUE_MIN;
+										case PREFS_ITEM_SLEEP:
+											if(newSleepTimeout > SLEEP_TMR_RESET_VALUE_MIN)
+												newSleepTimeout--;
+											break;
+										case PREFS_ITEM_ALERTER:
+											if(newAlerterTimeout > ALERTER_TMR_RESET_VALUE_MIN)
+												newAlerterTimeout--;
+											break;
+										case PREFS_ITEM_TIMEOUT:
+											decrementMaxDeadReckoningTime();
+											break;
 									}
 									ticks_autoincrement = 0;
 								}
@@ -4307,6 +4301,8 @@ int main(void)
 							{
 								// Menu pressed, advance menu
 								subscreenState++;
+								if(subscreenState > PREFS_ITEM_COUNT)
+									subscreenState = 1;
 								lcd_clrscr();
 							}
 							break;
