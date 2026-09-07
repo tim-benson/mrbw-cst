@@ -30,11 +30,13 @@ versioning" below.
 All commands run from `src/`.
 
 ```bash
-make setup      # one-time: fetches the src/mrbus git submodule (shared MRBus/MRBee radio library)
-make hex        # compile -> mrbw-cst.hex, also copies a versioned copy into src/hex/
-make size       # show flash/RAM usage (avr-size)
-make disasm     # objdump disassembly of the built .elf, for low-level debugging
-make clean      # remove build artifacts
+make setup           # one-time: fetches the src/mrbus git submodule (shared MRBus/MRBee radio library)
+make hex             # compile -> mrbw-cst.hex, also copies a versioned copy into src/hex/
+make size            # show flash/RAM usage (avr-size)
+make disasm          # objdump disassembly of the built .elf, for low-level debugging
+make speedtest       # host-compile cst-speed.c and diff its output against the reference traces (see SPEED)
+make speedtest-accept  # regenerate those reference traces from the current cst-speed.c
+make clean           # remove build artifacts
 ```
 
 Flashing requires a physical AVR programmer wired to the ISP header on the board (default
@@ -52,9 +54,11 @@ Target: **ATmega1284P** @ 11.0592 MHz / 3.3V, compiled with `avr-gcc` (`-std=gnu
 git hash are baked into the build from `git describe` via `src/git-revision.sh` — the working tree must be
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
-There is no unit test suite and no linter configured for the firmware itself. `src/eep-test/*.py` are
-standalone Python scripts (`mrbus.py`, `dumppkts.py`, `test.py`) for sniffing/decoding MRBus/MRBee packets
-off the radio for manual debugging — not an automated test harness.
+The only automated firmware test is `make speedtest` - a host-compiled reference-trace harness for the
+scale-speed model (`src/cst-speed-test/`, see the SPEED section). Nothing else in the firmware has a
+test or a linter. `src/eep-test/*.py` are standalone Python scripts (`mrbus.py`, `dumppkts.py`,
+`test.py`) for sniffing/decoding MRBus/MRBee packets off the radio for manual debugging — not an
+automated test harness.
 
 ### macOS build environment
 
@@ -467,6 +471,18 @@ is an NMRA convention, not a naming choice made here.
 Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
+
+### Reference-trace test
+
+`make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
+`#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
+per-tick `simSpeedStepQ8` and `printSpeed()` output against checked-in reference traces
+(`reference/*.txt`). It is the regression net for any change to the model — a diff means the output
+moved, either intended (`make speedtest-accept` re-blesses the traces) or a regression.
+`.githooks/pre-commit` runs it whenever a commit touches `cst-speed.c`, `cst-speed.h`, or that
+directory. The only host-build shim is `cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h`
+includes `<avr/pgmspace.h>`; scenarios stay in realistic non-zero CV ranges, where the model is
+provably identical between AVR 16-bit `int` and host 32-bit `int`.
 
 ## AIRBRAKE — air-brake simulation
 
@@ -1025,6 +1041,8 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
    `python3 -m unittest discover tests` from `src/cst-cfgtransfer/`, no hardware needed).
 5. Update the field reference in `src/cst-cfgtransfer/README.md` if the field introduces new JSON
    vocabulary.
+6. If the change touches `cst-speed.c`, regenerate the reference traces with `make speedtest-accept`
+   and review the `git diff` — that diff is the human-readable statement of how the model output moved.
 
 One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
 followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped

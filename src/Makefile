@@ -84,6 +84,7 @@ help:
 	@echo "make clean ..... delete objects and hex file"
 	@echo "make release.... produce release tarball"
 	@echo "make terminal... open up avrdude terminal"
+	@echo "make speedtest. run the scale-speed model reference-trace test (host cc)"
 	@echo "cst_cfgtransfer.py .. export/import loco configs to/from JSON, see cst-cfgtransfer/README.md"
 
 hex: $(BASE_NAME).hex
@@ -129,9 +130,38 @@ firmware:
 eeprom:
 	$(AVRDUDE) -U eeprom:w:$(EEP):i
 
+# --- host-compiled reference-trace test for the scale-speed model (cst-speed.c) ---
+# Compiles cst-speed.c natively (host cc, not avr-gcc) and drives updateSpeed10Hz()
+# through a fixed scenario set, diffing per-scenario Q8 speed traces against the
+# checked-in copies under cst-speed-test/reference/. A diff means the model output
+# moved - a regression, or an intended change to be re-blessed with speedtest-accept.
+# See cst-speed-test/README.md. Standalone: touches nothing in the AVR build.
+SPEEDTEST_DIR    = cst-speed-test
+SPEEDTEST_BIN    = $(SPEEDTEST_DIR)/speedtest
+SPEEDTEST_CC    ?= cc
+SPEEDTEST_CFLAGS = -std=gnu99 -O2 -fshort-enums -Wall -I$(SPEEDTEST_DIR)/stubs
+
+$(SPEEDTEST_BIN): $(SPEEDTEST_DIR)/test_speed.c cst-speed.c cst-speed.h lcd.h $(SPEEDTEST_DIR)/stubs/avr/pgmspace.h
+	$(SPEEDTEST_CC) $(SPEEDTEST_CFLAGS) -o $@ $<
+
+speedtest: $(SPEEDTEST_BIN)
+	@rm -rf $(SPEEDTEST_DIR)/out && mkdir -p $(SPEEDTEST_DIR)/out
+	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out >/dev/null
+	@diff -ru $(SPEEDTEST_DIR)/reference $(SPEEDTEST_DIR)/out \
+		&& echo "PASS: speed model reference traces match" \
+		|| { echo; echo "FAIL: speed model output changed - review the diff above."; \
+		     echo "      If the change is intended: make speedtest-accept"; exit 1; }
+
+speedtest-accept: $(SPEEDTEST_BIN)
+	@rm -rf $(SPEEDTEST_DIR)/out && mkdir -p $(SPEEDTEST_DIR)/out
+	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out >/dev/null
+	@rm -rf $(SPEEDTEST_DIR)/reference && mv $(SPEEDTEST_DIR)/out $(SPEEDTEST_DIR)/reference
+	@echo "reference traces regenerated from the current cst-speed.c - review 'git diff' before committing"
+
 # rule for deleting dependent files (those which can be built by Make):
 clean:
 	rm -f $(BASE_NAME).hex $(BASE_NAME).lst $(BASE_NAME).obj $(BASE_NAME).cof $(BASE_NAME).list $(BASE_NAME).map $(BASE_NAME).eep.hex $(BASE_NAME).elf $(BASE_NAME).s $(OBJS) *.o *.tgz *~
+	rm -rf $(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out
 
 # Generic rule for compiling C files:
 .c.o:

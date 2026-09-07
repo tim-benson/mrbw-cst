@@ -6,3 +6,5 @@ src/hex/*.hex
 doc/eep
 .DS_Store
 *.code-workspace
+src/cst-speed-test/speedtest
+src/cst-speed-test/out/

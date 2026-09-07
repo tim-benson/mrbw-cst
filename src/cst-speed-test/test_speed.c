@@ -1,0 +1,528 @@
+/*************************************************************************
+Title:    Reference-trace test for the scale-speed simulation model
+Authors:  Tim Benson <blw@east-slope.com>
+File:     cst-speed-test/test_speed.c
+License:  GNU General Public License v3
+
+LICENSE:
+    Copyright (C) 2026 Tim Benson
+
+    This program is free software; you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation; either version 2 of the License, or
+    any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+*************************************************************************/
+
+/*
+ * WHAT THIS IS
+ *   A host-compiled harness (native cc, not avr-gcc) that drives the real
+ *   updateSpeed10Hz() model in cst-speed.c through a fixed set of scenarios and
+ *   records simSpeedStepQ8 plus the printSpeed() render at every 10 Hz tick into a
+ *   plain-text "trace", one file per scenario. `make speedtest` diffs the freshly
+ *   generated traces against the checked-in copies under reference/. Any diff means
+ *   the model output moved - either an intended change (regenerate with
+ *   `make speedtest-accept`) or a regression to investigate.
+ *
+ *   The technique is known in the wider world as snapshot / characterization /
+ *   golden-master testing; "reference trace" is the term used in this tree.
+ *
+ * HOW IT COMPILES ON THE HOST
+ *   cst-speed.c has no AVR dependency of its own - it includes only "lcd.h" and
+ *   "cst-speed.h". This file #includes ../cst-speed.c directly (so the file-static
+ *   simSpeedStepQ8, and the model's internal state, are reachable) and supplies host
+ *   definitions of the four LCD symbols printSpeed() calls (lcd_puts / lcd_putc /
+ *   printDec2Dig / printDec3Dig). The only include-path shim is stubs/avr/pgmspace.h,
+ *   needed solely because src/lcd.h pulls in <avr/pgmspace.h>.
+ *
+ * AVR-vs-host arithmetic fidelity
+ *   AVR int is 16-bit; host int is 32-bit. cst-speed.c uses explicit-width types
+ *   (uintN_t, int64_t) with casts throughout, so the two platforms agree exactly as
+ *   long as every intermediate value stays <= 32767. The one wildcard is
+ *   computeDelta() returning 0xFFFF, which happens only when a momentum CV is zero
+ *   ("snap instantly"). The scenarios below therefore keep ACCEL / DECEL / BRKn in
+ *   realistic non-zero ranges, where the model is provably width-independent, so
+ *   these traces are a faithful stand-in for what the firmware computes. Genuine
+ *   bit-for-bit agreement with the flashed firmware is separately covered by the
+ *   on-hardware drive check that accompanies each SPEED change.
+ */
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- LCD capture shims -------------------------------------------------------
+ * printSpeed() is the only part of cst-speed.c that calls out of the file. It uses
+ * lcd_puts() plus printDec2Dig()/printDec3Dig(); those two in turn call lcd_putc().
+ * Here they append into a per-tick buffer the harness reads back as the "display"
+ * column. printDec2Dig()/printDec3Dig() are verbatim copies of src/lcd.c - keep in
+ * sync if that file's digit formatting ever changes.
+ */
+static char    lcdBuf[64];
+static uint8_t lcdLen;
+
+static void lcdReset(void) { lcdLen = 0; lcdBuf[0] = '\0'; }
+
+void lcd_putc(char c)
+{
+	if (lcdLen < sizeof(lcdBuf) - 1)
+	{
+		lcdBuf[lcdLen++] = c;
+		lcdBuf[lcdLen] = '\0';
+	}
+}
+
+void lcd_puts(const char *s)
+{
+	while (*s)
+		lcd_putc(*s++);
+}
+
+void printDec3Dig(uint16_t val)  /* verbatim from src/lcd.c */
+{
+	if (val >= 100)
+		lcd_putc('0' + ((val/100)%10));
+	else
+		lcd_putc(' ');
+
+	if (val >= 10)
+		lcd_putc('0' + ((val/10)%10));
+	else
+		lcd_putc(' ');
+	lcd_putc('0' + (val%10));
+}
+
+void printDec2Dig(uint8_t val)  /* verbatim from src/lcd.c */
+{
+	if (val >= 10)
+		lcd_putc('0' + ((val/10)%10));
+	else
+		lcd_putc(' ');
+	lcd_putc('0' + (val%10));
+}
+
+/* The model under test, pulled in whole so its file-statics are visible here. */
+#include "../cst-speed.c"
+
+/* ---- scenario harness ------------------------------------------------------- */
+
+static const char *g_outdir;
+static FILE        *g_tf;
+static int          g_traceCount;
+
+/* One tick's worth of updateSpeed10Hz() inputs. */
+typedef struct
+{
+	uint8_t cmd;      /* commandedSpeedStep 0..126 */
+	uint8_t b1, b2, b3;
+	uint8_t estop;    /* emergencyActive */
+	uint8_t stopfn;   /* watchedFunctionActive (STOPFN) */
+	uint8_t opload, prload;
+	uint8_t hold;     /* holdActive (HOLDFN / Drive Hold) */
+} Inputs;
+
+/* Reset SPEED CFG to the shipped defaults - mirrors the speedCfg[] initializer in
+ * cst-speed.c (resetSpeed() clears model state but deliberately never touches config). */
+static void cfgDefaults(void)
+{
+	speedSet(SPEED_ITEM_ACCEL,           MOMENTUM_ACCEL_CV3_DEFAULT);
+	speedSet(SPEED_ITEM_DECEL,           MOMENTUM_DECEL_CV4_DEFAULT);
+	speedSet(SPEED_ITEM_BRAKE1,          MOMENTUM_BRAKE1_CV179_DEFAULT);
+	speedSet(SPEED_ITEM_BRAKE2,          MOMENTUM_BRAKE2_CV180_DEFAULT);
+	speedSet(SPEED_ITEM_BRAKE3,          MOMENTUM_BRAKE3_CV181_DEFAULT);
+	speedSet(SPEED_ITEM_START_DELAY,     MOMENTUM_START_DELAY_DEFAULT);
+	speedSet(SPEED_ITEM_MAX_MPH,         SPEED_MAX_MPH_DEFAULT);
+	speedSet(SPEED_ITEM_UNIT,            SPEED_UNIT_KMH_DEFAULT);
+	speedSet(SPEED_ITEM_HOLD_FN,         SPEED_HOLD_WATCH_FN_DEFAULT);
+	speedSet(SPEED_ITEM_STOP_FN,         SPEED_STOP_WATCH_FN_DEFAULT);
+	speedSet(SPEED_ITEM_OPLOAD,          SPEED_OPLOAD_DEFAULT);
+	speedSet(SPEED_ITEM_OPLOAD_FN,       SPEED_OPLOAD_FN_DEFAULT);
+	speedSet(SPEED_ITEM_PRLOAD,          SPEED_PRLOAD_DEFAULT);
+	speedSet(SPEED_ITEM_PRLOAD_FN,       SPEED_PRLOAD_FN_DEFAULT);
+	speedSet(SPEED_ITEM_TYPE,            SPEED_TYPE_DEFAULT);
+	speedSet(SPEED_ITEM_ACCEL_PCT,       SPEED_ACCEL_PCT_DEFAULT);
+	speedSet(SPEED_ITEM_ACCEL_TARGET,    SPEED_ACCEL_TARGET_DEFAULT);
+	speedSet(SPEED_ITEM_DECEL_PCT,       SPEED_DECEL_PCT_DEFAULT);
+	speedSet(SPEED_ITEM_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT);
+}
+
+static void traceOpen(const char *name, const char *cfgLine, const char *inputsLine)
+{
+	char path[512];
+	snprintf(path, sizeof path, "%s/%s.txt", g_outdir, name);
+	g_tf = fopen(path, "w");
+	if (!g_tf)
+	{
+		perror(path);
+		exit(2);
+	}
+	fprintf(g_tf, "# scenario: %s\n", name);
+	fprintf(g_tf, "# config:   %s\n", cfgLine);
+	fprintf(g_tf, "# inputs:   %s\n", inputsLine);
+	fprintf(g_tf, "#\n");
+	fprintf(g_tf, "#  tick  cmd  flags(EHS123OP)      q8   display\n");
+	g_traceCount++;
+}
+
+static void traceTick(int t, const Inputs *in)
+{
+	updateSpeed10Hz(in->cmd, in->b1, in->b2, in->b3, in->estop, in->stopfn,
+	                in->opload, in->prload, in->hold);
+
+	lcdReset();
+	printSpeed();
+
+	char flags[9];
+	flags[0] = in->estop  ? 'E' : '-';
+	flags[1] = in->hold   ? 'H' : '-';
+	flags[2] = in->stopfn ? 'S' : '-';
+	flags[3] = in->b1     ? '1' : '-';
+	flags[4] = in->b2     ? '2' : '-';
+	flags[5] = in->b3     ? '3' : '-';
+	flags[6] = in->opload ? 'O' : '-';
+	flags[7] = in->prload ? 'P' : '-';
+	flags[8] = '\0';
+
+	fprintf(g_tf, "  %5d  %3u  %s        %6u   \"%s\"\n",
+	        t, in->cmd, flags, (unsigned)simSpeedStepQ8, lcdBuf);
+}
+
+static void traceClose(void)
+{
+	fclose(g_tf);
+	g_tf = NULL;
+}
+
+/* Run `in` unchanged for `ticks` ticks starting at tick `t0`; returns the next tick index. */
+static int runPhase(int t0, int ticks, const Inputs *in)
+{
+	for (int i = 0; i < ticks; i++)
+		traceTick(t0 + i, in);
+	return t0 + ticks;
+}
+
+/* ---- scenarios ------------------------------------------------------------- */
+
+static void sc_standing_start_full(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("standing_start_full",
+	          "defaults - ACCEL 60, DECEL 230, DELAY 13, MAXSPEED 50, TYPE V5DCC, MPH",
+	          "cmd=126 held from tick 0; no brake / hold / estop");
+	Inputs in = {0};
+	in.cmd = 126;
+	runPhase(0, 600, &in);
+	traceClose();
+}
+
+static void sc_standing_start_low_notch(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("standing_start_low_notch",
+	          "defaults",
+	          "cmd=20 held from tick 0 (ramp output clamps to the low target)");
+	Inputs in = {0};
+	in.cmd = 20;
+	runPhase(0, 200, &in);
+	traceClose();
+}
+
+static void sc_coast_to_stop(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_DECEL, 120);
+	resetSpeed();
+	traceOpen("coast_to_stop",
+	          "DECEL 120, otherwise defaults",
+	          "cmd=30 to tick 150 (settle), then cmd=0 - coast down (DECPCT/DECTHR lag)");
+	Inputs in = {0};
+	in.cmd = 30;
+	int t = runPhase(0, 150, &in);
+	in.cmd = 0;
+	runPhase(t, 400, &in);
+	traceClose();
+}
+
+static void sc_brake1_from_cruise(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("brake1_from_cruise",
+	          "defaults - BRK1 130",
+	          "cmd=45 to tick 150 (settle), then Brake1 held (cmd stays 45)");
+	Inputs in = {0};
+	in.cmd = 45;
+	int t = runPhase(0, 150, &in);
+	in.b1 = 1;
+	runPhase(t, 350, &in);
+	traceClose();
+}
+
+static void sc_brake12_strength_step(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("brake12_strength_step",
+	          "defaults - BRK1 130, BRK2 70",
+	          "cmd=45 settle; Brake1 at tick 150; Brake1+2 at tick 210 (strength rises mid-brake)");
+	Inputs in = {0};
+	in.cmd = 45;
+	int t = runPhase(0, 150, &in);
+	in.b1 = 1;
+	t = runPhase(t, 60, &in);
+	in.b2 = 1;
+	runPhase(t, 250, &in);
+	traceClose();
+}
+
+static void sc_brake123_snap(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("brake123_snap",
+	          "defaults - BRK1+2+3 = 300, capped at 255 (near-instant stop)",
+	          "cmd=45 to tick 150 (settle), then Brake1+2+3 held");
+	Inputs in = {0};
+	in.cmd = 45;
+	int t = runPhase(0, 150, &in);
+	in.b1 = in.b2 = in.b3 = 1;
+	runPhase(t, 100, &in);
+	traceClose();
+}
+
+static void sc_estop_midramp(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("estop_midramp",
+	          "defaults",
+	          "cmd=126 from stop; emergency asserted ticks [40,80); released after "
+	          "(re-arms Start Delay + fresh ramp)");
+	Inputs in = {0};
+	in.cmd = 126;
+	int t = runPhase(0, 40, &in);
+	in.estop = 1;
+	t = runPhase(t, 40, &in);
+	in.estop = 0;
+	runPhase(t, 140, &in);
+	traceClose();
+}
+
+static void sc_stopfn_snap_release(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("stopfn_snap_release",
+	          "defaults",
+	          "cmd=60 settle; STOPFN watched-function active ticks [220,270); released after");
+	Inputs in = {0};
+	in.cmd = 60;
+	int t = runPhase(0, 220, &in);
+	in.stopfn = 1;
+	t = runPhase(t, 50, &in);
+	in.stopfn = 0;
+	runPhase(t, 150, &in);
+	traceClose();
+}
+
+static void sc_hold_freeze_resume(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("hold_freeze_resume",
+	          "defaults",
+	          "cmd=55; HOLDFN active ticks [150,210) - model frozen; released after");
+	Inputs in = {0};
+	in.cmd = 55;
+	int t = runPhase(0, 150, &in);
+	in.hold = 1;
+	t = runPhase(t, 60, &in);
+	in.hold = 0;
+	runPhase(t, 170, &in);
+	traceClose();
+}
+
+static void sc_hold_edge_skips_delay(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("hold_edge_skips_delay",
+	          "defaults - DELAY 13",
+	          "from stop: HOLD held ticks [0,30) with cmd rising to 40 during the hold; "
+	          "HOLD released at tick 30 with cmd!=0 -> Start Delay skipped");
+	Inputs in = {0};
+	in.hold = 1;
+	in.cmd = 0;
+	int t = runPhase(0, 15, &in);
+	in.cmd = 40;               /* "revved" while held */
+	t = runPhase(t, 15, &in);
+	in.hold = 0;               /* falling edge, cmd != 0 */
+	runPhase(t, 120, &in);
+	traceClose();
+}
+
+static void sc_start_delay_long(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_START_DELAY, 40);   /* 40 * 0.25s = 10s = 100 ticks held at 0 */
+	resetSpeed();
+	traceOpen("start_delay_long",
+	          "DELAY 40 (10s spool-up), otherwise defaults",
+	          "cmd=35 from stop - holds at 0 through the delay, then ramps");
+	Inputs in = {0};
+	in.cmd = 35;
+	runPhase(0, 240, &in);
+	traceClose();
+}
+
+static void sc_opload_slows_accel(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_OPLOAD, 200);       /* > 128 -> scales ACCEL/DECEL up (slower) */
+	resetSpeed();
+	traceOpen("opload_slows_accel",
+	          "OPLOAD 200, OPLOADFN active throughout",
+	          "cmd=100 from stop with Optional Load engaged");
+	Inputs in = {0};
+	in.cmd = 100;
+	in.opload = 1;
+	runPhase(0, 340, &in);
+	traceClose();
+}
+
+static void sc_prload_wins(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_OPLOAD, 200);
+	speedSet(SPEED_ITEM_PRLOAD, 64);        /* < 128 -> faster; Primary wins when both active */
+	resetSpeed();
+	traceOpen("prload_wins",
+	          "OPLOAD 200 + PRLOAD 64, both watched functions active",
+	          "cmd=100 from stop - Primary Load (64) overrides Optional Load (200)");
+	Inputs in = {0};
+	in.cmd = 100;
+	in.opload = 1;
+	in.prload = 1;
+	runPhase(0, 340, &in);
+	traceClose();
+}
+
+static void sc_accel_cv30(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL, 30);
+	resetSpeed();
+	traceOpen("accel_cv30", "ACCEL 30, otherwise defaults", "cmd=100 from stop");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 300, &in);
+	traceClose();
+}
+
+static void sc_accel_cv120(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL, 120);
+	resetSpeed();
+	traceOpen("accel_cv120", "ACCEL 120, otherwise defaults", "cmd=100 from stop");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 400, &in);
+	traceClose();
+}
+
+static void sc_decel_cv230(void)
+{
+	cfgDefaults();
+	resetSpeed();
+	traceOpen("decel_cv230",
+	          "DECEL 230 (default upper bound of the validated range)",
+	          "cmd=22 to tick 120 (settle), then cmd=0 - slow coast to stop");
+	Inputs in = {0};
+	in.cmd = 22;
+	int t = runPhase(0, 120, &in);
+	in.cmd = 0;
+	runPhase(t, 480, &in);
+	traceClose();
+}
+
+static void sc_maxspeed_120_kmh(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_MAX_MPH, 120);
+	speedSet(SPEED_ITEM_UNIT, SPEED_UNIT_KMH);
+	resetSpeed();
+	traceOpen("maxspeed_120_kmh",
+	          "MAXSPEED 120, UNIT KMH - exercises printSpeed() 3-digit + km/h conversion",
+	          "cmd=126 from stop");
+	Inputs in = {0};
+	in.cmd = 126;
+	runPhase(0, 560, &in);
+	traceClose();
+}
+
+static void sc_type_v5dcc(void)
+{
+	cfgDefaults();   /* TYPE defaults to V5DCC (0.896 multiplier) */
+	resetSpeed();
+	traceOpen("type_v5dcc",
+	          "TYPE V5DCC (0.896 multiplier), otherwise defaults",
+	          "cmd=60 to tick 180 (settle), then Brake1 held");
+	Inputs in = {0};
+	in.cmd = 60;
+	int t = runPhase(0, 180, &in);
+	in.b1 = 1;
+	runPhase(t, 320, &in);
+	traceClose();
+}
+
+static void sc_type_v4v5mult(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4V5MULT);   /* 0.25 multiplier - ~3.6x faster */
+	resetSpeed();
+	traceOpen("type_v4v5mult",
+	          "TYPE V4V5MULT (0.25 multiplier), otherwise defaults",
+	          "cmd=60 to tick 180 (settle), then Brake1 held - compare against type_v5dcc");
+	Inputs in = {0};
+	in.cmd = 60;
+	int t = runPhase(0, 180, &in);
+	in.b1 = 1;
+	runPhase(t, 320, &in);
+	traceClose();
+}
+
+int main(int argc, char **argv)
+{
+	g_outdir = (argc > 1) ? argv[1] : "out";
+
+	sc_standing_start_full();
+	sc_standing_start_low_notch();
+	sc_coast_to_stop();
+	sc_brake1_from_cruise();
+	sc_brake12_strength_step();
+	sc_brake123_snap();
+	sc_estop_midramp();
+	sc_stopfn_snap_release();
+	sc_hold_freeze_resume();
+	sc_hold_edge_skips_delay();
+	sc_start_delay_long();
+	sc_opload_slows_accel();
+	sc_prload_wins();
+	sc_accel_cv30();
+	sc_accel_cv120();
+	sc_decel_cv230();
+	sc_maxspeed_120_kmh();
+	sc_type_v5dcc();
+	sc_type_v4v5mult();
+
+	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
+	return 0;
+}
