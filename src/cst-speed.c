@@ -107,9 +107,83 @@ static uint8_t  lastBrakeSum       = 0;
 static uint16_t lastTicksForDelta  = 0;
 static uint16_t deltaRemainder     = 0;
 
+// --- Decoder-family descriptor (see cst-speed.h) ------------------------------
+// One row per SPEED_TYPE_*: the momentum multiplier used by ticksToCross()/brakeTicksToCross(),
+// plus the ordered set of model parameters the SPEED CFG menu shows after the six type-agnostic
+// items. speedItemAt() walks these to resolve a menu position.
+
+typedef struct
+{
+	const char    *name;            // short label, for the menu and the PC tooling
+	uint16_t       multiplier;      // momentum multiplier x1000
+	const uint8_t *modelItems;      // SPEED_ITEM_* values, in menu order, shown after the agnostic six
+	uint8_t        modelItemCount;
+} SpeedTypeDesc;
+
+// The six type-agnostic items, menu positions 1-6, identical for every family.
+static const uint8_t speedAgnosticItems[] =
+{
+	SPEED_ITEM_TYPE, SPEED_ITEM_MAX_MPH, SPEED_ITEM_UNIT,
+	SPEED_ITEM_ACCEL, SPEED_ITEM_DECEL, SPEED_ITEM_BRAKE1,
+};
+#define SPEED_AGNOSTIC_COUNT ((uint8_t)(sizeof(speedAgnosticItems) / sizeof(speedAgnosticItems[0])))
+
+// ESU LokSound/LokPilot model parameters. The four correction tunables stay last so the ADV FUNC
+// gate remains a tail skip. Both current ESU types share this list.
+static const uint8_t esuModelItems[] =
+{
+	SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3, SPEED_ITEM_START_DELAY,
+	SPEED_ITEM_HOLD_FN, SPEED_ITEM_STOP_FN,
+	SPEED_ITEM_OPLOAD, SPEED_ITEM_OPLOAD_FN, SPEED_ITEM_PRLOAD, SPEED_ITEM_PRLOAD_FN,
+	SPEED_ITEM_ACCEL_PCT, SPEED_ITEM_ACCEL_TARGET, SPEED_ITEM_DECEL_PCT, SPEED_ITEM_DECEL_THRESHOLD,
+};
+#define ESU_MODEL_ITEM_COUNT ((uint8_t)(sizeof(esuModelItems) / sizeof(esuModelItems[0])))
+
+static const SpeedTypeDesc speedTypeDesc[SPEED_TYPE_COUNT] =
+{
+	[SPEED_TYPE_V5DCC]    = { "V5DCC",    SPEED_MULTIPLIER_V5DCC,    esuModelItems, ESU_MODEL_ITEM_COUNT },
+	[SPEED_TYPE_V4V5MULT] = { "V4V5MULT", SPEED_MULTIPLIER_V4V5MULT, esuModelItems, ESU_MODEL_ITEM_COUNT },
+};
+
+uint8_t speedType(void)
+{
+	uint8_t t = speedCfg[SPEED_ITEM_TYPE];
+	return (t < SPEED_TYPE_COUNT) ? t : SPEED_TYPE_DEFAULT;
+}
+
 static uint16_t speedMultiplierConst(void)
 {
-	return (SPEED_TYPE_V4V5MULT == speedCfg[SPEED_ITEM_TYPE]) ? SPEED_MULTIPLIER_V4V5MULT : SPEED_MULTIPLIER_V5DCC;
+	return speedTypeDesc[speedType()].multiplier;
+}
+
+// The four ADV-FUNC-gated correction tunables - hidden from the menu cycle unless ADV FUNC is on.
+static uint8_t speedItemIsAdvGated(uint8_t item)
+{
+	return (SPEED_ITEM_ACCEL_PCT == item) || (SPEED_ITEM_ACCEL_TARGET == item)
+	    || (SPEED_ITEM_DECEL_PCT == item) || (SPEED_ITEM_DECEL_THRESHOLD == item);
+}
+
+uint8_t speedItemAt(uint8_t pos, uint8_t advFunc)
+{
+	if (0 == pos)
+		return SPEED_ITEM_COUNT;
+
+	uint8_t want = (uint8_t)(pos - 1);
+	if (want < SPEED_AGNOSTIC_COUNT)
+		return speedAgnosticItems[want];
+
+	const SpeedTypeDesc *d = &speedTypeDesc[speedType()];
+	uint8_t visible = SPEED_AGNOSTIC_COUNT;
+	for (uint8_t i = 0; i < d->modelItemCount; i++)
+	{
+		uint8_t item = d->modelItems[i];
+		if (!advFunc && speedItemIsAdvGated(item))
+			continue;
+		if (visible == want)
+			return item;
+		visible++;
+	}
+	return SPEED_ITEM_COUNT;
 }
 
 // Optional/Primary Load CVs (CV103/CV104): scales a base CV3/CV4 value by loadValue/128 before it's

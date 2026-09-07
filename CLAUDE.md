@@ -322,14 +322,18 @@ notch position.
 
 ### On-device editor
 
-`SPEED_CONFIG_SCREEN` (landing page `SPEED CFG`), a 19-item cycle grouped: momentum CVs (`ACCEL`/`DECEL`/
-`BRK1`/`BRK2`/`BRK3`/`DELAY`) → display calibration (`MAXSPEED`/`UNIT`) → watched-function triggers
-(`HOLDFN`/`STOPFN`) → load simulation (`OPLOAD`/`OPLOADFN`/`PRLOAD`/`PRLOADFN`) → decoder family (`TYPE`) →
-correction tunables (`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`). The last four are fine-grained calibration
-values hidden from the item cycle unless `ADV FUNC` (`SYSTEM` screen) is enabled, to avoid accidental
-edits; they are still always read via `readByteOrDefault()` with real defaults regardless of visibility, so
-hiding them never risks an unset field. `UNIT`/`TYPE` are strict two-way toggles; `HOLDFN`/`STOPFN`/
-`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+`SPEED_CONFIG_SCREEN` (landing page `SPEED CFG`). Six items are decoder-type-agnostic and always lead,
+in this order: `TYPE`, `MAXSPEED`, `UNIT`, `ACCEL`, `DECEL`, `BRK1`. After them come the model
+parameters the current `TYPE` uses, in the order fixed by the per-family descriptor in `cst-speed.c`
+(`speedTypeDesc[]`): `speedItemAt(subscreenState, advFunc)` (the shape of `optionItemAt()`) walks that
+descriptor to resolve a menu position to a `SPEED_ITEM_*`, returning the `SPEED_ITEM_COUNT` sentinel
+once past the last visible item. Both current ESU types (`V5DCC`, `V4V5MULT`) carry the identical
+13-parameter model list and differ only in the momentum multiplier; splitting `V4V5MULT` into separate
+V5 MultiProtocol and V4 descriptors is a later step. The four correction tunables
+(`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) stay last so the `ADV FUNC` (`SYSTEM` screen) gate that hides them
+is a tail skip; they are always read via `readByteOrDefault()` with real defaults regardless of
+visibility, so hiding them never risks an unset field. `UNIT`/`TYPE` are two-way toggles;
+`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
 
 `printSpeed()` converts the configured `MAXSPEED` into km/h once before computing the displayed value
 (rather than converting an already-rounded mph figure) to avoid compounding rounding error, and decides its
@@ -764,11 +768,13 @@ Two item-dispatch styles are in use:
    private `static uint8_t xCfg[]` array, and `switch(item)` blocks for the label and the display
    format. Used where the config is a block of independent 0-255 bytes owned by one `cst-*.c` module.
 2. **Named-item enum + switch** (`SPEED_CONFIG_SCREEN`, `PREFS_SCREEN`, `COMM_SCREEN`,
-   `SYSTEM_SCREEN`, `OPTION_SCREEN`): a local `enum { X_ITEM_… }` in on-screen order, resolved from
-   `subscreenState` (`item = subscreenState - 1` for the fixed-layout screens; `OPTION_SCREEN` has a
-   mode-dependent layout — STACK inserts N band-editor items — so `optionItemAt()` does the resolve
-   and also yields the band number). `switch(item)` blocks handle label, display, and per-kind edit
-   behaviour, with small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where
+   `SYSTEM_SCREEN`, `OPTION_SCREEN`): a local `enum { X_ITEM_… }` (or `SPEED_ITEM_*` in the module
+   header) in on-screen order, resolved from `subscreenState` — `item = subscreenState - 1` for the
+   fixed-layout screens (`PREFS`/`COMM`/`SYSTEM`), or a resolver where the layout is not fixed:
+   `optionItemAt()` for `OPTION_SCREEN` (STACK inserts N band-editor items, and it also yields the
+   band number), `speedItemAt()` for `SPEED_CONFIG_SCREEN` (the item set after the six agnostic ones
+   depends on `TYPE`). `switch(item)` blocks handle label, display, and per-kind edit behaviour, with
+   small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where
    the values are heterogeneous — bits of `configBits`/`optionBits`/`systemBits`, a 3-way field
    (`GET`/`SET_BRK_TYPE`), deterministic toggles (STEPS, HORNTYPE), the STACK band→combo cycle,
    `new*` staging locals whose on-screen format differs from storage, or values reached only through

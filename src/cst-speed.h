@@ -21,11 +21,12 @@ LICENSE:
 #ifndef _CST_SPEED_H_
 #define _CST_SPEED_H_
 
-// --- SPEED CFG per-profile config items, in SPEED_CONFIG_SCREEN menu order ---
+// --- SPEED CFG per-profile config items ---
 // speedGet(item) / speedSet(item, val) index a single static array by these, the same
-// indexed-accessor-over-a-static-array idiom as cst-pressure.c's airbrakeCfg[]. The last
-// four (ACCEL_PCT..DECEL_THRESHOLD) are the correction tunables hidden unless ADV FUNC is
-// on - kept contiguous at the end so the menu's skip test is a single ">=" comparison.
+// indexed-accessor-over-a-static-array idiom as cst-pressure.c's airbrakeCfg[]. This is the
+// storage order and is fixed; the SPEED_CONFIG_SCREEN display order is a separate concern
+// driven by the per-TYPE descriptor in cst-speed.c (see speedItemAt()). The four correction
+// tunables (ACCEL_PCT..DECEL_THRESHOLD) are hidden unless ADV FUNC is on.
 enum
 {
 	SPEED_ITEM_ACCEL = 0,       // ACCEL   - mirrors decoder CV3
@@ -217,6 +218,23 @@ enum
 // keep it until SPEED CFG is next visited and re-saved (the value's *meaning* changed here, from a literal
 // hold to a target).
 #define SPEED_ACCEL_TARGET_DEFAULT       5
+
+// --- Decoder-family descriptor ---
+// TYPE (SPEED_ITEM_TYPE) tags a decoder family. Six SPEED CFG items are type-agnostic - they mean
+// the same thing for every family and always show first, in this order: TYPE, MAXSPEED, UNIT,
+// ACCEL, DECEL, BRK1. Everything after them is a model parameter whose presence and menu order come
+// from the family's descriptor in cst-speed.c; speedItemAt() walks that descriptor to map a menu
+// position to a SPEED_ITEM_*. In this revision both ESU types carry the identical model-parameter
+// set and differ only in the momentum multiplier - splitting V4V5MULT into separate V5
+// MultiProtocol and V4 descriptors (V4 drops BRK2/BRK3 and the load CVs) is a later step.
+#define SPEED_TYPE_COUNT                 2
+
+uint8_t speedType(void);
+
+// Map a 1-based SPEED_CONFIG_SCREEN position to a SPEED_ITEM_*, for the current TYPE and the ADV
+// FUNC state (which reveals the four correction tunables). Returns SPEED_ITEM_COUNT once pos is
+// past the last visible item - the menu-wrap sentinel.
+uint8_t speedItemAt(uint8_t pos, uint8_t advFunc);
 
 void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t brake2Active,
                       uint8_t brake3Active, uint8_t emergencyActive, uint8_t watchedFunctionActive,

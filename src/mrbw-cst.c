@@ -496,8 +496,9 @@ static uint8_t* stackCombos(void)
 
 // SPEED_CONFIG_SCREEN: the four watched-DCC-function items (HOLDFN/STOPFN/OPLOADFN/PRLOADFN) share one
 // edit behaviour - an 0-28 range plus the SPEED_STOP_WATCH_FN_OFF (255) sentinel, distinct from the plain
-// 0-255 numeric items and the two 0/1 toggles (UNIT/TYPE). Not contiguous in the SPEED_ITEM_* enum, which
-// follows menu order, so this is a set test rather than a range check.
+// 0-255 numeric items and the two 0/1 toggles (UNIT/TYPE). Not contiguous in the SPEED_ITEM_* enum (menu
+// order now comes from the per-TYPE descriptor in cst-speed.c, resolved by speedItemAt()), so this is a
+// set test rather than a range check.
 static uint8_t speedItemIsWatchFn(uint8_t item)
 {
 	return (SPEED_ITEM_HOLD_FN == item) || (SPEED_ITEM_STOP_FN == item)
@@ -3310,7 +3311,10 @@ int main(void)
 				}
 				else
 				{
-					uint8_t speedItem = subscreenState - 1;
+					uint8_t speedAdvFunc = (systemBits & _BV(SYSTEMBITS_ADV_FUNC)) ? 1 : 0;
+					uint8_t speedItem = speedItemAt(subscreenState, speedAdvFunc);
+					if(SPEED_ITEM_COUNT == speedItem)
+						speedItem = speedItemAt(1, speedAdvFunc);  // never render the past-end sentinel
 					uint8_t speedVal = speedGet(speedItem);
 
 					lcd_gotoxy(0,0);
@@ -3370,8 +3374,9 @@ int main(void)
 								}
 								else
 								{
-									// UNIT/TYPE are 0/1 toggles (KMH/V4V5MULT at 1); the rest clamp at 255.
-									uint8_t speedMax = ((SPEED_ITEM_UNIT == speedItem) || (SPEED_ITEM_TYPE == speedItem)) ? 1 : 255;
+									// UNIT is a 0/1 toggle; TYPE cycles 0..SPEED_TYPE_COUNT-1; the rest clamp at 255.
+									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1 :
+									                   (SPEED_ITEM_TYPE == speedItem) ? (SPEED_TYPE_COUNT - 1) : 255;
 									if(speedVal < speedMax)
 										speedSet(speedItem, speedVal + 1);
 								}
@@ -3392,7 +3397,7 @@ int main(void)
 								}
 								else
 								{
-									// UNIT/TYPE toggle back to 0 (MPH/V5DCC); the rest clamp at 0.
+									// UNIT and TYPE step down toward 0 (MPH / the first TYPE); the rest clamp at 0.
 									if(speedVal > 0)
 										speedSet(speedItem, speedVal - 1);
 								}
@@ -3433,13 +3438,11 @@ int main(void)
 						case MENU_BUTTON:
 							if(MENU_BUTTON != previousButton)
 							{
-								// Menu pressed, advance menu
+								// Menu pressed, advance menu. speedItemAt() returns the SPEED_ITEM_COUNT
+								// sentinel once past the last visible item for this TYPE and ADV FUNC
+								// state (the four correction tunables are hidden unless ADV FUNC is on).
 								subscreenState++;
-
-								// Wrap past the last item; skip the ACCPCT/ACCTGT/DECPCT/DECTHR correction
-								// tunables (SPEED_ITEM_ACCEL_PCT onward) unless ADV FUNC is enabled.
-								if( (subscreenState > SPEED_ITEM_COUNT) ||
-								    ((subscreenState - 1 >= (uint8_t)SPEED_ITEM_ACCEL_PCT) && !(systemBits & _BV(SYSTEMBITS_ADV_FUNC))) )
+								if(SPEED_ITEM_COUNT == speedItemAt(subscreenState, speedAdvFunc))
 									subscreenState = 1;
 								lcd_clrscr();
 							}
