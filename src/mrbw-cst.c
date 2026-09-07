@@ -338,8 +338,9 @@ typedef enum
 // (DISPLAY/AIRBRAKE/LED_BLINK/REV_LOCK/STRICT_SLEEP - see prefsItemIsBit()), a staged uint8_t
 // (SLEEP/ALERTER, held in new* locals and only pushed to the real values on SELECT-save), and
 // the one opaque item (TIMEOUT, edited through the cst-time.c increment/decrement helpers).
-// Named-item + switch pattern, replacing the old if(N == subscreenState) chain and the
-// bitPosition/prefsPtr scratch dance - same direction as SPEED CFG / AIRBRAKE CFG.
+// Named-item + switch pattern, replacing the old if(N == subscreenState) chain, the bitPosition
+// sentinel byte and the prefsPtr scratch pointer - same direction as SPEED CFG / AIRBRAKE CFG.
+// COMM_SCREEN and SYSTEM_SCREEN follow the same pattern (COMM_ITEM_* / SYSTEM_ITEM_* below).
 enum
 {
 	PREFS_ITEM_DISPLAY = 0,   // configBits: CLOCK / SPEED main-screen readout
@@ -351,6 +352,31 @@ enum
 	PREFS_ITEM_REV_LOCK,      // configBits
 	PREFS_ITEM_STRICT_SLEEP,  // configBits
 	PREFS_ITEM_COUNT
+};
+
+// COMM_SCREEN items, in on-screen order. Every item edits one uint8_t held elsewhere -
+// the new* staging locals (THRTL_ID/BASE_ADR/TIME_ADR/TX_INTVL) or the live txHoldoff_centisecs
+// global (TX_HLDOF). TX_INTVL and TX_HLDOF are view-only unless ADV FUNC (see commItemIsAdvGated()).
+enum
+{
+	COMM_ITEM_THRTL_ID = 0,  // newDevAddr,      MRBUS_DEV_ADDR_MIN..MAX,  shown A..Z
+	COMM_ITEM_BASE_ADR,      // newBaseAddr,     MRBUS_BASE_ADDR_MIN..MAX
+	COMM_ITEM_TIME_ADR,      // newTimeAddr,     0..255 (0 = BASE, 0xFF = ALL, else 0xNN)
+	COMM_ITEM_TX_INTVL,      // newUpdate_seconds, 1..UPDATE_DECISECS_MAX/10, seconds
+	COMM_ITEM_TX_HLDOF,      // txHoldoff_centisecs, TX_HOLDOFF_MIN..255, shown N.NN s
+	COMM_ITEM_COUNT
+};
+
+// SYSTEM_SCREEN items, in on-screen order: two systemBits toggles then the three battery
+// thresholds (decivolts, view-only unless ADV FUNC, applied live through setBatteryLevels()).
+enum
+{
+	SYSTEM_ITEM_MENU_LOCK = 0,  // systemBits
+	SYSTEM_ITEM_ADV_FUNC,       // systemBits
+	SYSTEM_ITEM_BAT_OKAY,       // decivolts
+	SYSTEM_ITEM_BAT_WARN,       // decivolts
+	SYSTEM_ITEM_BAT_CRIT,       // decivolts
+	SYSTEM_ITEM_COUNT
 };
 
 typedef enum
@@ -475,6 +501,22 @@ static uint8_t prefsItemBit(uint8_t item)
 		case PREFS_ITEM_STRICT_SLEEP: return CONFIGBITS_STRICT_SLEEP;
 		default:                      return CONFIGBITS_MAIN_SCREEN_SPEED;  // PREFS_ITEM_DISPLAY
 	}
+}
+
+// COMM_SCREEN: TX INTVL and TX HLDOF are only editable with ADV FUNC on.
+static uint8_t commItemIsAdvGated(uint8_t item)
+{
+	return (COMM_ITEM_TX_INTVL == item) || (COMM_ITEM_TX_HLDOF == item);
+}
+
+// SYSTEM_SCREEN: the two systemBits toggles vs. the three battery-threshold values.
+static uint8_t systemItemIsBit(uint8_t item)
+{
+	return (item < SYSTEM_ITEM_BAT_OKAY);
+}
+static uint8_t systemItemBit(uint8_t item)
+{
+	return (SYSTEM_ITEM_ADV_FUNC == item) ? SYSTEMBITS_ADV_FUNC : SYSTEMBITS_MENU_LOCK;
 }
 
 // STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
@@ -1543,8 +1585,7 @@ int main(void)
 	uint8_t newAlerterTimeout = alerter_tmr_reset_value / 150;
 	uint8_t newUpdate_seconds = update_decisecs / 10;
 
-	uint8_t *prefsPtr = &newSleepTimeout;
-	uint8_t *optionsPtr = &optionBits;
+	uint8_t *optionsPtr = &optionBits;  // OPTION_SCREEN scratch pointer (still on the legacy pattern)
 
 	setXbeeActive();
 
@@ -3976,67 +4017,56 @@ int main(void)
 				}
 				else
 				{
+					uint8_t commItem = subscreenState - 1;
 					enableLCDBacklight();
+
 					lcd_gotoxy(0,0);
-					if(1 == subscreenState)
+					switch(commItem)
 					{
-						lcd_puts("THRTL ID");
-						prefsPtr = &newDevAddr;
-						lcd_gotoxy(4,1);
-						lcd_putc('A' + (newDevAddr - MRBUS_DEV_ADDR_MIN));
+						case COMM_ITEM_THRTL_ID: lcd_puts("THRTL ID"); break;
+						case COMM_ITEM_BASE_ADR: lcd_puts("BASE ADR"); break;
+						case COMM_ITEM_TIME_ADR: lcd_puts("TIME ADR"); break;
+						case COMM_ITEM_TX_INTVL: lcd_puts("TX INTVL"); break;
+						case COMM_ITEM_TX_HLDOF: lcd_puts("TX HLDOF"); break;
 					}
-					else if(2 == subscreenState)
+
+					switch(commItem)
 					{
-						lcd_puts("BASE ADR");
-						prefsPtr = &newBaseAddr;
-						lcd_gotoxy(3,1);
-						printDec2DigWZero(newBaseAddr - MRBUS_BASE_ADDR_MIN);
-					}
-					else if(3 == subscreenState)
-					{
-						lcd_puts("TIME ADR");
-						prefsPtr = &newTimeAddr;
-						if(0x00 == newTimeAddr)
-						{
+						case COMM_ITEM_THRTL_ID:
+							lcd_gotoxy(4,1);
+							lcd_putc('A' + (newDevAddr - MRBUS_DEV_ADDR_MIN));
+							break;
+						case COMM_ITEM_BASE_ADR:
+							lcd_gotoxy(3,1);
+							printDec2DigWZero(newBaseAddr - MRBUS_BASE_ADDR_MIN);
+							break;
+						case COMM_ITEM_TIME_ADR:
 							lcd_gotoxy(2,1);
-							lcd_puts("BASE");
-						}
-						else if(0xFF == newTimeAddr)
-						{
-							lcd_gotoxy(2,1);
-							lcd_puts(" ALL");
-						}
-						else
-						{
-							lcd_gotoxy(2,1);
-							lcd_puts("0x");
-							printHex(newTimeAddr);
-						}
-					}
-					else if(4 == subscreenState)
-					{
-						lcd_puts("TX INTVL");
-						prefsPtr = &newUpdate_seconds;
-						lcd_gotoxy(4,1);
-						printDec3Dig(*prefsPtr);
-						lcd_gotoxy(7,1);
-						lcd_puts("s");
-					}
-					else if(5 == subscreenState)
-					{
-						lcd_puts("TX HLDOF");
-						prefsPtr = &txHoldoff_centisecs;
-						lcd_gotoxy(3,1);
-						lcd_putc('0' + (*prefsPtr) / 100);
-						lcd_putc('.');
-						lcd_putc('0' + ((*prefsPtr)/10) % 10);
-						lcd_putc('0' + (*prefsPtr) % 10);
-						lcd_gotoxy(7,1);
-						lcd_puts("s");
-					}
-					else
-					{
-						subscreenState = 1;
+							if(0x00 == newTimeAddr)
+								lcd_puts("BASE");
+							else if(0xFF == newTimeAddr)
+								lcd_puts(" ALL");
+							else
+							{
+								lcd_puts("0x");
+								printHex(newTimeAddr);
+							}
+							break;
+						case COMM_ITEM_TX_INTVL:
+							lcd_gotoxy(4,1);
+							printDec3Dig(newUpdate_seconds);
+							lcd_gotoxy(7,1);
+							lcd_puts("s");
+							break;
+						case COMM_ITEM_TX_HLDOF:
+							lcd_gotoxy(3,1);
+							lcd_putc('0' + txHoldoff_centisecs / 100);
+							lcd_putc('.');
+							lcd_putc('0' + (txHoldoff_centisecs / 10) % 10);
+							lcd_putc('0' + txHoldoff_centisecs % 10);
+							lcd_gotoxy(7,1);
+							lcd_puts("s");
+							break;
 					}
 
 					switch(button)
@@ -4044,17 +4074,31 @@ int main(void)
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if( ((prefsPtr != &newUpdate_seconds)&&(prefsPtr != &txHoldoff_centisecs)) || (systemBits & _BV(SYSTEMBITS_ADV_FUNC)) )
+								if(!commItemIsAdvGated(commItem) || (systemBits & _BV(SYSTEMBITS_ADV_FUNC)))
 								{
-									if(*prefsPtr < 0xFF)
-										(*prefsPtr)++;
-									// Check bounds
-									if(newDevAddr > MRBUS_DEV_ADDR_MAX)
-										newDevAddr = MRBUS_DEV_ADDR_MAX;
-									if(newBaseAddr > MRBUS_BASE_ADDR_MAX)
-										newBaseAddr = MRBUS_BASE_ADDR_MAX;
-									if(newUpdate_seconds > UPDATE_DECISECS_MAX / 10)
-										newUpdate_seconds = UPDATE_DECISECS_MAX / 10;
+									switch(commItem)
+									{
+										case COMM_ITEM_THRTL_ID:
+											if(newDevAddr < MRBUS_DEV_ADDR_MAX)
+												newDevAddr++;
+											break;
+										case COMM_ITEM_BASE_ADR:
+											if(newBaseAddr < MRBUS_BASE_ADDR_MAX)
+												newBaseAddr++;
+											break;
+										case COMM_ITEM_TIME_ADR:
+											if(newTimeAddr < 0xFF)
+												newTimeAddr++;
+											break;
+										case COMM_ITEM_TX_INTVL:
+											if(newUpdate_seconds < UPDATE_DECISECS_MAX / 10)
+												newUpdate_seconds++;
+											break;
+										case COMM_ITEM_TX_HLDOF:
+											if(txHoldoff_centisecs < 0xFF)
+												txHoldoff_centisecs++;
+											break;
+									}
 								}
 								ticks_autoincrement = 0;
 							}
@@ -4062,23 +4106,40 @@ int main(void)
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if((prefsPtr == &newUpdate_seconds)||(prefsPtr == &txHoldoff_centisecs))
+								if(commItemIsAdvGated(commItem))
 								{
-									if( (systemBits & _BV(SYSTEMBITS_ADV_FUNC)) && (*prefsPtr > 1) )
-										(*prefsPtr)--;
-									// Check bounds
-									if(txHoldoff_centisecs < TX_HOLDOFF_MIN)
-										txHoldoff_centisecs = TX_HOLDOFF_MIN;
+									if(systemBits & _BV(SYSTEMBITS_ADV_FUNC))
+									{
+										switch(commItem)
+										{
+											case COMM_ITEM_TX_INTVL:
+												if(newUpdate_seconds > 1)
+													newUpdate_seconds--;
+												break;
+											case COMM_ITEM_TX_HLDOF:
+												if(txHoldoff_centisecs > TX_HOLDOFF_MIN)
+													txHoldoff_centisecs--;
+												break;
+										}
+									}
 								}
 								else
 								{
-									if(*prefsPtr > 0)
-										(*prefsPtr)--;
-									// Check bounds
-									if(newDevAddr < MRBUS_DEV_ADDR_MIN)
-										newDevAddr = MRBUS_DEV_ADDR_MIN;
-									if(newBaseAddr < MRBUS_BASE_ADDR_MIN)
-										newBaseAddr = MRBUS_BASE_ADDR_MIN;
+									switch(commItem)
+									{
+										case COMM_ITEM_THRTL_ID:
+											if(newDevAddr > MRBUS_DEV_ADDR_MIN)
+												newDevAddr--;
+											break;
+										case COMM_ITEM_BASE_ADR:
+											if(newBaseAddr > MRBUS_BASE_ADDR_MIN)
+												newBaseAddr--;
+											break;
+										case COMM_ITEM_TIME_ADR:
+											if(newTimeAddr > 0)
+												newTimeAddr--;
+											break;
+									}
 								}
 								ticks_autoincrement = 0;
 							}
@@ -4111,6 +4172,8 @@ int main(void)
 							{
 								// Menu pressed, advance menu
 								subscreenState++;
+								if(subscreenState > COMM_ITEM_COUNT)
+									subscreenState = 1;
 								lcd_clrscr();
 							}
 							break;
@@ -4339,92 +4402,54 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 means boolean
+					uint8_t systemItem = subscreenState - 1;
 					enableLCDBacklight();
+
+					// Battery thresholds are edited as a set (setBatteryLevels() takes all three), so
+					// read all three fresh each pass and index by systemItem - SYSTEM_ITEM_BAT_OKAY.
+					uint8_t decivolts[3] = { getBatteryOkay(), getBatteryWarn(), getBatteryCritical() };
+
 					lcd_gotoxy(0,0);
+					switch(systemItem)
+					{
+						case SYSTEM_ITEM_MENU_LOCK: lcd_puts("MENU LCK"); break;
+						case SYSTEM_ITEM_ADV_FUNC:  lcd_puts("ADV FUNC"); break;
+						case SYSTEM_ITEM_BAT_OKAY:  lcd_puts("BAT OKAY"); break;
+						case SYSTEM_ITEM_BAT_WARN:  lcd_puts("BAT WARN"); break;
+						case SYSTEM_ITEM_BAT_CRIT:  lcd_puts("BAT CRIT"); break;
+					}
 
-					uint8_t decivoltsOkay = getBatteryOkay();
-					uint8_t decivoltsWarn = getBatteryWarn();
-					uint8_t decivoltsCritical = getBatteryCritical();
-
-					if(1 == subscreenState)
+					if(systemItemIsBit(systemItem))
 					{
-						lcd_puts("MENU LCK");
-						bitPosition = SYSTEMBITS_MENU_LOCK;
-						prefsPtr = &systemBits;
-					}
-					else if(2 == subscreenState)
-					{
-						lcd_puts("ADV FUNC");
-						bitPosition = SYSTEMBITS_ADV_FUNC;
-						prefsPtr = &systemBits;
-					}
-					else if(3 == subscreenState)
-					{
-						lcd_puts("BAT OKAY");
-						lcd_gotoxy(7,1);
-						lcd_puts("V");
-						bitPosition = 0xFF;
-						prefsPtr = &decivoltsOkay;
-					}
-					else if(4 == subscreenState)
-					{
-						lcd_puts("BAT WARN");
-						lcd_gotoxy(7,1);
-						lcd_puts("V");
-						bitPosition = 0xFF;
-						prefsPtr = &decivoltsWarn;
-					}
-					else if(5 == subscreenState)
-					{
-						lcd_puts("BAT CRIT");
-						lcd_gotoxy(7,1);
-						lcd_puts("V");
-						bitPosition = 0xFF;
-						prefsPtr = &decivoltsCritical;
+						lcd_gotoxy(4,1);
+						lcd_puts((systemBits & _BV(systemItemBit(systemItem))) ? " ON " : " OFF");
 					}
 					else
 					{
-						bitPosition = 8;
-						subscreenState = 1;
-					}
-
-
-					if(bitPosition < 8)
-					{
+						uint8_t dv = decivolts[systemItem - SYSTEM_ITEM_BAT_OKAY];
 						lcd_gotoxy(4,1);
-						if(*prefsPtr & _BV(bitPosition))
-							lcd_puts(" ON ");
-						else
-							lcd_puts(" OFF");
-					}
-					else if(8 == bitPosition)
-					{
-						// Do nothing
-					}
-					else
-					{
-						lcd_gotoxy(4,1);
-						lcd_putc('0' + (*prefsPtr) / 10);
+						lcd_putc('0' + dv / 10);
 						lcd_putc('.');
-						lcd_putc('0' + (*prefsPtr) % 10);
+						lcd_putc('0' + dv % 10);
+						lcd_gotoxy(7,1);
+						lcd_puts("V");
 					}
-
 
 					switch(button)
 					{
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								if(systemItemIsBit(systemItem))
 								{
-									*prefsPtr |= _BV(bitPosition);
+									systemBits |= _BV(systemItemBit(systemItem));
 								}
-								else if( ((prefsPtr != &decivoltsOkay)&&(prefsPtr != &decivoltsWarn)&&(prefsPtr != &decivoltsCritical)) || (systemBits & _BV(SYSTEMBITS_ADV_FUNC)) )
+								else if(systemBits & _BV(SYSTEMBITS_ADV_FUNC))
 								{
-									if(*prefsPtr < 0xFF)
-										(*prefsPtr)++;
-									setBatteryLevels(decivoltsOkay, decivoltsWarn, decivoltsCritical);
+									uint8_t idx = systemItem - SYSTEM_ITEM_BAT_OKAY;
+									if(decivolts[idx] < 0xFF)
+										decivolts[idx]++;
+									setBatteryLevels(decivolts[0], decivolts[1], decivolts[2]);
 									ticks_autoincrement = 0;
 								}
 							}
@@ -4432,15 +4457,16 @@ int main(void)
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								if(systemItemIsBit(systemItem))
 								{
-									*prefsPtr &= ~_BV(bitPosition);
+									systemBits &= ~_BV(systemItemBit(systemItem));
 								}
-								else if( ((prefsPtr != &decivoltsOkay)&&(prefsPtr != &decivoltsWarn)&&(prefsPtr != &decivoltsCritical)) || (systemBits & _BV(SYSTEMBITS_ADV_FUNC)) )
+								else if(systemBits & _BV(SYSTEMBITS_ADV_FUNC))
 								{
-									if(*prefsPtr > 0)
-										(*prefsPtr)--;
-									setBatteryLevels(decivoltsOkay, decivoltsWarn, decivoltsCritical);
+									uint8_t idx = systemItem - SYSTEM_ITEM_BAT_OKAY;
+									if(decivolts[idx] > 0)
+										decivolts[idx]--;
+									setBatteryLevels(decivolts[0], decivolts[1], decivolts[2]);
 									ticks_autoincrement = 0;
 								}
 							}
@@ -4465,6 +4491,8 @@ int main(void)
 							{
 								// Menu pressed, advance menu
 								subscreenState++;
+								if(subscreenState > SYSTEM_ITEM_COUNT)
+									subscreenState = 1;
 								lcd_clrscr();
 							}
 							break;
