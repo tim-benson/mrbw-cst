@@ -741,27 +741,27 @@ Every editable config menu (`SPEED CFG`, `AIRBRAKE CFG`, `OPTIONS`, `SYSTEM`, `C
   the landing page with a `SAVED!` flash. A long-press of `MENU` anywhere in the list discards the
   edit and exits to the main screen (see "Long-press Menu to cancel a subscreen edit").
 
-Three item-dispatch styles coexist, newest first:
+Two item-dispatch styles are in use:
 
 1. **Indexed accessor** (`AIRBRAKE_CONFIG_SCREEN`): a named-item enum in the module header
    (`AIRBRAKE_CHARGED` … `AIRBRAKE_COUNT`), one `xGet(item)` / `xSet(item, value)` pair over a
    private `static uint8_t xCfg[]` array, and `switch(item)` blocks for the label and the display
    format. Used where the config is a block of independent 0-255 bytes owned by one `cst-*.c` module.
 2. **Named-item enum + switch** (`SPEED_CONFIG_SCREEN`, `PREFS_SCREEN`, `COMM_SCREEN`,
-   `SYSTEM_SCREEN`): `item = subscreenState - 1` indexes a local `enum { X_ITEM_… , X_ITEM_COUNT }`
-   in on-screen order; `switch(item)` blocks handle label, display, and per-kind edit behaviour,
-   with small `xItemIsBit()` / `xItemIsAdvGated()` helpers where an item is a bit toggle vs. a
-   staged value vs. an opaque getter/setter. Used where the values are heterogeneous — bits of
-   `configBits`/`systemBits`, `new*` staging locals whose on-screen format differs from storage,
-   or values reached only through `cst-*.c` accessors (`getMaxDeadReckoningTime()`,
-   `setBatteryLevels()`).
-3. **Legacy `if (N == subscreenState)` chain** (`OPTION_SCREEN` only): the stock ISE shape —
-   magic-number `if`/`else if` branches assigning a scratch `optionsPtr` and a `bitPosition`
-   sentinel byte (with extra `0xFB..0xFE` sentinels for OPTION's 3-way BRK TYPE, the STACK STEPS
-   and HORNTYPE toggles, and the STACK band-combo editor). The last screen still on this shape;
-   moving it to style 2 is more involved than PREFS/COMM/SYSTEM were because of the dynamic STACK
-   item count. Converting a screen is behaviour-preserving and has no EEPROM-layout or PC-tooling
-   impact since only the UI code moves.
+   `SYSTEM_SCREEN`, `OPTION_SCREEN`): a local `enum { X_ITEM_… }` in on-screen order, resolved from
+   `subscreenState` (`item = subscreenState - 1` for the fixed-layout screens; `OPTION_SCREEN` has a
+   mode-dependent layout — STACK inserts N band-editor items — so `optionItemAt()` does the resolve
+   and also yields the band number). `switch(item)` blocks handle label, display, and per-kind edit
+   behaviour, with small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where
+   the values are heterogeneous — bits of `configBits`/`optionBits`/`systemBits`, a 3-way field
+   (`GET`/`SET_BRK_TYPE`), deterministic toggles (STEPS, HORNTYPE), the STACK band→combo cycle,
+   `new*` staging locals whose on-screen format differs from storage, or values reached only through
+   `cst-*.c` accessors (`getMaxDeadReckoningTime()`, `setBatteryLevels()`).
+
+The stock ISE `if (N == subscreenState)` chain (magic-number branches setting a scratch pointer and
+a `bitPosition` sentinel byte, with `0xFB..0xFE` sub-sentinels in `OPTION_SCREEN`) is fully retired —
+`PREFS`/`COMM`/`SYSTEM`/`OPTION` were converted one screen per commit. A conversion is
+behaviour-preserving and has no EEPROM-layout or PC-tooling impact, since only the UI code moves.
 
 ## Shared network CNF store
 

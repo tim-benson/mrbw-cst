@@ -379,6 +379,25 @@ enum
 	SYSTEM_ITEM_COUNT
 };
 
+// OPTION_SCREEN logical items. Unlike the other config screens, the item at a given
+// subscreenState depends on the brake mode: STACK inserts (stackBandCount() - 1) band-editor
+// items between BRK TYPE and BRK ESTP, and subscreenState 3 is BRK RATE outside STACK but STEPS
+// in it. optionItemAt() resolves subscreenState -> item (and, for STACK_BAND, the band number),
+// replacing the old estopItem/revSwapItem/hornTypeItem arithmetic and the 0xFB..0xFE bitPosition
+// sentinels.
+enum
+{
+	OPTION_ITEM_VAR_BRK = 0,  // optionBits OPTIONBITS_VARIABLE_BRAKE
+	OPTION_ITEM_BRK_TYPE,     // 3-way PULSE/STEP/STACK via GET/SET_BRK_TYPE
+	OPTION_ITEM_BRK_RATE,     // brakePulseWidth (0.N s) - subscreenState 3 when not STACK
+	OPTION_ITEM_STEPS,        // STACK 3-STEP/5-STEP toggle - subscreenState 3 in STACK
+	OPTION_ITEM_STACK_BAND,   // STACK band->combo editor - subscreenState 4..3+bands, STACK only
+	OPTION_ITEM_BRK_ESTP,     // optionBits OPTIONBITS_ESTOP_ON_BRAKE
+	OPTION_ITEM_REV_SWAP,     // optionBits OPTIONBITS_REVERSER_SWAP
+	OPTION_ITEM_HORNTYPE,     // optionBits OPTIONBITS_HORN_TYPE, deterministic set
+	OPTION_ITEM_NONE          // subscreenState past the last item -> wrap to 1
+};
+
 typedef enum
 {
 	NO_BUTTON = 0,
@@ -517,6 +536,44 @@ static uint8_t systemItemIsBit(uint8_t item)
 static uint8_t systemItemBit(uint8_t item)
 {
 	return (SYSTEM_ITEM_ADV_FUNC == item) ? SYSTEMBITS_ADV_FUNC : SYSTEMBITS_MENU_LOCK;
+}
+
+// OPTION_SCREEN: resolve a 1-based subscreenState to its OPTION_ITEM_*, given the live brake mode.
+// *band receives the STACK band (1..stackBandCount()-1) for OPTION_ITEM_STACK_BAND, 0 otherwise.
+static uint8_t optionItemAt(uint8_t ss, uint8_t *band)
+{
+	*band = 0;
+	uint8_t stackMode = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) &&
+	                    (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits));
+	uint8_t estopItem = 4 + (stackMode ? (stackBandCount() - 1) : 0);
+
+	if(1 == ss) return OPTION_ITEM_VAR_BRK;
+	if(2 == ss) return OPTION_ITEM_BRK_TYPE;
+	if(3 == ss) return stackMode ? OPTION_ITEM_STEPS : OPTION_ITEM_BRK_RATE;
+	if((ss >= 4) && (ss < estopItem)) { *band = ss - 3; return OPTION_ITEM_STACK_BAND; }
+	if(ss == estopItem)     return OPTION_ITEM_BRK_ESTP;
+	if(ss == estopItem + 1) return OPTION_ITEM_REV_SWAP;
+	if(ss == estopItem + 2) return OPTION_ITEM_HORNTYPE;
+	return OPTION_ITEM_NONE;
+}
+// The optionBits bit for the three plain toggle items.
+static uint8_t optionBitFor(uint8_t item)
+{
+	switch(item)
+	{
+		case OPTION_ITEM_BRK_ESTP: return OPTIONBITS_ESTOP_ON_BRAKE;
+		case OPTION_ITEM_REV_SWAP: return OPTIONBITS_REVERSER_SWAP;
+		default:                   return OPTIONBITS_VARIABLE_BRAKE;  // OPTION_ITEM_VAR_BRK
+	}
+}
+// Cycle a STACK band-combo one step through stackComboSequence[] (none / singles / pairs / all).
+static void optionCycleBandCombo(uint8_t band, int8_t dir)
+{
+	uint8_t *combos = stackCombos();
+	uint8_t idx = 0;
+	while((idx < 7) && (stackComboSequence[idx] != combos[band]))
+		idx++;
+	combos[band] = stackComboSequence[(idx + dir) & 0x07];
 }
 
 // STACK combo brake mode: stateless per loop pass (band derived fresh from brakePcnt each call), not a
@@ -1584,8 +1641,6 @@ int main(void)
 	uint8_t newSleepTimeout = sleep_tmr_reset_value / 600;
 	uint8_t newAlerterTimeout = alerter_tmr_reset_value / 150;
 	uint8_t newUpdate_seconds = update_decisecs / 10;
-
-	uint8_t *optionsPtr = &optionBits;  // OPTION_SCREEN scratch pointer (still on the legacy pattern)
 
 	setXbeeActive();
 
@@ -3561,150 +3616,81 @@ int main(void)
 				}
 				else
 				{
-					uint8_t bitPosition = 0xFF;  // <8 boolean, 0xFB HORN TYPE 2-way, 0xFC STACK band editor, 0xFD STACK STEPS toggle, 0xFE BRK TYPE 3-way, 0xFF generic numeric
-					// STACK's STEPS toggle + band editors only apply when brake is variable AND BRK TYPE = STACK.
-					uint8_t stackModeActive = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) &&
-					                          (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits));
-					uint8_t editableBandCount = stackModeActive ? (stackBandCount() - 1) : 0;
-					uint8_t estopItem    = 4 + editableBandCount;  // BRK ESTP - fixed at 4 outside STACK mode
-					uint8_t revSwapItem  = 5 + editableBandCount;  // REV SWAP - fixed at 5 outside STACK mode
-					uint8_t hornTypeItem = 6 + editableBandCount;  // HORN TYPE - one past REV SWAP, always shown
-					uint8_t stackEditBand = 0;  // set below when bitPosition == 0xFC
-					enableLCDBacklight();
-					lcd_gotoxy(0,0);
-					if(1 == subscreenState)
+					uint8_t optionBand;
+					uint8_t optionItem = optionItemAt(subscreenState, &optionBand);
+					if(OPTION_ITEM_NONE == optionItem)
 					{
-						lcd_puts("VAR BRK");
-						bitPosition = OPTIONBITS_VARIABLE_BRAKE;
-						optionsPtr = &optionBits;
-					}
-					else if(2 == subscreenState)
-					{
-						lcd_puts("BRK TYPE");
-						bitPosition = 0xFE;
-						optionsPtr = &optionBits;
-					}
-					else if(3 == subscreenState)
-					{
-						if(stackModeActive)
-						{
-							lcd_puts("STEPS");
-							bitPosition = 0xFD;
-						}
-						else
-						{
-							lcd_puts("BRK RATE");
-							lcd_gotoxy(7,1);
-							lcd_puts("s");
-							bitPosition = 0xFF;
-							optionsPtr = &brakePulseWidth;
-						}
-					}
-					else if((subscreenState >= 4) && (subscreenState < estopItem))
-					{
-						// STACK band->combo editors - only reachable when stackModeActive, so this range
-						// is only ever non-empty in STACK mode (editableBandCount is 0 otherwise).
-						stackEditBand = subscreenState - 3;
-						lcd_puts("STEP");
-						lcd_putc('0' + stackEditBand);
-						bitPosition = 0xFC;
-					}
-					else if(subscreenState == estopItem)
-					{
-						lcd_puts("BRK ESTP");
-						bitPosition = OPTIONBITS_ESTOP_ON_BRAKE;
-						optionsPtr = &optionBits;
-					}
-					else if(subscreenState == revSwapItem)
-					{
-						lcd_puts("REV SWAP");
-						bitPosition = OPTIONBITS_REVERSER_SWAP;
-						optionsPtr = &optionBits;
-					}
-					else if(subscreenState == hornTypeItem)
-					{
-						lcd_puts("HORNTYPE");
-						bitPosition = 0xFB;
-						optionsPtr = &optionBits;
-					}
-					else
-					{
-						bitPosition = 8;
 						subscreenState = 1;
+						optionItem = OPTION_ITEM_VAR_BRK;
+					}
+					enableLCDBacklight();
+
+					lcd_gotoxy(0,0);
+					switch(optionItem)
+					{
+						case OPTION_ITEM_VAR_BRK:    lcd_puts("VAR BRK"); break;
+						case OPTION_ITEM_BRK_TYPE:   lcd_puts("BRK TYPE"); break;
+						case OPTION_ITEM_BRK_RATE:   lcd_puts("BRK RATE"); break;
+						case OPTION_ITEM_STEPS:      lcd_puts("STEPS"); break;
+						case OPTION_ITEM_STACK_BAND: lcd_puts("STEP"); lcd_putc('0' + optionBand); break;
+						case OPTION_ITEM_BRK_ESTP:   lcd_puts("BRK ESTP"); break;
+						case OPTION_ITEM_REV_SWAP:   lcd_puts("REV SWAP"); break;
+						case OPTION_ITEM_HORNTYPE:   lcd_puts("HORNTYPE"); break;
 					}
 
-					if(bitPosition < 8)
+					switch(optionItem)
 					{
-						lcd_gotoxy(5,1);
-						if(*optionsPtr & _BV(bitPosition))
-							lcd_puts("ON ");
-						else
-							lcd_puts("OFF");
-					}
-					else if(8 == bitPosition)
-					{
-						// Do nothing
-					}
-					else if(0xFE == bitPosition)
-					{
-						// BRK TYPE 3-way cycle
-						lcd_gotoxy(3,1);
-						switch(GET_BRK_TYPE(*optionsPtr))
+						case OPTION_ITEM_VAR_BRK:
+						case OPTION_ITEM_BRK_ESTP:
+						case OPTION_ITEM_REV_SWAP:
+							lcd_gotoxy(5,1);
+							lcd_puts((optionBits & _BV(optionBitFor(optionItem))) ? "ON " : "OFF");
+							break;
+						case OPTION_ITEM_BRK_TYPE:
+							lcd_gotoxy(3,1);
+							switch(GET_BRK_TYPE(optionBits))
+							{
+								case BRK_TYPE_STEP:  lcd_puts(" STEP"); break;
+								case BRK_TYPE_STACK: lcd_puts("STACK"); break;
+								default:             lcd_puts("PULSE"); break;
+							}
+							break;
+						case OPTION_ITEM_BRK_RATE:
+							// brakePulseWidth, tenths of a second
+							lcd_gotoxy(4,1);
+							lcd_putc('0' + brakePulseWidth / 10);
+							lcd_putc('.');
+							lcd_putc('0' + brakePulseWidth % 10);
+							lcd_gotoxy(7,1);
+							lcd_puts("s");
+							break;
+						case OPTION_ITEM_STEPS:
+							// Deterministic set on UP/DOWN (not a flip), so autorepeat does not flicker.
+							lcd_gotoxy(0,1);
+							lcd_puts(stackIs5Step() ? "5-STEP" : "3-STEP");
+							break;
+						case OPTION_ITEM_STACK_BAND:
 						{
-							case BRK_TYPE_STEP:
-								lcd_puts(" STEP");
-								break;
-							case BRK_TYPE_STACK:
-								lcd_puts("STACK");
-								break;
-							case BRK_TYPE_PULSE:
-							default:
-								lcd_puts("PULSE");
-								break;
+							uint8_t combo = stackCombos()[optionBand];
+							lcd_gotoxy(0,1);
+							lcd_puts("BRAKE");
+							lcd_putc((combo & BRAKE_CONTROL) ? '1' : '-');
+							lcd_putc((combo & BK2_CONTROL)   ? '2' : '-');
+							lcd_putc((combo & BK3_CONTROL)   ? '3' : '-');
+							break;
 						}
-					}
-					else if(0xFD == bitPosition)
-					{
-						// STACK step-count toggle - deterministic set-to (not a flip), avoids autorepeat
-						// visibly flickering between two states.
-						lcd_gotoxy(0,1);
-						lcd_puts(stackIs5Step() ? "5-STEP" : "3-STEP");
-					}
-					else if(0xFC == bitPosition)
-					{
-						// STACK band->combo editor
-						uint8_t combo = stackCombos()[stackEditBand];
-						lcd_gotoxy(0,1);
-						lcd_puts("BRAKE");
-						lcd_putc((combo & BRAKE_CONTROL) ? '1' : '-');
-						lcd_putc((combo & BK2_CONTROL)   ? '2' : '-');
-						lcd_putc((combo & BK3_CONTROL)   ? '3' : '-');
-					}
-					else if(0xFB == bitPosition)
-					{
-						// HORN TYPE 2-way - fixed 8-char width (fills the whole line) so no leftover
-						// characters remain from whichever string was rendered last. Uses the controller's
-						// built-in arrow glyphs (0x7F/0x7E - same ones the rest of the menu system uses for
-						// navigation cues) instead of literal '<'/'-'/'>' ASCII characters.
-						lcd_gotoxy(0,1);
-						lcd_putc('1');
-						lcd_putc(' ');
-						lcd_putc(0x7F);
-						lcd_putc(0x7E);
-						lcd_putc(' ');
-						lcd_puts((*optionsPtr & _BV(OPTIONBITS_HORN_TYPE)) ? "2  " : "1+2");
-					}
-					else if(optionsPtr == &brakePulseWidth)
-					{
-						lcd_gotoxy(4,1);
-						lcd_putc('0' + (*optionsPtr) / 10);
-						lcd_putc('.');
-						lcd_putc('0' + (*optionsPtr) % 10);
-					}
-					else
-					{
-						lcd_gotoxy(4,1);
-						printDec3Dig(*optionsPtr);
+						case OPTION_ITEM_HORNTYPE:
+							// Fixed 8-char width fills the line so no stale characters remain. 0x7F/0x7E
+							// are the controller's built-in left/right arrow glyphs, as used elsewhere in
+							// the menu for navigation cues.
+							lcd_gotoxy(0,1);
+							lcd_putc('1');
+							lcd_putc(' ');
+							lcd_putc(0x7F);
+							lcd_putc(0x7E);
+							lcd_putc(' ');
+							lcd_puts((optionBits & _BV(OPTIONBITS_HORN_TYPE)) ? "2  " : "1+2");
+							break;
 					}
 
 					switch(button)
@@ -3712,100 +3698,86 @@ int main(void)
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								switch(optionItem)
 								{
-									*optionsPtr |= _BV(bitPosition);
-								}
-								else if(0xFE == bitPosition)
-								{
-									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
-									if(brkType < BRK_TYPE_STACK)
-										brkType++;
-									SET_BRK_TYPE(*optionsPtr, brkType);
-									ticks_autoincrement = 0;
-								}
-								else if(0xFD == bitPosition)
-								{
-									if(!stackIs5Step())
+									case OPTION_ITEM_VAR_BRK:
+									case OPTION_ITEM_BRK_ESTP:
+									case OPTION_ITEM_REV_SWAP:
+										optionBits |= _BV(optionBitFor(optionItem));
+										break;  // plain bit - deliberately does not reset ticks_autoincrement
+									case OPTION_ITEM_BRK_TYPE:
 									{
-										optionBits |= _BV(OPTIONBITS_STACK_5STEP);
-										currentStackBand = 0;  // avoid a stale out-of-range band mid-switch
+										uint8_t brkType = GET_BRK_TYPE(optionBits);
+										if(brkType < BRK_TYPE_STACK)
+											brkType++;
+										SET_BRK_TYPE(optionBits, brkType);
+										ticks_autoincrement = 0;
+										break;
 									}
-									ticks_autoincrement = 0;
-								}
-								else if(0xFC == bitPosition)
-								{
-									uint8_t *combos = stackCombos();
-									// comboIndex is band's position within stackComboSequence[] (none/singles/pairs/all) -
-									// found by a short reverse lookup, since only the resulting bit pattern is stored.
-									uint8_t comboIndex = 0;
-									while((comboIndex < 7) && (stackComboSequence[comboIndex] != combos[stackEditBand]))
-										comboIndex++;
-									combos[stackEditBand] = stackComboSequence[(comboIndex + 1) & 0x07];
-									ticks_autoincrement = 0;
-								}
-								else if(0xFB == bitPosition)
-								{
-									// Deterministic set-to (not a flip), same idiom as the STACK STEPS toggle -
-									// avoids autorepeat visibly flickering between the two states.
-									*optionsPtr |= _BV(OPTIONBITS_HORN_TYPE);  // Exclusive ("1<->2")
-									ticks_autoincrement = 0;
-								}
-								else
-								{
-									if(*optionsPtr < 0xFF)
-										(*optionsPtr)++;
-									if(brakePulseWidth > BRAKE_PULSE_WIDTH_MAX)
-										brakePulseWidth = BRAKE_PULSE_WIDTH_MAX;
-									ticks_autoincrement = 0;
+									case OPTION_ITEM_STEPS:
+										if(!stackIs5Step())
+										{
+											optionBits |= _BV(OPTIONBITS_STACK_5STEP);
+											currentStackBand = 0;  // avoid a stale out-of-range band mid-switch
+										}
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_STACK_BAND:
+										optionCycleBandCombo(optionBand, +1);
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_HORNTYPE:
+										optionBits |= _BV(OPTIONBITS_HORN_TYPE);  // Exclusive
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_BRK_RATE:
+										if(brakePulseWidth < BRAKE_PULSE_WIDTH_MAX)
+											brakePulseWidth++;
+										ticks_autoincrement = 0;
+										break;
 								}
 							}
 							break;
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								if(bitPosition < 8)
+								switch(optionItem)
 								{
-									*optionsPtr &= ~_BV(bitPosition);
-								}
-								else if(0xFE == bitPosition)
-								{
-									uint8_t brkType = GET_BRK_TYPE(*optionsPtr);
-									if(brkType > BRK_TYPE_PULSE)
-										brkType--;
-									SET_BRK_TYPE(*optionsPtr, brkType);
-									ticks_autoincrement = 0;
-								}
-								else if(0xFD == bitPosition)
-								{
-									if(stackIs5Step())
+									case OPTION_ITEM_VAR_BRK:
+									case OPTION_ITEM_BRK_ESTP:
+									case OPTION_ITEM_REV_SWAP:
+										optionBits &= ~_BV(optionBitFor(optionItem));
+										break;
+									case OPTION_ITEM_BRK_TYPE:
 									{
-										optionBits &= ~_BV(OPTIONBITS_STACK_5STEP);
-										currentStackBand = 0;
+										uint8_t brkType = GET_BRK_TYPE(optionBits);
+										if(brkType > BRK_TYPE_PULSE)
+											brkType--;
+										SET_BRK_TYPE(optionBits, brkType);
+										ticks_autoincrement = 0;
+										break;
 									}
-									ticks_autoincrement = 0;
-								}
-								else if(0xFC == bitPosition)
-								{
-									uint8_t *combos = stackCombos();
-									uint8_t comboIndex = 0;
-									while((comboIndex < 7) && (stackComboSequence[comboIndex] != combos[stackEditBand]))
-										comboIndex++;
-									combos[stackEditBand] = stackComboSequence[(comboIndex - 1) & 0x07];
-									ticks_autoincrement = 0;
-								}
-								else if(0xFB == bitPosition)
-								{
-									*optionsPtr &= ~_BV(OPTIONBITS_HORN_TYPE);  // Additive, default ("1<->1+2")
-									ticks_autoincrement = 0;
-								}
-								else
-								{
-									if(*optionsPtr > 1)
-										(*optionsPtr)--;
-									if(brakePulseWidth < BRAKE_PULSE_WIDTH_MIN)
-										brakePulseWidth = BRAKE_PULSE_WIDTH_MIN;
-									ticks_autoincrement = 0;
+									case OPTION_ITEM_STEPS:
+										if(stackIs5Step())
+										{
+											optionBits &= ~_BV(OPTIONBITS_STACK_5STEP);
+											currentStackBand = 0;
+										}
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_STACK_BAND:
+										optionCycleBandCombo(optionBand, -1);
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_HORNTYPE:
+										optionBits &= ~_BV(OPTIONBITS_HORN_TYPE);  // Additive, default
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_BRK_RATE:
+										if(brakePulseWidth > BRAKE_PULSE_WIDTH_MIN)
+											brakePulseWidth--;
+										ticks_autoincrement = 0;
+										break;
 								}
 							}
 							break;
@@ -3833,16 +3805,21 @@ int main(void)
 								// Menu pressed, advance menu
 								subscreenState++;
 
-								// Conditionally skip menus if they don't apply. Item 3 (BRK RATE / STEPS) and the
-								// STACK band editors above it are not skipped when BRK TYPE = STACK - they're shown
-								// instead of BRK RATE, per stackModeActive/estopItem above.
-								while(	((2 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip brake type when variable brake disabled
-										((3 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||  // Skip pulse width/STEPS when variable brake disabled
-										((3 == subscreenState) &&  (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)))       // Skip pulse width when brake type = stepped
-										)
+								// Skip BRK TYPE and the item-3 slot (BRK RATE / STEPS) when they do not
+								// apply: both need variable brake on, and there is no BRK RATE in STEP mode.
+								// The STACK band editors above item 3 are shown, not skipped.
+								while(	((2 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||
+										((3 == subscreenState) && !(optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE))) ||
+										((3 == subscreenState) &&  (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)))
+									)
 								{
 									subscreenState++;
 								}
+
+								// Wrap once past the last item (HORNTYPE - its position shifts with the
+								// STACK band count, so ask the resolver rather than hardcode it).
+								if(OPTION_ITEM_NONE == optionItemAt(subscreenState, &optionBand))
+									subscreenState = 1;
 
 								lcd_clrscr();
 							}
