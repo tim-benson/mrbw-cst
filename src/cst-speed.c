@@ -114,7 +114,7 @@ static uint16_t deltaRemainder     = 0;
 
 typedef struct
 {
-	const char    *name;            // short label, for the menu and the PC tooling
+	const char    *name;            // 8-char padded display label (fills the LCD row)
 	uint16_t       multiplier;      // momentum multiplier x1000
 	const uint8_t *modelItems;      // SPEED_ITEM_* values, in menu order, shown after the agnostic six
 	uint8_t        modelItemCount;
@@ -128,8 +128,8 @@ static const uint8_t speedAgnosticItems[] =
 };
 #define SPEED_AGNOSTIC_COUNT ((uint8_t)(sizeof(speedAgnosticItems) / sizeof(speedAgnosticItems[0])))
 
-// ESU LokSound/LokPilot model parameters. The four correction tunables stay last so the ADV FUNC
-// gate remains a tail skip. Both current ESU types share this list.
+// ESU LokSound/LokPilot V5 model parameters (13), shared by V5DCC and V5MULT. The four correction
+// tunables stay last so the ADV FUNC gate remains a tail skip.
 static const uint8_t esuModelItems[] =
 {
 	SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3, SPEED_ITEM_START_DELAY,
@@ -139,10 +139,22 @@ static const uint8_t esuModelItems[] =
 };
 #define ESU_MODEL_ITEM_COUNT ((uint8_t)(sizeof(esuModelItems) / sizeof(esuModelItems[0])))
 
+// ESU LokPilot/LokSound V4 model parameters (7): the V5 set minus BRK2/BRK3 (no CV180/CV181) and the
+// load CVs (no CV103/CV104). speedResetModel()/speedApplyTypeInert() force the dropped parameters
+// inert, so V4 runs the identical model math as V5MULT with stacked braking and load scaling off.
+static const uint8_t esuV4ModelItems[] =
+{
+	SPEED_ITEM_START_DELAY,
+	SPEED_ITEM_HOLD_FN, SPEED_ITEM_STOP_FN,
+	SPEED_ITEM_ACCEL_PCT, SPEED_ITEM_ACCEL_TARGET, SPEED_ITEM_DECEL_PCT, SPEED_ITEM_DECEL_THRESHOLD,
+};
+#define ESU_V4_MODEL_ITEM_COUNT ((uint8_t)(sizeof(esuV4ModelItems) / sizeof(esuV4ModelItems[0])))
+
 static const SpeedTypeDesc speedTypeDesc[SPEED_TYPE_COUNT] =
 {
-	[SPEED_TYPE_V5DCC]    = { "V5DCC",    SPEED_MULTIPLIER_V5DCC,    esuModelItems, ESU_MODEL_ITEM_COUNT },
-	[SPEED_TYPE_V4V5MULT] = { "V4V5MULT", SPEED_MULTIPLIER_V4V5MULT, esuModelItems, ESU_MODEL_ITEM_COUNT },
+	[SPEED_TYPE_V5DCC]  = { "V5DCC   ", SPEED_MULTIPLIER_V5DCC,  esuModelItems,   ESU_MODEL_ITEM_COUNT },
+	[SPEED_TYPE_V5MULT] = { "V5MULT  ", SPEED_MULTIPLIER_V5MULT, esuModelItems,   ESU_MODEL_ITEM_COUNT },
+	[SPEED_TYPE_V4]     = { "V4      ", SPEED_MULTIPLIER_V5MULT, esuV4ModelItems, ESU_V4_MODEL_ITEM_COUNT },
 };
 
 uint8_t speedType(void)
@@ -151,9 +163,74 @@ uint8_t speedType(void)
 	return (t < SPEED_TYPE_COUNT) ? t : SPEED_TYPE_DEFAULT;
 }
 
+const char *speedTypeName(uint8_t type)
+{
+	return speedTypeDesc[(type < SPEED_TYPE_COUNT) ? type : SPEED_TYPE_DEFAULT].name;
+}
+
 static uint16_t speedMultiplierConst(void)
 {
 	return speedTypeDesc[speedType()].multiplier;
+}
+
+// True if family d exposes model parameter `item`.
+static uint8_t speedTypeUsesItem(const SpeedTypeDesc *d, uint8_t item)
+{
+	for (uint8_t i = 0; i < d->modelItemCount; i++)
+		if (d->modelItems[i] == item)
+			return 1;
+	return 0;
+}
+
+// Shipped default for a model parameter (used when a family gains one on a TYPE change).
+static uint8_t speedItemDefault(uint8_t item)
+{
+	switch (item)
+	{
+		case SPEED_ITEM_BRAKE2:    return MOMENTUM_BRAKE2_CV180_DEFAULT;
+		case SPEED_ITEM_BRAKE3:    return MOMENTUM_BRAKE3_CV181_DEFAULT;
+		case SPEED_ITEM_OPLOAD:    return SPEED_OPLOAD_DEFAULT;
+		case SPEED_ITEM_OPLOAD_FN: return SPEED_OPLOAD_FN_DEFAULT;
+		case SPEED_ITEM_PRLOAD:    return SPEED_PRLOAD_DEFAULT;
+		case SPEED_ITEM_PRLOAD_FN: return SPEED_PRLOAD_FN_DEFAULT;
+		default:                   return 0;
+	}
+}
+
+// Inert value for a model parameter a family does not use - the value at which updateSpeed10Hz()
+// ignores it. Only the extra brake CVs differ from their default here (0, so they add nothing to the
+// brake sum); the load CVs are already neutral at 128 and their watch functions OFF by default.
+static uint8_t speedItemInert(uint8_t item)
+{
+	return (SPEED_ITEM_BRAKE2 == item || SPEED_ITEM_BRAKE3 == item) ? 0 : speedItemDefault(item);
+}
+
+void speedResetModel(uint8_t oldType, uint8_t newType)
+{
+	if (oldType >= SPEED_TYPE_COUNT || newType >= SPEED_TYPE_COUNT || oldType == newType)
+		return;
+	const SpeedTypeDesc *o = &speedTypeDesc[oldType];
+	const SpeedTypeDesc *n = &speedTypeDesc[newType];
+	for (uint8_t i = 0; i < o->modelItemCount; i++)
+		if (!speedTypeUsesItem(n, o->modelItems[i]))
+			speedCfg[o->modelItems[i]] = speedItemInert(o->modelItems[i]);
+	for (uint8_t i = 0; i < n->modelItemCount; i++)
+		if (!speedTypeUsesItem(o, n->modelItems[i]))
+			speedCfg[n->modelItems[i]] = speedItemDefault(n->modelItems[i]);
+}
+
+void speedApplyTypeInert(void)
+{
+	// Only the six droppable parameters need checking - every other model item is in every family.
+	static const uint8_t droppable[] =
+	{
+		SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3,
+		SPEED_ITEM_OPLOAD, SPEED_ITEM_OPLOAD_FN, SPEED_ITEM_PRLOAD, SPEED_ITEM_PRLOAD_FN,
+	};
+	const SpeedTypeDesc *d = &speedTypeDesc[speedType()];
+	for (uint8_t i = 0; i < sizeof(droppable); i++)
+		if (!speedTypeUsesItem(d, droppable[i]))
+			speedCfg[droppable[i]] = speedItemInert(droppable[i]);
 }
 
 // The four ADV-FUNC-gated correction tunables - hidden from the menu cycle unless ADV FUNC is on.

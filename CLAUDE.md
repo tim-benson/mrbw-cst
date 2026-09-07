@@ -327,13 +327,24 @@ in this order: `TYPE`, `MAXSPEED`, `UNIT`, `ACCEL`, `DECEL`, `BRK1`. After them 
 parameters the current `TYPE` uses, in the order fixed by the per-family descriptor in `cst-speed.c`
 (`speedTypeDesc[]`): `speedItemAt(subscreenState, advFunc)` (the shape of `optionItemAt()`) walks that
 descriptor to resolve a menu position to a `SPEED_ITEM_*`, returning the `SPEED_ITEM_COUNT` sentinel
-once past the last visible item. Both current ESU types (`V5DCC`, `V4V5MULT`) carry the identical
-13-parameter model list and differ only in the momentum multiplier; splitting `V4V5MULT` into separate
-V5 MultiProtocol and V4 descriptors is a later step. The four correction tunables
-(`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) stay last so the `ADV FUNC` (`SYSTEM` screen) gate that hides them
-is a tail skip; they are always read via `readByteOrDefault()` with real defaults regardless of
-visibility, so hiding them never risks an unset field. `UNIT`/`TYPE` are two-way toggles;
-`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+once past the last visible item. `V5DCC` and `V5MULT` expose all 13 model parameters
+(`BRK2`/`BRK3`/`DELAY`, `HOLDFN`/`STOPFN`, `OPLOAD`/`OPLOADFN`/`PRLOAD`/`PRLOADFN`, and the four
+correction tunables); `V4` exposes 7 (it drops `BRK2`/`BRK3` and the load CVs — see "How the
+simulation math works" below). The four correction tunables (`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) stay
+last in every family so the `ADV FUNC` (`SYSTEM` screen) gate that hides them is a tail skip; they are
+always read via `readByteOrDefault()` with real defaults regardless of visibility, so hiding them
+never risks an unset field. `UNIT` is a two-way toggle; `TYPE` cycles the three families and calls
+`speedResetModel()` on each change; `HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+
+**`speedResetModel(oldType, newType)`** (from the `TYPE` edit) and **`speedApplyTypeInert()`** (from
+`readConfig()`) keep the parameters a family does not use out of the model. `speedResetModel()` sets a
+parameter the new family drops to its inert value (`BRK2`/`BRK3` to 0, the load CVs to 128, their
+watch functions to `OFF`) and one it gains back to its default; `speedApplyTypeInert()` does the same
+one-shot on load for whatever is stored. The inert values are exactly where `updateSpeed10Hz()`
+already ignores a parameter, so the model runs one code path for every family — there is no
+`switch(speedType())` in the simulation math. `V5DCC` <-> `V5MULT` is a no-op (identical parameter
+sets). The `SELECT`-save still writes all 19 `SPEED_ITEM_*` bytes regardless of family, so a `V4`
+profile persists inert zeros in the dropped slots.
 
 `printSpeed()` converts the configured `MAXSPEED` into km/h once before computing the displayed value
 (rather than converting an already-rounded mph figure) to avoid compounding rounding error, and decides its
@@ -375,9 +386,16 @@ mechanism is needed.
 
 ### How the simulation math works
 
-**Decoder family (`TYPE`)**: selects which momentum-CV time convention `ACCEL`/`DECEL`/`BRK1-3` use —
-`V5DCC` (0.896s per CV unit, ESU LokSound 5 DCC-only, the NMRA S9.2.2-standard multiplier) or `V4V5MULT`
-(0.25s per CV unit, the general case: LokPilot/LokSound V4, and V5 MultiProtocol).
+**Decoder family (`TYPE`)**: three values, selecting the momentum-CV time convention `ACCEL`/`DECEL`/
+`BRK1-3` use and which model parameters apply. `V5DCC` — 0.896s per CV unit, ESU LokSound 5 DCC only,
+the NMRA S9.2.2 multiplier. `V5MULT` — 0.25s per CV unit, ESU LokSound/LokPilot V5 MultiProtocol; the
+same 13-parameter model as `V5DCC`, only the multiplier differs. `V4` — 0.25s per CV unit,
+LokPilot/LokSound V4; the identical model math and multiplier as `V5MULT`, but a V4 decoder has no
+CV180/CV181 and no CV103/CV104, so `BRK2`/`BRK3` and the load CVs are dropped from its menu and forced
+inert (see the editor section above), making `V4` behave as `V5MULT` with stacked braking and load
+scaling off. `SPEED_TYPE_V5MULT` keeps the byte value (1) the old combined `V4V5MULT` used, so a stored
+`TYPE` of 1 upgrades to `V5MULT` with no behavior change; `V4` is the new value 2, and there is no
+`EEPROM_LAYOUT_VERSION` bump for the split (no byte moves, value 1 keeps its meaning).
 
 **Load simulation (`OPLOAD`/`PRLOAD`/`OPLOADFN`/`PRLOADFN`)**: mirrors decoder CV103 (Optional Load)/CV104
 (Primary Load) — each a 0-255 value (128 = neutral) that scales the base `ACCEL`/`DECEL` CV while its
@@ -461,7 +479,7 @@ is an NMRA convention, not a naming choice made here.
 
 | Item | Default | What it does |
 |---|---|---|
-| `TYPE` | V5DCC | `V5DCC` (0.896s/unit) or `V4V5MULT` (0.25s/unit) |
+| `TYPE` | V5DCC | `V5DCC` (0.896s/unit), `V5MULT` (0.25s/unit, same 13-parameter model), or `V4` (0.25s/unit, drops `BRK2`/`BRK3` and the load CVs) |
 
 **Correction tunables** (hidden behind `ADV FUNC`)
 
@@ -491,7 +509,9 @@ model defaults, a blank chip self-heals. No backup or re-import is needed for th
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
 per-tick `simSpeedStepQ8` and `printSpeed()` output against checked-in reference traces
 (`reference/*.txt`). It is the regression net for any change to the model — a diff means the output
-moved, either intended (`make speedtest-accept` re-blesses the traces) or a regression.
+moved, either intended (`make speedtest-accept` re-blesses the traces) or a regression. It also asserts
+two invariants as `PASS`/`FAIL` lines (the `V4` model equals the `V5MULT` model with its dropped
+parameters no-oped; `speedApplyTypeInert()` neutralises a stale slot) and exits non-zero on failure.
 `.githooks/pre-commit` runs it whenever a commit touches `cst-speed.c`, `cst-speed.h`, or that
 directory. The only host-build shim is `cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h`
 includes `<avr/pgmspace.h>`; scenarios stay in realistic non-zero CV ranges, where the model is
@@ -929,9 +949,14 @@ menus — **one object per config menu**, objects and keys in menu order: a slot
 `functions` / `notch_speedstep` / `speed` / `airbrake` (the `AIRBRAKE CFG` menu — `DISPLAY`/`COMP_MODE`
 are string enums, everything else a plain number) / `options` (the OPTIONS menu — brake config plus
 `reverser_swap`/`horn_type`; its meta-field is `unset`); `device.json` is `system` (ADV-FUNC battery
-thresholds) / `comm` / `prefs` (`config_bits` nested here) / `calibration`. `encode_slot` /
-`encode_global` also accept the older pre-schema-2 shapes on import (flat device fields,
-`force_function_on`/`off`, `brake` / `options_unset`). `MenuOrderTests` in `test_slot_codec.py` locks
+thresholds) / `comm` / `prefs` (`config_bits` nested here) / `calibration`. The `speed` object is
+decoder-family-shaped: the six agnostic fields (`TYPE`/`MAXSPEED`/`UNIT`/`ACCEL`/`DECEL`/`BRK1`) plus
+only the model fields the `TYPE` uses (`speed_fields_for_type()` in `cst_eeprom_layout.py` — a `V4`
+slot has 13 keys, a `V5` slot 19); the encoder writes inert values to the slots a `V4` drops so the
+image byte-matches the firmware. `SLOT_SCHEMA_VERSION` is 4. `encode_slot` / `encode_global` also
+accept the older pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` /
+`options_unset`, and — via `--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is
+`V4`). `MenuOrderTests` in `test_slot_codec.py` locks
 the ordering so a `slot_codec.py` change is deliberate.
 
 **CNF format version guard**: since the codec is a hand-maintained mirror, a stale copy of this tool run
@@ -1055,7 +1080,10 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 4. Add/update the corresponding fixture in `src/cst-cfgtransfer/tests/test_slot_codec.py` (run via
    `python3 -m unittest discover tests` from `src/cst-cfgtransfer/`, no hardware needed).
 5. Update the field reference in `src/cst-cfgtransfer/README.md` if the field introduces new JSON
-   vocabulary.
+   vocabulary, and bump `SLOT_SCHEMA_VERSION` in `slot_codec.py` if the exported JSON shape changes
+   (this is the JSON schema version, independent of `EEPROM_LAYOUT_VERSION` — a change can move one
+   without the other: the `V5MULT`/`V4` split bumped the schema with no layout change; the SPEED
+   payload relocation bumped the layout with no schema change).
 6. If the change touches `cst-speed.c`, regenerate the reference traces with `make speedtest-accept`
    and review the `git diff` — that diff is the human-readable statement of how the model output moved.
 

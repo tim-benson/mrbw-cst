@@ -268,8 +268,9 @@ SPEED_UNIT_TO_NAME = {SPEED_UNIT_MPH: "MPH", SPEED_UNIT_KMH: "KMH"}
 SPEED_UNIT_FROM_NAME = {v: k for k, v in SPEED_UNIT_TO_NAME.items()}
 
 SPEED_TYPE_V5DCC = 0
-SPEED_TYPE_V4V5MULT = 1
-SPEED_TYPE_TO_NAME = {SPEED_TYPE_V5DCC: "V5DCC", SPEED_TYPE_V4V5MULT: "V4V5MULT"}
+SPEED_TYPE_V5MULT = 1   # was SPEED_TYPE_V4V5MULT - same byte value, same behaviour
+SPEED_TYPE_V4 = 2
+SPEED_TYPE_TO_NAME = {SPEED_TYPE_V5DCC: "V5DCC", SPEED_TYPE_V5MULT: "V5MULT", SPEED_TYPE_V4: "V4"}
 SPEED_TYPE_FROM_NAME = {v: k for k, v in SPEED_TYPE_TO_NAME.items()}
 
 WATCHED_FN_OFF = 255  # 0-28 = a DCC function number, 255 = OFF/disabled
@@ -298,31 +299,61 @@ SPEED_FIELD_DEFAULTS = {
     "DECTHR": 11,
 }
 
-# (json_key, eeprom offset) for each SPEED field, in on-device menu order. All 19 are self-healing
-# (readByteOrDefault) fields per readConfig() - a raw 0xFF decodes as "UNSET".
-SPEED_FIELDS = [
-    ("ACCEL", EE_MOMENTUM_ACCEL_CV3),
-    ("DECEL", EE_MOMENTUM_DECEL_CV4),
-    ("BRK1", EE_MOMENTUM_BRAKE1_CV179),
-    ("BRK2", EE_MOMENTUM_BRAKE2_CV180),
-    ("BRK3", EE_MOMENTUM_BRAKE3_CV181),
-    ("DELAY", EE_MOMENTUM_START_DELAY),
-    ("MAXSPEED", EE_SPEED_MAX_MPH),
-    ("UNIT", EE_SPEED_UNIT_KMH),
-    ("HOLDFN", EE_SPEED_HOLD_WATCH_FN),
-    ("STOPFN", EE_SPEED_STOP_WATCH_FN),
-    ("OPLOAD", EE_SPEED_OPLOAD),
-    ("OPLOADFN", EE_SPEED_OPLOAD_FN),
-    ("PRLOAD", EE_SPEED_PRLOAD),
-    ("PRLOADFN", EE_SPEED_PRLOAD_FN),
-    ("TYPE", EE_SPEED_TYPE),
-    ("ACCPCT", EE_SPEED_ACCEL_PCT),
-    ("ACCTGT", EE_SPEED_ACCEL_TARGET),
-    ("DECPCT", EE_SPEED_DECEL_PCT),
-    ("DECTHR", EE_SPEED_DECEL_THRESHOLD),
-]
-# Fields among the above whose value is a raw 0-255 number (as opposed to an enum/watched-fn field with
-# its own string encoding) - i.e. everything except UNIT, TYPE, and the *FN watched-function fields.
+# json_key -> EEPROM offset for every SPEED field (agnostic + every family's model params). All are
+# self-healing (readByteOrDefault) fields per readConfig() - a raw 0xFF decodes as "UNSET".
+SPEED_FIELD_OFFSET = {
+    "TYPE": EE_SPEED_TYPE,
+    "MAXSPEED": EE_SPEED_MAX_MPH,
+    "UNIT": EE_SPEED_UNIT_KMH,
+    "ACCEL": EE_MOMENTUM_ACCEL_CV3,
+    "DECEL": EE_MOMENTUM_DECEL_CV4,
+    "BRK1": EE_MOMENTUM_BRAKE1_CV179,
+    "BRK2": EE_MOMENTUM_BRAKE2_CV180,
+    "BRK3": EE_MOMENTUM_BRAKE3_CV181,
+    "DELAY": EE_MOMENTUM_START_DELAY,
+    "HOLDFN": EE_SPEED_HOLD_WATCH_FN,
+    "STOPFN": EE_SPEED_STOP_WATCH_FN,
+    "OPLOAD": EE_SPEED_OPLOAD,
+    "OPLOADFN": EE_SPEED_OPLOAD_FN,
+    "PRLOAD": EE_SPEED_PRLOAD,
+    "PRLOADFN": EE_SPEED_PRLOAD_FN,
+    "ACCPCT": EE_SPEED_ACCEL_PCT,
+    "ACCTGT": EE_SPEED_ACCEL_TARGET,
+    "DECPCT": EE_SPEED_DECEL_PCT,
+    "DECTHR": EE_SPEED_DECEL_THRESHOLD,
+}
+
+# The 6 type-agnostic SPEED CFG fields, in on-device menu order (TYPE first). Present for every family.
+SPEED_AGNOSTIC_FIELDS = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL", "BRK1"]
+
+# Per-family model fields, in on-device menu order (shown after the agnostic 6). Mirrors the
+# descriptors in cst-speed.c: V5DCC and V5MULT carry the identical 13; V4 drops BRK2/BRK3 (no
+# CV180/CV181) and the load CVs (no CV103/CV104).
+_ESU_V5_MODEL_FIELDS = ["BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN",
+                        "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN",
+                        "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"]
+_ESU_V4_MODEL_FIELDS = ["DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"]
+SPEED_MODEL_FIELDS = {
+    "V5DCC": _ESU_V5_MODEL_FIELDS,
+    "V5MULT": _ESU_V5_MODEL_FIELDS,
+    "V4": _ESU_V4_MODEL_FIELDS,
+}
+
+# Value written to a model slot the family does not use - mirrors speedItemInert() in cst-speed.c, so
+# a V4 EEPROM image matches what the firmware produces after speedResetModel()/speedApplyTypeInert().
+SPEED_MODEL_INERT = {"BRK2": 0, "BRK3": 0, "OPLOAD": 128, "PRLOAD": 128,
+                     "OPLOADFN": WATCHED_FN_OFF, "PRLOADFN": WATCHED_FN_OFF}
+
+
+def speed_fields_for_type(type_name):
+    """The json keys a `speed` object carries for the given decoder family, in menu order
+    (agnostic 6 + that family's model params). Unknown type_name falls back to the V5DCC set."""
+    model = SPEED_MODEL_FIELDS.get(type_name, _ESU_V5_MODEL_FIELDS)
+    return SPEED_AGNOSTIC_FIELDS + list(model)
+
+
+# Fields whose value is a raw 0-255 number (as opposed to UNIT, TYPE, or a *FN watched-function field
+# with its own string encoding).
 SPEED_PLAIN_NUMERIC_FIELDS = {"ACCEL", "DECEL", "BRK1", "BRK2", "BRK3", "DELAY", "MAXSPEED",
                                "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"}
 SPEED_WATCHED_FN_FIELDS = {"HOLDFN", "STOPFN", "OPLOADFN", "PRLOADFN"}

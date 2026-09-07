@@ -195,10 +195,16 @@ the objects follow the top-level menu cycle
   `airbrake.COMP_MODE` is `"CONSIST"` and the `airbrake` PREFS bit is on, but is always present in the
   JSON regardless.
 - **`notch_speedstep`**: 8 entries, 1-126, the reverser-notch-to-DCC-speed-step table.
-- **`speed`**: 19 fields under the exact `SPEED CFG` on-device menu names — `ACCEL`, `DECEL`, `BRK1`,
-  `BRK2`, `BRK3`, `DELAY`, `MAXSPEED`, `UNIT` (`"MPH"`/`"KMH"`), `HOLDFN`, `STOPFN`, `OPLOAD`, `OPLOADFN`,
-  `PRLOAD`, `PRLOADFN`, `TYPE` (`"V5DCC"`/`"V4V5MULT"`), `ACCPCT`, `ACCTGT`, `DECPCT`, `DECTHR`. Watched-
-  function fields (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`) are `"OFF"` or `"F00"`..`"F28"`.
+- **`speed`**: decoder-family-shaped, under the exact `SPEED CFG` on-device menu names. Six fields are
+  always present — `TYPE` (`"V5DCC"` / `"V5MULT"` / `"V4"`), `MAXSPEED`, `UNIT` (`"MPH"` / `"KMH"`),
+  `ACCEL`, `DECEL`, `BRK1` — followed by the model parameters that `TYPE` uses. `V5DCC` and `V5MULT`
+  carry all 13 (`BRK2`, `BRK3`, `DELAY`, `HOLDFN`, `STOPFN`, `OPLOAD`, `OPLOADFN`, `PRLOAD`, `PRLOADFN`,
+  `ACCPCT`, `ACCTGT`, `DECPCT`, `DECTHR`); `V4` carries the 7-field subset (`DELAY`, `HOLDFN`, `STOPFN`,
+  `ACCPCT`, `ACCTGT`, `DECPCT`, `DECTHR`) — it has no `CV180`/`CV181`/`CV103`/`CV104`, so `BRK2`/`BRK3`
+  and the load CVs are absent. Watched-function fields (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`) are
+  `"OFF"` or `"F00"`..`"F28"`. A pre-4-schema flat backup (all 19 fields) still imports without
+  `--import-old` for a `V5DCC`/`V5MULT` `TYPE`; a `V4` `TYPE` on a flat backup needs `--import-old`, which
+  ignores the inapplicable fields.
 - **`airbrake`**: 9 fields under the exact `AIRBRAKE CFG` on-device menu names — `BP_CHARGE`, `MR_LOAD`,
   `MR_LOW`, `MR_HIGH`, `RECHARGE`, `LEAK_RATE`, `PUMP_RATE`, `DISPLAY`, `COMP_MODE` — the per-loco
   parameters of the AIRBRAKE air-brake model, all always visible on-device (no `ADV FUNC` gating left in

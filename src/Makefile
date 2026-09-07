@@ -146,7 +146,7 @@ $(SPEEDTEST_BIN): $(SPEEDTEST_DIR)/test_speed.c cst-speed.c cst-speed.h lcd.h $(
 
 speedtest: $(SPEEDTEST_BIN)
 	@rm -rf $(SPEEDTEST_DIR)/out && mkdir -p $(SPEEDTEST_DIR)/out
-	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out >/dev/null
+	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out
 	@diff -ru $(SPEEDTEST_DIR)/reference $(SPEEDTEST_DIR)/out \
 		&& echo "PASS: speed model reference traces match" \
 		|| { echo; echo "FAIL: speed model output changed - review the diff above."; \
@@ -154,7 +154,7 @@ speedtest: $(SPEEDTEST_BIN)
 
 speedtest-accept: $(SPEEDTEST_BIN)
 	@rm -rf $(SPEEDTEST_DIR)/out && mkdir -p $(SPEEDTEST_DIR)/out
-	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out >/dev/null
+	@$(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out
 	@rm -rf $(SPEEDTEST_DIR)/reference && mv $(SPEEDTEST_DIR)/out $(SPEEDTEST_DIR)/reference
 	@echo "reference traces regenerated from the current cst-speed.c - review 'git diff' before committing"
 

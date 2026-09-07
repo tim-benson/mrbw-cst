@@ -41,18 +41,19 @@ def _valid_options(brk_type="PULSE"):
     }
 
 
-def _valid_speed():
-    d = {}
-    for key in layout.SPEED_FIELD_DEFAULTS:
-        if key == "UNIT":
-            d[key] = "MPH"
-        elif key == "TYPE":
-            d[key] = "V5DCC"
-        elif key in layout.SPEED_WATCHED_FN_FIELDS:
-            d[key] = "F09"
-        else:
-            d[key] = 42
-    return d
+def _speed_field_value(key, type_name):
+    if key == "UNIT":
+        return "MPH"
+    if key == "TYPE":
+        return type_name
+    if key in layout.SPEED_WATCHED_FN_FIELDS:
+        return "F09"
+    return 42
+
+
+def _valid_speed(type_name="V5DCC"):
+    return {key: _speed_field_value(key, type_name)
+            for key in layout.speed_fields_for_type(type_name)}
 
 
 def _valid_airbrake():
@@ -195,10 +196,16 @@ class MenuOrderTests(unittest.TestCase):
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["options"]), expected)
 
     def test_speed_keys_match_speed_cfg_menu_order(self):
-        expected = ["ACCEL", "DECEL", "BRK1", "BRK2", "BRK3", "DELAY", "MAXSPEED", "UNIT", "HOLDFN",
-                    "STOPFN", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN", "TYPE", "ACCPCT", "ACCTGT",
-                    "DECPCT", "DECTHR"]
-        self.assertEqual([k for k, _off in layout.SPEED_FIELDS], expected)
+        # SPEED CFG shows the 6 type-agnostic items first (TYPE leads), then the current TYPE's model
+        # params - V5DCC/V5MULT carry all 13, V4 the 7-item subset. Mirrors the cst-speed.c descriptors.
+        agnostic = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL", "BRK1"]
+        self.assertEqual(layout.SPEED_AGNOSTIC_FIELDS, agnostic)
+        self.assertEqual(layout.speed_fields_for_type("V5DCC"), agnostic + [
+            "BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN",
+            "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
+        self.assertEqual(layout.speed_fields_for_type("V5MULT"), layout.speed_fields_for_type("V5DCC"))
+        self.assertEqual(layout.speed_fields_for_type("V4"), agnostic + [
+            "DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
 
     def test_airbrake_keys_match_airbrake_cfg_menu_order(self):
         # = AIRBRAKE_CONFIG_SCREEN item order (cst-pressure.h AIRBRAKE_* enum) - all 9 always visible,
@@ -305,8 +312,8 @@ class SlotRoundTripTests(unittest.TestCase):
             self.assertEqual(encoded[layout.EE_STACK_BAND_COMBOS + i], 0xFF)
         for i in range(3):
             self.assertEqual(encoded[layout.EE_STACK_BAND_COMBOS_3STEP + i], 0xFF)
-        for _key, offset in layout.SPEED_FIELDS:
-            self.assertEqual(encoded[offset], 0xFF)
+        for key in layout.SPEED_FIELD_OFFSET:
+            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], 0xFF)
         decoded = slot_codec.decode_slot(encoded, source=d["source"])
         self.assertEqual(decoded, d)
 
@@ -387,6 +394,71 @@ class SlotRoundTripTests(unittest.TestCase):
         d["functions"]["HORN"] = "NOT_A_REAL_VALUE"
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_slot(d)
+
+
+class SpeedTypeTests(unittest.TestCase):
+    """The `speed` object is decoder-family-shaped: V5DCC/V5MULT carry all 13 model fields, V4 the
+    7-item subset (no BRK2/BRK3, no load CVs). Mirrors cst-speed.c's per-TYPE descriptors and
+    speedResetModel()/speedItemInert()."""
+
+    V4_DROPPED = {"BRK2", "BRK3", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN"}
+
+    def _slot_with_speed(self, speed):
+        d = _valid_slot_dict("PULSE")
+        d["speed"] = speed
+        return d
+
+    def test_v5mult_round_trips_like_v5dcc(self):
+        for tname in ("V5DCC", "V5MULT"):
+            d = self._slot_with_speed(_valid_speed(tname))
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["speed"], d["speed"])
+            self.assertEqual(len(decoded["speed"]), 19)
+
+    def test_v4_speed_has_only_its_seven_model_fields(self):
+        d = self._slot_with_speed(_valid_speed("V4"))
+        decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+        self.assertEqual(decoded["speed"], d["speed"])
+        self.assertEqual(set(decoded["speed"]) & self.V4_DROPPED, set())
+        self.assertEqual(len(decoded["speed"]), 13)
+
+    def test_encoding_v4_forces_dropped_slots_inert(self):
+        d = self._slot_with_speed(_valid_speed("V4"))
+        encoded = slot_codec.encode_slot(d)
+        for key, inert in layout.SPEED_MODEL_INERT.items():
+            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], inert,
+                             "%s should be inert (%d) for a V4 slot" % (key, inert))
+
+    def test_decoding_v4_type_byte_yields_v4_shape(self):
+        # A raw image whose TYPE byte says V4 decodes to the 13-field shape regardless of what the
+        # dropped slots hold.
+        raw = bytearray(b"\xFF" * layout.CONFIG_SIZE)
+        raw[layout.EE_SPEED_TYPE] = layout.SPEED_TYPE_V4
+        raw[layout.SPEED_FIELD_OFFSET["BRK2"]] = 90   # stale value the V4 shape must not surface
+        speed = slot_codec.decode_slot(bytes(raw), source={})["speed"]
+        self.assertEqual(speed["TYPE"], "V4")
+        self.assertNotIn("BRK2", speed)
+        self.assertEqual(len(speed), 13)
+
+    def test_v4_slot_rejects_a_dropped_field(self):
+        speed = _valid_speed("V4")
+        speed["BRK2"] = 70
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(self._slot_with_speed(speed))
+
+    def test_flat_v4_backup_needs_import_old_then_round_trips(self):
+        # A pre-split flat backup (all 19 fields) with TYPE hand-changed to V4: rejected on a plain
+        # import, accepted with --import-old (the inapplicable fields ignored, slots forced inert).
+        flat = _valid_speed("V5DCC")
+        flat["TYPE"] = "V4"
+        d = self._slot_with_speed(flat)
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+        encoded = slot_codec.encode_slot(d, allow_missing=True)
+        for key, inert in layout.SPEED_MODEL_INERT.items():
+            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], inert)
+        decoded = slot_codec.decode_slot(encoded, source=d["source"])
+        self.assertEqual(decoded["speed"], _valid_speed("V4"))
 
 
 class AirbrakeFieldTests(unittest.TestCase):

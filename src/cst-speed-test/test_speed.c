@@ -483,13 +483,13 @@ static void sc_type_v5dcc(void)
 	traceClose();
 }
 
-static void sc_type_v4v5mult(void)
+static void sc_type_v5mult(void)
 {
 	cfgDefaults();
-	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4V5MULT);   /* 0.25 multiplier - ~3.6x faster */
+	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V5MULT);   /* 0.25 multiplier - ~3.6x faster */
 	resetSpeed();
-	traceOpen("type_v4v5mult",
-	          "TYPE V4V5MULT (0.25 multiplier), otherwise defaults",
+	traceOpen("type_v5mult",
+	          "TYPE V5MULT (0.25 multiplier), otherwise defaults",
 	          "cmd=60 to tick 180 (settle), then Brake1 held - compare against type_v5dcc");
 	Inputs in = {0};
 	in.cmd = 60;
@@ -497,6 +497,83 @@ static void sc_type_v4v5mult(void)
 	in.b1 = 1;
 	runPhase(t, 320, &in);
 	traceClose();
+}
+
+/* V4 shares the V5 MultiProtocol model and multiplier; speedResetModel() forces the parameters it
+ * drops (BRK2/BRK3, the load CVs) inert. With Brake1 alone this trace must come out byte-identical to
+ * type_v5mult - main() asserts exactly that. */
+static void sc_type_v4(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4);
+	speedResetModel(SPEED_TYPE_V5DCC, SPEED_TYPE_V4);   /* BRK2/BRK3 -> 0, loads -> neutral */
+	resetSpeed();
+	traceOpen("type_v4",
+	          "TYPE V4 (V5MULT model, BRK2/BRK3 and load CVs inert)",
+	          "cmd=60 to tick 180 (settle), then Brake1 held - byte-identical to type_v5mult");
+	Inputs in = {0};
+	in.cmd = 60;
+	int t = runPhase(0, 180, &in);
+	in.b1 = 1;
+	runPhase(t, 320, &in);
+	traceClose();
+}
+
+/* Proof that V4 ignores the parameters it drops: Brake1+2+3 all held and Optional Load engaged, yet
+ * the speed column must still track type_v5mult (brakeSum stays BRK1 only, applyLoad is a no-op). If
+ * the inert- isation regressed, brakeSum would hit the 255 cap and the loco would stop almost at once. */
+static void sc_type_v4_extras_noop(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4);
+	speedSet(SPEED_ITEM_OPLOAD, 200);                   /* a real value - must still read as inert */
+	speedResetModel(SPEED_TYPE_V5DCC, SPEED_TYPE_V4);
+	resetSpeed();
+	traceOpen("type_v4_extras_noop",
+	          "TYPE V4, OPLOAD 200 set; Brake1+2+3 + Optional Load all asserted",
+	          "cmd=60 settle, then Brake1+2+3 held - speed column tracks type_v5mult (extras no-op)");
+	Inputs in = {0};
+	in.cmd = 60;
+	in.opload = 1;
+	int t = runPhase(0, 180, &in);
+	in.b1 = in.b2 = in.b3 = 1;
+	runPhase(t, 320, &in);
+	traceClose();
+}
+
+/* Walk the data rows (lines not starting with '#') of two generated traces in lockstep. mode 0
+ * compares the whole row; mode 1 compares only the q8 speed column (token 4: tick cmd flags q8 ...).
+ * Used to assert an invariant the reference files alone cannot express. */
+static int tracesAgree(const char *nameA, const char *nameB, int q8Only)
+{
+	char pa[512], pb[512];
+	snprintf(pa, sizeof pa, "%s/%s.txt", g_outdir, nameA);
+	snprintf(pb, sizeof pb, "%s/%s.txt", g_outdir, nameB);
+	FILE *fa = fopen(pa, "r"), *fb = fopen(pb, "r");
+	if (!fa || !fb) { if (fa) fclose(fa); if (fb) fclose(fb); return 0; }
+	char la[256], lb[256];
+	int ok = 1, rows = 0;
+	while (ok)
+	{
+		char *ra, *rb;
+		do { ra = fgets(la, sizeof la, fa); } while (ra && '#' == la[0]);
+		do { rb = fgets(lb, sizeof lb, fb); } while (rb && '#' == lb[0]);
+		if (!ra && !rb) break;
+		if (!ra || !rb) { ok = 0; break; }
+		if (q8Only)
+		{
+			int ta, ca; unsigned qa; char fa8[32];
+			int tb, cb; unsigned qb; char fb8[32];
+			if (sscanf(la, "%d %d %31s %u", &ta, &ca, fa8, &qa) != 4 ||
+			    sscanf(lb, "%d %d %31s %u", &tb, &cb, fb8, &qb) != 4 || qa != qb)
+				ok = 0;
+		}
+		else if (strcmp(la, lb) != 0)
+			ok = 0;
+		rows++;
+	}
+	fclose(fa); fclose(fb);
+	return ok && rows > 0;
 }
 
 int main(int argc, char **argv)
@@ -521,8 +598,26 @@ int main(int argc, char **argv)
 	sc_decel_cv230();
 	sc_maxspeed_120_kmh();
 	sc_type_v5dcc();
-	sc_type_v4v5mult();
+	sc_type_v5mult();
+	sc_type_v4();
+	sc_type_v4_extras_noop();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
-	return 0;
+
+	/* Invariant: V4 runs the V5 MultiProtocol model exactly. type_v4 (Brake1 only) is byte-for-byte
+	 * type_v5mult; type_v4_extras_noop (Brake1+2+3 + Optional Load) still tracks its speed column. */
+	int inv = tracesAgree("type_v4", "type_v5mult", 0)
+	       && tracesAgree("type_v4_extras_noop", "type_v5mult", 1);
+
+	/* speedApplyTypeInert() (the readConfig() guard) neutralises a stale value in a dropped slot. */
+	cfgDefaults();
+	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4);
+	speedSet(SPEED_ITEM_BRAKE2, 90);
+	speedSet(SPEED_ITEM_OPLOAD, 200);
+	speedApplyTypeInert();
+	int guard = (0 == speedGet(SPEED_ITEM_BRAKE2)) && (128 == speedGet(SPEED_ITEM_OPLOAD));
+
+	printf("invariant  V4 model == V5MULT model:   %s\n", inv ? "PASS" : "FAIL");
+	printf("invariant  speedApplyTypeInert() V4:   %s\n", guard ? "PASS" : "FAIL");
+	return (inv && guard) ? 0 : 1;
 }

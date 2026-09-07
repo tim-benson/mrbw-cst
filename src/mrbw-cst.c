@@ -1346,6 +1346,7 @@ void readConfig(void)
 	speedSet(SPEED_ITEM_DECEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_TARGET,     readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT));
+	speedApplyTypeInert();  // V4 has no CV180/CV181/CV103/CV104 - force those inert whatever is stored
 
 	// AIRBRAKE per-profile model config (src/cst-pressure.c)
 	airbrakeSet(AIRBRAKE_CHARGED,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_CHARGED,     AIRBRAKE_CHARGED_DEFAULT));
@@ -3405,7 +3406,7 @@ int main(void)
 						}
 					}
 					else if(SPEED_ITEM_TYPE == speedItem)
-						lcd_puts((SPEED_TYPE_V4V5MULT == speedVal) ? "V4V5MULT" : "V5DCC   ");
+						lcd_puts(speedTypeName(speedVal));  // 8-char padded, fills the row
 					else
 						printDec3Dig(speedVal);
 
@@ -3423,11 +3424,19 @@ int main(void)
 										speedVal++;
 									speedSet(speedItem, speedVal);
 								}
+								else if(SPEED_ITEM_TYPE == speedItem)
+								{
+									// Cycle 0..SPEED_TYPE_COUNT-1; a TYPE change re-inits the model params.
+									if(speedVal < SPEED_TYPE_COUNT - 1)
+									{
+										speedSet(SPEED_ITEM_TYPE, speedVal + 1);
+										speedResetModel(speedVal, speedVal + 1);
+									}
+								}
 								else
 								{
-									// UNIT is a 0/1 toggle; TYPE cycles 0..SPEED_TYPE_COUNT-1; the rest clamp at 255.
-									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1 :
-									                   (SPEED_ITEM_TYPE == speedItem) ? (SPEED_TYPE_COUNT - 1) : 255;
+									// UNIT is a 0/1 toggle; the rest clamp at 255.
+									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1 : 255;
 									if(speedVal < speedMax)
 										speedSet(speedItem, speedVal + 1);
 								}
@@ -3446,9 +3455,17 @@ int main(void)
 										speedVal--;
 									speedSet(speedItem, speedVal);
 								}
+								else if(SPEED_ITEM_TYPE == speedItem)
+								{
+									if(speedVal > 0)
+									{
+										speedSet(SPEED_ITEM_TYPE, speedVal - 1);
+										speedResetModel(speedVal, speedVal - 1);
+									}
+								}
 								else
 								{
-									// UNIT and TYPE step down toward 0 (MPH / the first TYPE); the rest clamp at 0.
+									// UNIT steps down toward 0 (MPH); the rest clamp at 0.
 									if(speedVal > 0)
 										speedSet(speedItem, speedVal - 1);
 								}

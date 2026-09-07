@@ -1,5 +1,5 @@
-# scenario: type_v4v5mult
-# config:   TYPE V4V5MULT (0.25 multiplier), otherwise defaults
+# scenario: type_v5mult
+# config:   TYPE V5MULT (0.25 multiplier), otherwise defaults
 # inputs:   cmd=60 to tick 180 (settle), then Brake1 held - compare against type_v5dcc
 #
 #  tick  cmd  flags(EHS123OP)      q8   display

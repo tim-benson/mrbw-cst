@@ -26,7 +26,11 @@ UNSET = "UNSET"
 # --import-old. (DISPLAY was added to the airbrake section after v3 without a bump - the feature has
 # only ever run on one test throttle, nothing in the wild; an older export whose airbrake object lacks
 # DISPLAY needs --import-old on a plain import.)
-SLOT_SCHEMA_VERSION = 3
+# 4: the `speed` object is now decoder-family-shaped - it carries the 6 type-agnostic fields plus only
+# the model fields the TYPE uses (V4 drops BRK2/BRK3 and the load CVs). A pre-4 flat backup (all 19
+# fields) still imports without --import-old for a V5DCC/V5MULT TYPE (identical field set); a hand-set
+# V4 TYPE on a flat backup needs --import-old to ignore the inapplicable fields.
+SLOT_SCHEMA_VERSION = 4
 
 
 class SlotValidationError(ValueError):
@@ -278,9 +282,13 @@ def _encode_options(d, errors, allow_missing=False):
 # --- speed ---
 
 def _decode_speed(raw):
+    # The TYPE byte picks the decoder family, which decides which model fields the object carries
+    # (V4 drops BRK2/BRK3 and the load CVs). An unset or unrecognised TYPE falls back to the full V5
+    # field set, matching speedType()'s clamp-to-default in the firmware.
+    type_name = layout.SPEED_TYPE_TO_NAME.get(raw[layout.EE_SPEED_TYPE])
     out = {}
-    for key, offset in layout.SPEED_FIELDS:
-        val = raw[offset]
+    for key in layout.speed_fields_for_type(type_name):
+        val = raw[layout.SPEED_FIELD_OFFSET[key]]
         if val == 0xFF:
             out[key] = UNSET
         elif key == "UNIT":
@@ -311,18 +319,34 @@ def _encode_watched_fn(value, errors, field_label):
 def _encode_speed(d, errors, allow_missing=False):
     """allow_missing=True defaults an absent speed field to 0xFF/"UNSET" - the existing sentinel meaning
     "let the firmware's own readByteOrDefault() self-heal this on next load" (already the fallback value
-    used below on any invalid field regardless of this flag - allow_missing only decides whether a
-    genuinely ABSENT key also raises)."""
+    used below on any invalid field regardless of this flag). allow_missing also relaxes the "not a
+    field of this TYPE" check, so a pre-split flat backup (all 19 fields, TYPE hand-set to V4)
+    round-trips with --import-old - the inapplicable fields are ignored and the slots forced inert."""
     if not isinstance(d, dict):
         errors.append("speed: must be an object")
         d = {}
-    known_keys = {key for key, _ in layout.SPEED_FIELDS}
-    unknown = set(d.keys()) - known_keys
-    for key in unknown:
-        errors.append("speed.%s: unknown field" % key)
+
+    # Resolve the decoder family from TYPE - it decides which model fields apply.
+    type_raw = d.get("TYPE")
+    if type_raw in layout.SPEED_TYPE_FROM_NAME:
+        type_name = type_raw
+    elif type_raw in (UNSET, None):
+        type_name = None                       # validate against the full V5 field set
+    else:
+        errors.append("speed.TYPE: must be one of %s or \"UNSET\"" % sorted(layout.SPEED_TYPE_FROM_NAME))
+        type_name = None
+
+    expected = layout.speed_fields_for_type(type_name)
+    expected_set = set(expected)
+    for key in set(d.keys()) - expected_set:
+        if key not in layout.SPEED_FIELD_OFFSET:
+            errors.append("speed.%s: unknown field" % key)
+        elif not allow_missing:
+            errors.append("speed.%s: not a field of TYPE %s" % (key, type_raw))
 
     out = {}
-    for key, offset in layout.SPEED_FIELDS:
+    for key in expected:
+        offset = layout.SPEED_FIELD_OFFSET[key]
         if key not in d:
             if not allow_missing:
                 errors.append("speed.%s: missing" % key)
@@ -339,11 +363,7 @@ def _encode_speed(d, errors, allow_missing=False):
             else:
                 out[offset] = layout.SPEED_UNIT_FROM_NAME[val]
         elif key == "TYPE":
-            if val not in layout.SPEED_TYPE_FROM_NAME:
-                errors.append("%s: must be one of %s" % (label, sorted(layout.SPEED_TYPE_FROM_NAME)))
-                out[offset] = 0
-            else:
-                out[offset] = layout.SPEED_TYPE_FROM_NAME[val]
+            out[offset] = layout.SPEED_TYPE_FROM_NAME.get(val, 0xFF)  # UNSET/invalid already flagged above
         elif key in layout.SPEED_WATCHED_FN_FIELDS:
             out[offset] = _encode_watched_fn(val, errors, label)
         else:
@@ -354,6 +374,12 @@ def _encode_speed(d, errors, allow_missing=False):
                 out[offset] = 0
             else:
                 out[offset] = val
+
+    # Model slots this family does not use -> inert (mirrors speedItemInert() in cst-speed.c), so a V4
+    # image is byte-identical to what the firmware writes after speedResetModel().
+    for key, inert in layout.SPEED_MODEL_INERT.items():
+        if key not in expected_set:
+            out[layout.SPEED_FIELD_OFFSET[key]] = inert
     return out
 
 
@@ -532,7 +558,9 @@ def describe_missing_fields(d):
                 notices.append("functions.%s: not in file, defaulting to RAW:0xFF" % key)
     speed = d.get("speed")
     if isinstance(speed, dict):
-        for key, _offset in layout.SPEED_FIELDS:
+        type_raw = speed.get("TYPE")
+        type_name = type_raw if type_raw in layout.SPEED_TYPE_FROM_NAME else None
+        for key in layout.speed_fields_for_type(type_name):
             if key not in speed:
                 notices.append("speed.%s: not in file, defaulting to UNSET" % key)
     airbrake = d.get("airbrake")

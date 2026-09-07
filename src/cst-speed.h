@@ -68,16 +68,20 @@ enum
 #define SPEED_STOP_WATCH_FN_OFF        255
 #define SPEED_STOP_WATCH_FN_DEFAULT    SPEED_STOP_WATCH_FN_OFF
 
-// Decoder family momentum multiplier used by ticksToCross()/brakeTicksToCross() in cst-speed.c. Values
-// are the real multiplier x1000. 896 = NMRA S9.2.2's standard 0.896 - this is the exception, specific to
-// ESU LokSound 5 DCC (non-MultiProtocol) only. 250 = 0.25, used by everything else: LokPilot/LokSound V4
-// decoders AND LokSound/LokPilot V5 MultiProtocol decoders - per the ESU manual's own CV3 description,
-// 0.25 is the general-case unit, with LokSound 5 DCC singled out as using 0.896 instead.
+// Decoder families. The momentum multiplier (x1000) feeds ticksToCross()/brakeTicksToCross(): 896 is
+// NMRA S9.2.2's 0.896, specific to ESU LokSound 5 DCC (non-MultiProtocol); 250 is the general-case
+// 0.25 the ESU manual gives for CV3, used by LokPilot/LokSound V4 and by LokSound/LokPilot V5
+// MultiProtocol. SPEED_TYPE_V5MULT keeps the value (1) that was SPEED_TYPE_V4V5MULT - the split is a
+// rename plus a genuinely new SPEED_TYPE_V4 (2), so a stored TYPE of 1 keeps its exact behaviour.
+// V4 shares the V5 MultiProtocol model and multiplier and differs only in which parameters it exposes:
+// it drops BRK2/BRK3 and the load CVs (a V4 decoder has no CV180/CV181/CV103/CV104), which
+// speedResetModel()/speedApplyTypeInert() force inert, so the model math needs no per-type branch.
 #define SPEED_TYPE_V5DCC                 0
-#define SPEED_TYPE_V4V5MULT              1
+#define SPEED_TYPE_V5MULT               1
+#define SPEED_TYPE_V4                    2
 #define SPEED_TYPE_DEFAULT               SPEED_TYPE_V5DCC
 #define SPEED_MULTIPLIER_V5DCC          896
-#define SPEED_MULTIPLIER_V4V5MULT       250
+#define SPEED_MULTIPLIER_V5MULT         250   // and SPEED_TYPE_V4
 
 // Optional/Primary Load CVs (decoder CV103/CV104 mirrors) - a 0-255 value, 128 = neutral, that scales
 // both CV3 (accel) and CV4 (decel/brake) while its watched DCC function is active - see cst-speed.c's
@@ -224,17 +228,31 @@ enum
 // the same thing for every family and always show first, in this order: TYPE, MAXSPEED, UNIT,
 // ACCEL, DECEL, BRK1. Everything after them is a model parameter whose presence and menu order come
 // from the family's descriptor in cst-speed.c; speedItemAt() walks that descriptor to map a menu
-// position to a SPEED_ITEM_*. In this revision both ESU types carry the identical model-parameter
-// set and differ only in the momentum multiplier - splitting V4V5MULT into separate V5
-// MultiProtocol and V4 descriptors (V4 drops BRK2/BRK3 and the load CVs) is a later step.
-#define SPEED_TYPE_COUNT                 2
+// position to a SPEED_ITEM_*. V5DCC and V5MULT carry the identical 13-parameter model set (only the
+// multiplier differs); V4 carries a 7-parameter subset (see the SPEED_TYPE_* comment above).
+#define SPEED_TYPE_COUNT                 3
 
 uint8_t speedType(void);
+
+// 8-char padded display label for a TYPE (fills the LCD row); clamps an out-of-range type to the
+// default. The PC tooling keeps its own type-name map.
+const char *speedTypeName(uint8_t type);
 
 // Map a 1-based SPEED_CONFIG_SCREEN position to a SPEED_ITEM_*, for the current TYPE and the ADV
 // FUNC state (which reveals the four correction tunables). Returns SPEED_ITEM_COUNT once pos is
 // past the last visible item - the menu-wrap sentinel.
 uint8_t speedItemAt(uint8_t pos, uint8_t advFunc);
+
+// Call when TYPE changes (old -> new): a model parameter the new family does not use is set inert
+// (so the model ignores it and the export hides it); one the new family gains that the old lacked
+// is set to its default (a fresh start, not the stale value from the last time this family was
+// picked). V5DCC <-> V5MULT is a no-op - identical parameter sets.
+void speedResetModel(uint8_t oldType, uint8_t newType);
+
+// Force the current TYPE's inapplicable model parameters inert, regardless of what is stored - a
+// one-shot guard called from readConfig() so a hand-edited or pre-split EEPROM cannot feed the
+// model a value the current family should ignore.
+void speedApplyTypeInert(void);
 
 void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t brake2Active,
                       uint8_t brake3Active, uint8_t emergencyActive, uint8_t watchedFunctionActive,

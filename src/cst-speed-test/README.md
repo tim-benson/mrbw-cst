@@ -8,10 +8,13 @@ A host-compiled regression net for the scale-speed simulation in `../cst-speed.c
 `test_speed.c` compiles `../cst-speed.c` natively (plain `cc`, not `avr-gcc`) and
 drives the real `updateSpeed10Hz()` model through a fixed set of scenarios -
 standing starts, coast-downs, the three stacked brakes, e-stop, Drive Hold, Start
-Delay, the load CVs, CV sweeps, and the two decoder types. Every 10 Hz tick it
-records the internal `simSpeedStepQ8` value and the `printSpeed()` render into a
-plain-text **trace**, one file per scenario. Those traces are compared
-byte-for-byte against the checked-in copies under `reference/`.
+Delay, the load CVs, CV sweeps, and the decoder families (V5DCC / V5MULT / V4).
+Every 10 Hz tick it records the internal `simSpeedStepQ8` value and the
+`printSpeed()` render into a plain-text **trace**, one file per scenario. Those
+traces are compared byte-for-byte against the checked-in copies under
+`reference/`. `main()` also asserts one cross-scenario invariant it prints as a
+`PASS`/`FAIL` line - that the V4 model equals the V5MultiProtocol model with its
+dropped parameters no-oped - and exits non-zero if it fails.
 
 A difference means the model output moved. Either it is an intended change (a new
 correction term, a tuned default, a genuine behaviour fix) and the reference is
