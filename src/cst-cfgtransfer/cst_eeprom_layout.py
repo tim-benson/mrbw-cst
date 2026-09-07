@@ -172,35 +172,41 @@ NOTCH_SPEEDSTEP_COUNT = 8
 NOTCH_SPEEDSTEP_MIN = 1
 NOTCH_SPEEDSTEP_MAX = 126
 
+# SPEED group 1 - decoder-type-agnostic (same meaning for every TYPE, original scattered addresses).
 EE_MOMENTUM_ACCEL_CV3 = 0x28
 EE_MOMENTUM_BRAKE1_CV179 = 0x2B
-EE_MOMENTUM_BRAKE2_CV180 = 0x2C
-EE_MOMENTUM_BRAKE3_CV181 = 0x2D
 EE_MOMENTUM_DECEL_CV4 = 0x2E
-EE_MOMENTUM_START_DELAY = 0x2F
 
 EE_STACK_BAND_COMBOS = 0x34  # 5 bytes, bands 1-5 (band 0 fixed/not stored)
 EE_SPEED_MAX_MPH = 0x39
 EE_SPEED_UNIT_KMH = 0x3A
-EE_SPEED_STOP_WATCH_FN = 0x3B
 EE_SPEED_TYPE = 0x3C
-EE_SPEED_OPLOAD = 0x3D
-EE_SPEED_PRLOAD = 0x3E
-EE_SPEED_OPLOAD_FN = 0x3F
-EE_SPEED_PRLOAD_FN = 0x40
 EE_STACK_BAND_COMBOS_3STEP = 0x41  # 3 bytes, bands 1-3
-EE_SPEED_HOLD_WATCH_FN = 0x44
-EE_SPEED_DECEL_THRESHOLD = 0x45
-EE_SPEED_DECEL_PCT = 0x46
-EE_SPEED_ACCEL_PCT = 0x47
-EE_SPEED_ACCEL_TARGET = 0x48
+
+# SPEED group 2 - decoder-type-specific model parameters, contiguous EE_SPEED_MODEL_PAYLOAD block
+# (0x54-0x63, 13 used + 0x61-0x63 reserved). Moved here from scattered holes in 0x2C-0x48 by the
+# EEPROM_LAYOUT_VERSION 2->3 migration. Which of these a TYPE uses is a firmware-descriptor concern
+# (cst-speed.c); the codec just mirrors every slot.
+EE_SPEED_MODEL_PAYLOAD = 0x54
+EE_MOMENTUM_BRAKE2_CV180 = 0x54
+EE_MOMENTUM_BRAKE3_CV181 = 0x55
+EE_MOMENTUM_START_DELAY = 0x56
+EE_SPEED_HOLD_WATCH_FN = 0x57
+EE_SPEED_STOP_WATCH_FN = 0x58
+EE_SPEED_OPLOAD = 0x59
+EE_SPEED_OPLOAD_FN = 0x5A
+EE_SPEED_PRLOAD = 0x5B
+EE_SPEED_PRLOAD_FN = 0x5C
+EE_SPEED_ACCEL_PCT = 0x5D
+EE_SPEED_ACCEL_TARGET = 0x5E
+EE_SPEED_DECEL_PCT = 0x5F
+EE_SPEED_DECEL_THRESHOLD = 0x60
 
 # AIRBRAKE per-profile air-brake model config (src/cst-pressure.c / AIRBRAKE_CONFIG_SCREEN), raw
 # 0-255 bytes, all self-healing via readByteOrDefault(). 0x49 is EE_HORN2_FUNCTION and 0x52 is
 # EE_COMPRESSOR2_FUNCTION (both in FUNCTION_FIELDS - wedged in this block because the 0x30 function
-# region is fully packed). The SPEED (0x3C-0x48) and AIRBRAKE (0x4A-0x53) bytes were repacked
-# contiguous - the single-byte holes left by fields removed during development are gone, so 0x00-0x53
-# is now fully packed; 0x54-0x7F is per-slot padding.
+# region is fully packed). AIRBRAKE occupies 0x4A-0x53, the SPEED model payload 0x54-0x63; the SPEED
+# group-1 holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 are free. 0x64-0x7F is per-slot padding.
 EE_AIRBRAKE_CHARGED = 0x4A
 EE_AIRBRAKE_MR_CUTIN = 0x4B
 EE_AIRBRAKE_MR_CUTOUT = 0x4C

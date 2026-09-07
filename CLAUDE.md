@@ -476,7 +476,16 @@ Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=5
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
 
-### Reference-trace test
+### EEPROM layout and the reference-trace test
+
+The 6 type-agnostic `SPEED` items keep their original scattered addresses (`ACCEL`/`DECEL`/`BRK1` in the
+gaps left by `EE_BK2_FUNCTION`/`EE_BK3_FUNCTION`, `MAXSPEED`/`UNIT`/`TYPE` after `EE_STACK_BAND_COMBOS`).
+The 13 decoder-type-specific model parameters live in one contiguous block, `EE_SPEED_MODEL_PAYLOAD`
+(`0x54-0x63`, 13 used with `0x61-0x63` reserved). The `EEPROM_LAYOUT_VERSION` 2 -> 3 migration in
+`readConfig()` **relocates** the model parameters into this block from their former scattered holes
+rather than resetting them: a layout-2 throttle keeps every tuned value (the migration copies each byte
+from its old offset across all 20 profiles plus the working config), a stock or pre-guard chip gets
+model defaults, a blank chip self-heals. No backup or re-import is needed for that upgrade.
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
@@ -642,12 +651,12 @@ revert on the next load. `FULL SVC`/`VENT`/`EMRG VNT`/`APPLY`/`DRV LOAD` used to
 all removed (see above and the model description) since none were ever usefully varied per-loco, or
 were superseded by deriving/reusing a value that already exists elsewhere.
 
-A layout change here needs the usual `EEPROM_LAYOUT_VERSION` bump (see the maintenance checklist).
-SPEED and AIRBRAKE config share one packed per-slot region (`0x3C-0x53`, with the `HORN2` and
-`COMPRESSOR2` function slots between them); the layout migration in `readConfig()` force-resets that
-whole region to defaults in every profile plus the working config on a version upgrade, so a
-configured throttle should be exported with `cst_cfgtransfer.py` before upgrading and re-imported
-afterward.
+A layout change here needs the usual `EEPROM_LAYOUT_VERSION` bump (see the maintenance checklist). The
+`AIRBRAKE CFG` bytes occupy `0x4A-0x53` (with the `HORN2` and `COMPRESSOR2` function slots at `0x49`/
+`0x52`); the SPEED model payload follows at `0x54-0x63`. The layout 1 -> 2 migration in `readConfig()`
+force-resets the `AIRBRAKE` region to defaults on a version upgrade, so a configured throttle should be
+exported with `cst_cfgtransfer.py` before an `AIRBRAKE`-layout upgrade and re-imported afterward — the
+later SPEED 2 -> 3 migration, by contrast, relocates rather than resets (see the SPEED section).
 
 **AIRBRAKE screen** (`AIRBRAKE_SCREEN`; reached from the top-level menu when `AIRBRAKE` is on, or any
 time via a control set to `FN_AIRBRAKE`): a read-only viewport into the always-running model — it

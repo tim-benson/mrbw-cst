@@ -1072,6 +1072,57 @@ void readConfig(void)
 			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x3C + k), repackDefault[k]);
 	}
 
+	// EEPROM_LAYOUT_VERSION 2 -> 3: the 13 decoder-type-specific SPEED model parameters (BRK2/BRK3/
+	// DELAY, HOLDFN/STOPFN, the load CVs and their watch functions, the four correction tunables) moved
+	// out of their scattered holes in 0x2C-0x48 into the contiguous EE_SPEED_MODEL_PAYLOAD block at
+	// 0x54-0x63 - see cst-eeprom.h. The 6 type-agnostic SPEED items (ACCEL/DECEL/BRK1/MAXSPEED/UNIT/
+	// TYPE) did not move. A blank chip reads 0xFF (255, not < 3) here and is skipped - every field
+	// self-heals via readByteOrDefault.
+	if(2 == oldLayoutVersion)
+	{
+		// Layout 2 has a real per-profile SPEED model config. Relocate every value in place - the new
+		// payload byte at 0x54+k takes the value from this profile's old scattered offset - so the
+		// upgrade preserves all tuning and needs no backup/restore. v3ModelSrc[k] is the pre-move
+		// offset for new payload byte 0x54+k (BRK2, BRK3, DELAY, HOLDFN, STOPFN, OPLOAD, OPLOADFN,
+		// PRLOAD, PRLOADFN, ACCPCT, ACCTGT, DECPCT, DECTHR). 0x61-0x63 stay as-is (reserved).
+		static const uint8_t v3ModelSrc[13] = {
+			0x2C, 0x2D, 0x2F, 0x44, 0x3B, 0x3D, 0x3F, 0x3E, 0x40, 0x47, 0x48, 0x46, 0x45 };
+		uint8_t s, k;
+		for(s = 1; s <= MAX_CONFIGS; s++)
+		{
+			wdt_reset();
+			for(k = 0; k < sizeof(v3ModelSrc); k++)
+				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x54 + k),
+				                  eeprom_read_byte((uint8_t*)(CONFIG_OFFSET(s) + v3ModelSrc[k])));
+		}
+		wdt_reset();
+		for(k = 0; k < sizeof(v3ModelSrc); k++)
+			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x54 + k),
+			                  eeprom_read_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + v3ModelSrc[k])));
+	}
+	else if(oldLayoutVersion < 2)
+	{
+		// A stock/pre-guard chip has no fork SPEED model config, and its bytes at the old scattered
+		// offsets are not meaningful - default the 13 payload bytes (0x54-0x60). 0x61-0x63 are reserved
+		// and left as read (0xFF on an erased chip; a future field self-heals via readByteOrDefault).
+		static const uint8_t speedModelDefault[13] = {
+			MOMENTUM_BRAKE2_CV180_DEFAULT, MOMENTUM_BRAKE3_CV181_DEFAULT, MOMENTUM_START_DELAY_DEFAULT,
+			SPEED_HOLD_WATCH_FN_DEFAULT, SPEED_STOP_WATCH_FN_DEFAULT,
+			SPEED_OPLOAD_DEFAULT, SPEED_OPLOAD_FN_DEFAULT, SPEED_PRLOAD_DEFAULT, SPEED_PRLOAD_FN_DEFAULT,
+			SPEED_ACCEL_PCT_DEFAULT, SPEED_ACCEL_TARGET_DEFAULT,
+			SPEED_DECEL_PCT_DEFAULT, SPEED_DECEL_THRESHOLD_DEFAULT };
+		uint8_t s, k;
+		for(s = 1; s <= MAX_CONFIGS; s++)
+		{
+			wdt_reset();
+			for(k = 0; k < sizeof(speedModelDefault); k++)
+				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x54 + k), speedModelDefault[k]);
+		}
+		wdt_reset();
+		for(k = 0; k < sizeof(speedModelDefault); k++)
+			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x54 + k), speedModelDefault[k]);
+	}
+
 
 	update_decisecs = (uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_L) | (((uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_H)) << 8);
 	if(update_decisecs < UPDATE_DECISECS_MIN)

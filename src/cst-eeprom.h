@@ -11,7 +11,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          2
+#define EEPROM_LAYOUT_VERSION          3
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -117,50 +117,27 @@
 //      EE_STACK_BAND_COMBOS           0x37
 //      EE_STACK_BAND_COMBOS           0x38
 
-// Scale-speed simulation config (src/cst-speed.c), raw 0-255 values. The 6 CV-mirror fields directly
-// mirror the loco's ESU LokSound V5 "momentum" CVs (CV3/CV4/CV179/CV180/CV181/CV167 - momentum is the
-// correct NMRA/ESU term for these specific CVs) and reuse the isolated single-byte gaps left by
-// EE_BK2_FUNCTION/EE_BK3_FUNCTION above; the other 3 fields (display max/unit/e-stop watch) are
-// unrelated to momentum and take the next free bytes after EE_STACK_BAND_COMBOS.
-#define EE_MOMENTUM_ACCEL_CV3         (0x28 + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV3
-#define EE_MOMENTUM_BRAKE1_CV179      (0x2B + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV179
-#define EE_MOMENTUM_BRAKE2_CV180      (0x2C + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV180
-#define EE_MOMENTUM_BRAKE3_CV181      (0x2D + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV181
-#define EE_MOMENTUM_DECEL_CV4         (0x2E + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV4
-#define EE_MOMENTUM_START_DELAY       (0x2F + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV167
-#define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126
-#define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH
-#define EE_SPEED_STOP_WATCH_FN        (0x3B + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
-#define EE_SPEED_TYPE                 (0x3C + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_V5DCC/_V4V5MULT
-#define EE_SPEED_OPLOAD               (0x3D + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV103
-#define EE_SPEED_PRLOAD               (0x3E + CONFIG_OFFSET(WORKING_CONFIG))  // mirrors decoder CV104
-#define EE_SPEED_OPLOAD_FN            (0x3F + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
-#define EE_SPEED_PRLOAD_FN            (0x40 + CONFIG_OFFSET(WORKING_CONFIG))  // watched DCC fn 0-28, 255=OFF
+// Scale-speed simulation config (src/cst-speed.c), raw 0-255 values, split in two groups.
+//
+// Group 1 - decoder-type-agnostic (6 bytes): these mean the same thing for every SPEED_TYPE and keep
+// their original scattered addresses. ACCEL/DECEL/BRK1 (CV3/CV4/CV179 mirrors - "momentum" is the
+// correct NMRA/ESU term) reuse the isolated single-byte gaps left by EE_BK2_FUNCTION/EE_BK3_FUNCTION;
+// MAX_MPH/UNIT/TYPE take the free bytes after EE_STACK_BAND_COMBOS.
+#define EE_MOMENTUM_ACCEL_CV3         (0x28 + CONFIG_OFFSET(WORKING_CONFIG))  // CV3, agnostic
+#define EE_MOMENTUM_BRAKE1_CV179      (0x2B + CONFIG_OFFSET(WORKING_CONFIG))  // CV179, agnostic
+#define EE_MOMENTUM_DECEL_CV4         (0x2E + CONFIG_OFFSET(WORKING_CONFIG))  // CV4, agnostic
+#define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126, agnostic
+#define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH, agnostic
+#define EE_SPEED_TYPE                 (0x3C + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_* - tags the decoder family
+//                                     0x2C 0x2D 0x2F  freed (were BRK2/BRK3/DELAY - see EE_SPEED_MODEL_PAYLOAD)
+//                                     0x3B 0x3D-0x40  freed (were STOPFN/OPLOAD/PRLOAD/OPLOADFN/PRLOADFN)
 
 // STACK brake mode's 3-STEP band->combo mapping, one byte per band 1-3 (band 0 is fixed to "none" and
 // isn't stored) - stored separately from EE_STACK_BAND_COMBOS (the 5-STEP variant), see that comment above.
 #define EE_STACK_BAND_COMBOS_3STEP    (0x41 + CONFIG_OFFSET(WORKING_CONFIG))
 //      EE_STACK_BAND_COMBOS_3STEP     0x42
 //      EE_STACK_BAND_COMBOS_3STEP     0x43
-
-// ESU Drive Hold: watched DCC function (0-28, 255=OFF) that freezes the speed simulation while active -
-// see cst-speed.c's updateSpeed10Hz(). Defaults to F09 (SPEED_HOLD_WATCH_FN_DEFAULT), not OFF like the
-// other watched-function fields, since Drive Hold should work out of the box.
-#define EE_SPEED_HOLD_WATCH_FN        (0x44 + CONFIG_OFFSET(WORKING_CONFIG))
-
-// Steady-state deceleration lag: raw speed-step threshold (0-126) below which no lag applies, and
-// 0-255=0-100% scale for the lag above it - approximates PID wind-up when decelerating from a genuine
-// steady state (no prior acceleration). See cst-speed.c's updateSpeed10Hz().
-#define EE_SPEED_DECEL_THRESHOLD      (0x45 + CONFIG_OFFSET(WORKING_CONFIG))
-#define EE_SPEED_DECEL_PCT            (0x46 + CONFIG_OFFSET(WORKING_CONFIG))
-
-// 0-255=0-100%, standing-start head-start correction - see cst-speed.c's updateSpeed10Hz().
-#define EE_SPEED_ACCEL_PCT            (0x47 + CONFIG_OFFSET(WORKING_CONFIG))
-
-// Target time-to-1mph, in ticks (0.1s/tick). See cst-speed.c's solveRampR0() and cst-speed.h's
-// SPEED_ACCEL_TARGET_DEFAULT for the full mechanism (a nonzero initial ramp slope solved to hit this
-// target exactly) and why this is a separate knob from ACCPCT.
-#define EE_SPEED_ACCEL_TARGET         (0x48 + CONFIG_OFFSET(WORKING_CONFIG))
+//                                     0x44-0x48  freed (were HOLDFN/DECTHR/DECPCT/ACCPCT/ACCTGT)
 
 // Horn2 (two-stage horn), per-profile DCC function assignment. hornThreshold2 (the calibration point
 // itself) is global, not per-profile - see EE_HORN_THRESHOLD2 above, alongside EE_HORN_THRESHOLD.
@@ -185,9 +162,30 @@
 #define EE_COMPRESSOR2_FUNCTION      (0x52 + CONFIG_OFFSET(WORKING_CONFIG))  // "COMPRSR2" - routine/staggered compressor event
 #define EE_AIRBRAKE_DISPLAY          (0x53 + CONFIG_OFFSET(WORKING_CONFIG))  // DUAL(0)/SINGLE(1) - see AIRBRAKE_DISPLAY
 
-// 0x54-0x7F: unused per-slot padding. SPEED and AIRBRAKE development each left freed single-byte
-// holes scattered through 0x3C-0x5C during their uncommitted iteration; those were repacked contiguous
-// (0x00-0x53 now fully packed). The EEPROM_LAYOUT_VERSION 1->2 migration in readConfig() force-resets
-// 0x3C-0x53 on every profile slot for a throttle coming from the last committed layout.
+// SPEED model payload (group 2): the 13 decoder-type-specific parameters, in one contiguous 16-byte
+// block (13 used, 0x61-0x63 reserved for future model params such as CV26/ADJUST). Which of these a
+// given SPEED_TYPE actually uses, and in what menu order, is decided by the per-family descriptor in
+// cst-speed.c (speedItemAt()); this is only their fixed storage. The EEPROM_LAYOUT_VERSION 2->3
+// migration in readConfig() relocates the parameters here from their former scattered offsets,
+// preserving every value for a layout-2 throttle (a stock/pre-guard chip gets model defaults).
+#define EE_SPEED_MODEL_PAYLOAD       (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // block base
+#define EE_MOMENTUM_BRAKE2_CV180     (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // CV180 mirror
+#define EE_MOMENTUM_BRAKE3_CV181     (0x55 + CONFIG_OFFSET(WORKING_CONFIG))  // CV181 mirror
+#define EE_MOMENTUM_START_DELAY      (0x56 + CONFIG_OFFSET(WORKING_CONFIG))  // CV167 mirror
+#define EE_SPEED_HOLD_WATCH_FN       (0x57 + CONFIG_OFFSET(WORKING_CONFIG))  // Drive Hold watched DCC fn, 255=OFF (default F09)
+#define EE_SPEED_STOP_WATCH_FN       (0x58 + CONFIG_OFFSET(WORKING_CONFIG))  // stop-trigger watched DCC fn, 255=OFF
+#define EE_SPEED_OPLOAD              (0x59 + CONFIG_OFFSET(WORKING_CONFIG))  // CV103 mirror (Optional Load)
+#define EE_SPEED_OPLOAD_FN           (0x5A + CONFIG_OFFSET(WORKING_CONFIG))  // OPLOAD watched DCC fn, 255=OFF
+#define EE_SPEED_PRLOAD              (0x5B + CONFIG_OFFSET(WORKING_CONFIG))  // CV104 mirror (Primary Load)
+#define EE_SPEED_PRLOAD_FN           (0x5C + CONFIG_OFFSET(WORKING_CONFIG))  // PRLOAD watched DCC fn, 255=OFF
+#define EE_SPEED_ACCEL_PCT           (0x5D + CONFIG_OFFSET(WORKING_CONFIG))  // 0-255=0-100%, standing-start head-start
+#define EE_SPEED_ACCEL_TARGET        (0x5E + CONFIG_OFFSET(WORKING_CONFIG))  // target ticks-to-1mph (0.1s/tick)
+#define EE_SPEED_DECEL_PCT           (0x5F + CONFIG_OFFSET(WORKING_CONFIG))  // 0-255=0-100%, steady-state decel-lag strength
+#define EE_SPEED_DECEL_THRESHOLD     (0x60 + CONFIG_OFFSET(WORKING_CONFIG))  // raw speed step below which decel-lag does not apply
+//      reserved                      0x61 - 0x63
+
+// 0x61-0x7F: per-slot space not yet in use - 0x61-0x63 reserved for future SPEED model params, the
+// rest padding. The old SPEED holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the
+// layout 2->3 model-parameter move) are also free to reuse.
 
 #endif
