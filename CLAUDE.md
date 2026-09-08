@@ -36,6 +36,8 @@ make size            # show flash/RAM usage (avr-size)
 make disasm          # objdump disassembly of the built .elf, for low-level debugging
 make speedtest       # host-compile cst-speed.c and diff its output against the reference traces (see SPEED)
 make speedtest-accept  # regenerate those reference traces from the current cst-speed.c
+make pressuretest    # same, for the cst-speed.c counterpart cst-pressure.c (the AIRBRAKE model)
+make pressuretest-accept  # regenerate the AIRBRAKE reference traces from the current cst-pressure.c
 make clean           # remove build artifacts
 ```
 
@@ -54,9 +56,10 @@ Target: **ATmega1284P** @ 11.0592 MHz / 3.3V, compiled with `avr-gcc` (`-std=gnu
 git hash are baked into the build from `git describe` via `src/git-revision.sh` — the working tree must be
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
-The only automated firmware test is `make speedtest` - a host-compiled reference-trace harness for the
-scale-speed model (`src/cst-speed-test/`, see the SPEED section). Nothing else in the firmware has a
-test or a linter. `src/eep-test/*.py` are standalone Python scripts (`mrbus.py`, `dumppkts.py`,
+The automated firmware tests are `make speedtest` and `make pressuretest` - host-compiled
+reference-trace harnesses for the scale-speed model (`src/cst-speed-test/`, see the SPEED section)
+and the AIRBRAKE air-brake model (`src/cst-pressure-test/`, see the AIRBRAKE section). Nothing else in
+the firmware has a test or a linter. `src/eep-test/*.py` are standalone Python scripts (`mrbus.py`, `dumppkts.py`,
 `test.py`) for sniffing/decoding MRBus/MRBee packets off the radio for manual debugging — not an
 automated test harness.
 
@@ -810,6 +813,28 @@ leak away between runs) — both only meaningful/shown when `COMPMODE = CONSIST`
 shows `1`/`2` while the compressor is on and `COMPMODE = CONSIST` (which classification the current
 run got), blank in `NORMAL` mode.
 
+### Reference-trace test
+
+`make pressuretest` runs `src/cst-pressure-test/` — the AIRBRAKE counterpart of `make speedtest`.
+`test_pressure.c` host-compiles `cst-pressure.c` whole (no include-path shims — `cst-pressure.h`
+pulls only `<stdint.h>`), drives `updateBrake10Hz()` through a fixed scenario set (idle governor
+cycle, initial full-service reduction and release, minimum-reduction floor, graduated service,
+lapping, emergency with and without `BRK ESTP`, the `COMPMODE = CONSIST` deep/routine split, and the
+`PUMP <= LEAK` / inverted-`MR` guards), and diffs the per-tick model state (`bpMilliPsi`,
+`mrMilliPsi`, the consist-sync credit) plus all six output accessors and the two rounded whole-PSI
+readouts against `reference/*.txt`. `make pressuretest-accept` re-blesses; a diff is the
+human-readable statement of how the model moved. `main()` also asserts three invariants as
+`PASS`/`FAIL` lines (idle governor bounded and cycling, inverted-`MR` band does not stutter, the
+brake pipe recharges to *exactly* `BP CHARGE`) and exits non-zero on failure. `.githooks/pre-commit`
+runs it whenever a commit touches `cst-pressure.c`, `cst-pressure.h`, or that directory. Unlike the
+scale-speed model, `updateBrake10Hz()` is width-identical between AVR 16-bit and host 32-bit `int` by
+construction (`uint32_t` / `UL` throughout), so there is no "safe range" caveat — the one host/AVR
+divergence, the `rand()` gauge jitter in `initAirBrake()`, is pinned out by the harness. The
+`P`/`X` (pending-deep / run-is-deep) columns are computed every tick regardless of `COMPMODE`, so
+they show up in `NORMAL`-mode traces too; `AIRBRAKE_DISPLAY` is not covered (it is a `mrbw-cst.c`
+render selector, not model state). It locks the *current* behaviour so future tuning is safe — it
+does not validate the model-shape constants below.
+
 **Not yet done**: independent real-hardware validation of the fixed model-shape constants in
 `cst-pressure.c` — `AIRBRAKE_MIN_REDUCTION_PSI`, `AIRBRAKE_FULLSVC_PCNT`, `AIRBRAKE_EMERG_PCNT`,
 `AIRBRAKE_VENT_RATE_PSI_S`/`AIRBRAKE_EMERG_VENT_RATE_PSI_S`, `AIRBRAKE_RECHARGE_TAIL_MPSI`, and
@@ -1193,8 +1218,9 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
    without the other: the `V5MULT`/`V4` split bumped the schema with no layout change; the SPEED
    payload relocation bumped the layout with no schema change; the `ACCELADJ`/`DECELADJ` +
    genuine-0-255 `ACCEL`/`DECEL` work bumped both).
-6. If the change touches `cst-speed.c`, regenerate the reference traces with `make speedtest-accept`
-   and review the `git diff` — that diff is the human-readable statement of how the model output moved.
+6. If the change touches `cst-speed.c` (or `cst-pressure.c`), regenerate the reference traces with
+   `make speedtest-accept` (or `make pressuretest-accept`) and review the `git diff` — that diff is
+   the human-readable statement of how the model output moved.
 
 One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
 followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped

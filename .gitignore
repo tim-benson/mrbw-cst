@@ -8,3 +8,5 @@ doc/eep
 *.code-workspace
 src/cst-speed-test/speedtest
 src/cst-speed-test/out/
+src/cst-pressure-test/pressuretest
+src/cst-pressure-test/out/

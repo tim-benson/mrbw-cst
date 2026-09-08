@@ -85,6 +85,7 @@ help:
 	@echo "make release.... produce release tarball"
 	@echo "make terminal... open up avrdude terminal"
 	@echo "make speedtest. run the scale-speed model reference-trace test (host cc)"
+	@echo "make pressuretest. run the air-brake model reference-trace test (host cc)"
 	@echo "cst_cfgtransfer.py .. export/import loco configs to/from JSON, see cst-cfgtransfer/README.md"
 
 hex: $(BASE_NAME).hex
@@ -158,10 +159,38 @@ speedtest-accept: $(SPEEDTEST_BIN)
 	@rm -rf $(SPEEDTEST_DIR)/reference && mv $(SPEEDTEST_DIR)/out $(SPEEDTEST_DIR)/reference
 	@echo "reference traces regenerated from the current cst-speed.c - review 'git diff' before committing"
 
+# --- host-compiled reference-trace test for the air-brake model (cst-pressure.c) ---
+# Same technique as speedtest, for the AIRBRAKE model: compiles cst-pressure.c
+# natively and drives updateBrake10Hz() through a fixed scenario set, diffing the
+# per-tick state + output traces against cst-pressure-test/reference/. No include
+# shims needed (cst-pressure.h pulls only <stdint.h>). See cst-pressure-test/README.md.
+PRESSURETEST_DIR    = cst-pressure-test
+PRESSURETEST_BIN    = $(PRESSURETEST_DIR)/pressuretest
+PRESSURETEST_CC    ?= cc
+PRESSURETEST_CFLAGS = -std=gnu99 -O2 -fshort-enums -Wall
+
+$(PRESSURETEST_BIN): $(PRESSURETEST_DIR)/test_pressure.c cst-pressure.c cst-pressure.h
+	$(PRESSURETEST_CC) $(PRESSURETEST_CFLAGS) -o $@ $<
+
+pressuretest: $(PRESSURETEST_BIN)
+	@rm -rf $(PRESSURETEST_DIR)/out && mkdir -p $(PRESSURETEST_DIR)/out
+	@$(PRESSURETEST_BIN) $(PRESSURETEST_DIR)/out
+	@diff -ru $(PRESSURETEST_DIR)/reference $(PRESSURETEST_DIR)/out \
+		&& echo "PASS: air-brake model reference traces match" \
+		|| { echo; echo "FAIL: air-brake model output changed - review the diff above."; \
+		     echo "      If the change is intended: make pressuretest-accept"; exit 1; }
+
+pressuretest-accept: $(PRESSURETEST_BIN)
+	@rm -rf $(PRESSURETEST_DIR)/out && mkdir -p $(PRESSURETEST_DIR)/out
+	@$(PRESSURETEST_BIN) $(PRESSURETEST_DIR)/out
+	@rm -rf $(PRESSURETEST_DIR)/reference && mv $(PRESSURETEST_DIR)/out $(PRESSURETEST_DIR)/reference
+	@echo "reference traces regenerated from the current cst-pressure.c - review 'git diff' before committing"
+
 # rule for deleting dependent files (those which can be built by Make):
 clean:
 	rm -f $(BASE_NAME).hex $(BASE_NAME).lst $(BASE_NAME).obj $(BASE_NAME).cof $(BASE_NAME).list $(BASE_NAME).map $(BASE_NAME).eep.hex $(BASE_NAME).elf $(BASE_NAME).s $(OBJS) *.o *.tgz *~
 	rm -rf $(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out
+	rm -rf $(PRESSURETEST_BIN) $(PRESSURETEST_DIR)/out
 
 # Generic rule for compiling C files:
 .c.o:

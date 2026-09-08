@@ -9,10 +9,16 @@ REPO_ROOT=$(git rev-parse --show-toplevel)
 
 python3 "$REPO_ROOT/src/cst-cfgtransfer/check_layout_change_bumps_version.py"
 
-# Scale-speed model reference-trace test - run only when the model or its harness is
-# part of this commit, so an unrelated commit pays no build cost. See
-# src/cst-speed-test/README.md; regenerate with `make -C src speedtest-accept`.
+# Model reference-trace tests - run only when the model or its harness is part of
+# this commit, so an unrelated commit pays no build cost. See the READMEs under
+# src/cst-speed-test/ and src/cst-pressure-test/; regenerate with the matching
+# `make -C src <name>-accept`.
 if git diff --cached --name-only | grep -qE '^src/cst-speed(\.c|\.h)$|^src/cst-speed-test/'; then
 	echo "pre-commit: cst-speed.c or its test changed - running speed model reference traces"
 	make -C "$REPO_ROOT/src" --no-print-directory speedtest
+fi
+
+if git diff --cached --name-only | grep -qE '^src/cst-pressure(\.c|\.h)$|^src/cst-pressure-test/'; then
+	echo "pre-commit: cst-pressure.c or its test changed - running air-brake model reference traces"
+	make -C "$REPO_ROOT/src" --no-print-directory pressuretest
 fi
