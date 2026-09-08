@@ -1247,10 +1247,14 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 
 One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
 followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped
-`EEPROM_LAYOUT_VERSION` at all, by diffing the `#define` set of `cst-eeprom.h` against its previous
-committed state. It cannot catch a change that reinterprets what an existing, unmoved byte value *means*
-(a new enum numbering, repurposed bits) without changing its offset — that class of drift is only caught
-by careful review, or by the targeted per-field regression tests in `test_slot_codec.py`.
+`EEPROM_LAYOUT_VERSION` at all, by diffing the **layout-defining** `#define`s of `cst-eeprom.h` — the
+`EE_*` byte offsets, the `CONFIG_*` addressing macro/constants, and `MAX_CONFIGS` / `WORKING_CONFIG` —
+against their previous committed state. Other `#define`s in the header (the `STACK_COMBO_*` storage
+encoding, `*_DEFAULT` values, helper constants) do not trigger it. It also cannot catch a change that
+reinterprets what an existing, unmoved byte value *means* (a new enum numbering, repurposed bits) without
+changing its offset, nor a layout-relevant constant added under a name matching none of those patterns —
+those are only caught by careful review, or by the targeted per-field regression tests in
+`test_slot_codec.py`.
 
 ## Firmware versioning
 

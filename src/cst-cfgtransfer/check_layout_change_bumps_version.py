@@ -5,12 +5,19 @@
 """Guards against a commit that changes src/cst-eeprom.h's actual layout (new field, moved offset,
 repurposed byte) but never bumps EEPROM_LAYOUT_VERSION. Without the bump the CNF format version stays
 stale and offline tooling can't tell a re-laid-out chip apart from an in-sync one - this script closes
-that gap by diffing cst-eeprom.h's own #define set against its previous committed state.
+that gap by diffing cst-eeprom.h's layout-defining #defines against their previous committed state.
 
-Scope: this only guarantees the version number moves whenever cst-eeprom.h's layout does. It cannot verify
-that cst_eeprom_layout.py/slot_codec.py's *content* was actually updated to match (see CLAUDE.md's
-maintenance checklist for that), and it cannot see a semantic reinterpretation of a byte whose offset/name
-didn't change - that logic lives in mrbw-cst.c's readConfig(), not in the header.
+Layout-defining means the names that fix the on-EEPROM byte layout: the EE_* byte offsets, the CONFIG_*
+addressing macro/constants, and MAX_CONFIGS / WORKING_CONFIG (see _is_layout_define). Every other #define
+in the header - the STACK combo storage-bit encoding, factory-default values, convenience constants - is
+storage *meaning* or a helper, not layout, and does not force a version bump.
+
+Scope: this only guarantees the version number moves whenever a layout-defining #define in cst-eeprom.h
+does. It cannot verify that cst_eeprom_layout.py/slot_codec.py's *content* was actually updated to match
+(see CLAUDE.md's maintenance checklist for that); it cannot see a semantic reinterpretation of a byte
+whose offset/name didn't change (that logic lives in mrbw-cst.c's readConfig(), not in the header); and
+it will miss a genuinely layout-relevant constant added under a name that fits none of the patterns above
+(the maintenance checklist and test_slot_codec.py's per-field tests are the backstop there).
 
 Run standalone:
     python3 src/cst-cfgtransfer/check_layout_change_bumps_version.py
@@ -27,10 +34,23 @@ EEPROM_H_PATH = "src/cst-eeprom.h"
 VERSION_MACRO = "EEPROM_LAYOUT_VERSION"
 
 # Matches "#define NAME value" and "#define NAME(args) value" (the one function-like macro in this file,
-# CONFIG_OFFSET) - captures the value up to end of line. The bare include-guard "#define _CST_EEPROM_H_"
-# has no trailing value and simply won't match. Comment lines never start with #define, so a pure
-# comment/formatting edit can't be mistaken for a layout change.
-_DEFINE_RE = re.compile(r"^#define\s+(\w+)(?:\([^)]*\))?\s+(.+?)\s*$", re.MULTILINE)
+# CONFIG_OFFSET) - captures the value to end of line. The separators are [ \t], not \s, so a valueless
+# line like the include guard "#define _CST_EEPROM_H_" genuinely fails to match rather than letting \s
+# span the newline and swallow the next line's content as its "value". Comment lines never start with
+# #define, so a pure comment/formatting edit can't be mistaken for a layout change.
+_DEFINE_RE = re.compile(r"^#define[ \t]+(\w+)(?:\([^)]*\))?[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+
+# The names that actually define the on-EEPROM byte layout - EE_* offsets, the CONFIG_* addressing
+# macro/constants, and the two structural sizes. A change to anything else in the header (STACK combo
+# storage bits locked to mrbw-cst.c by a _Static_assert, *_DEFAULT values, helper constants) is not a
+# layout move and is left to review / the per-field codec tests, matching the "cannot see a semantic
+# reinterpretation" caveat in the module docstring.
+_LAYOUT_DEFINE_RE = re.compile(r"^(EE_|CONFIG_)")
+_LAYOUT_DEFINE_EXACT = frozenset({"MAX_CONFIGS", "WORKING_CONFIG"})
+
+
+def _is_layout_define(name):
+    return _LAYOUT_DEFINE_RE.match(name) is not None or name in _LAYOUT_DEFINE_EXACT
 
 
 def _extract_defines(content):
@@ -45,8 +65,8 @@ def check_layout_change_requires_bump(old_content, new_content):
     old_version = old_defines.get(VERSION_MACRO)
     new_version = new_defines.get(VERSION_MACRO)
 
-    old_rest = {k: v for k, v in old_defines.items() if k != VERSION_MACRO}
-    new_rest = {k: v for k, v in new_defines.items() if k != VERSION_MACRO}
+    old_rest = {k: v for k, v in old_defines.items() if k != VERSION_MACRO and _is_layout_define(k)}
+    new_rest = {k: v for k, v in new_defines.items() if k != VERSION_MACRO and _is_layout_define(k)}
 
     if old_rest == new_rest:
         return None  # no layout change either way
