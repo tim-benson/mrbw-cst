@@ -162,10 +162,9 @@ static void dumpImage(const char *name, const char *startNote)
  * 0x61/0x62 = 0. Everything else self-heals later via readByteOrDefault(), so
  * nothing else is written here.
  *
- * NOTE: the trace shows slot 1 (base 0x0080) has NONE of the five bytes seeded,
- * while slots 2..20, the padding at 0x0A80, and the working config at 0x0F80 do.
- * That is a known off-by-one in the -> 4 loop's CONFIG_OFFSET() ternary (see
- * inv_blank_to_valid() below) - captured as-is here, fixed in the next commit. */
+ * The trace shows every profile slot + the working config with the five bytes
+ * seeded (0x28/0x2E/0x57 = defaults, 0x61/0x62 = 0), the version byte at 0x26,
+ * and nothing else touched. */
 static void sc_from_blank(void)
 {
 	buildBlank();
@@ -272,26 +271,11 @@ static int seededDefaults(uint16_t b)
 	    && g_eeprom[b + 0x61] == SPEED_ACCEL_ADJ_DEFAULT
 	    && g_eeprom[b + 0x62] == SPEED_DECEL_ADJ_DEFAULT;
 }
-static int rawStillBlank(uint16_t b)
-{
-	return g_eeprom[b + 0x28] == 0xFF && g_eeprom[b + 0x2E] == 0xFF
-	    && g_eeprom[b + 0x57] == 0xFF && g_eeprom[b + 0x61] == 0xFF
-	    && g_eeprom[b + 0x62] == 0xFF;
-}
 
 /* 3. Blank chip -> layout 4: the version byte is stamped, and the -> 4 raw-seed
  *    loop populates the five raw-read SPEED bytes (0x28/0x2E/0x57/0x61/0x62 -
- *    readByteOrDefault() no longer covers them) with their real defaults.
- *
- *    KNOWN BUG captured here, fixed in the next commit: the loop's
- *      CONFIG_OFFSET((s <= MAX_CONFIGS) ? s : WORKING_CONFIG)
- *    mis-parses. CONFIG_OFFSET() does not parenthesise its argument, so the
- *    macro's `- 1` binds only to the `: WORKING_CONFIG` branch; the `? s` branch
- *    loses its `- 1` and every profile iteration writes one slot too high -
- *    slots 2..20 + the working config get seeded and slot 1 is SKIPPED. This
- *    invariant asserts exactly that (slot 1 still blank, the rest seeded); once
- *    the line is fixed it flips to "all of 1..20 + working seeded" and the
- *    reference traces gain slot 1's five bytes. */
+ *    readByteOrDefault() no longer covers them) with their real defaults, in
+ *    every one of the 20 profile slots AND the working config. */
 static int inv_blank_to_valid(void)
 {
 	int idx, ok = 1;
@@ -301,11 +285,8 @@ static int inv_blank_to_valid(void)
 	if (g_eeprom[EE_LAYOUT_VERSION] != EEPROM_LAYOUT_VERSION)
 		ok = 0;
 	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
-	{
-		uint16_t b = slotBase(idx);
-		if (idx == 0)   { if (!rawStillBlank(b))  ok = 0; }   /* slot 1: skipped by the bug */
-		else            { if (!seededDefaults(b)) ok = 0; }
-	}
+		if (!seededDefaults(slotBase(idx)))
+			ok = 0;
 	return ok;
 }
 

@@ -150,7 +150,10 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 		uint8_t s, k;
 		for(s = 1; s <= MAX_CONFIGS + 1; s++)
 		{
-			uint16_t base = CONFIG_OFFSET((s <= MAX_CONFIGS) ? s : WORKING_CONFIG);
+			// CONFIG_OFFSET() does not parenthesise its argument, so hand it a bare variable: passing the
+			// ?: directly bound the macro's `- 1` to the `: WORKING_CONFIG` branch only, skipping slot 1.
+			uint8_t cfgNum = (s <= MAX_CONFIGS) ? s : WORKING_CONFIG;
+			uint16_t base = CONFIG_OFFSET(cfgNum);
 			wdt_reset();
 			for(k = 0; k < 3; k++)
 				if(0xFF == eeprom_read_byte((uint8_t*)(base + rawSeedOffset[k])))
