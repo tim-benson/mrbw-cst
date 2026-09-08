@@ -1894,11 +1894,16 @@ int main(void)
 			controls &= ~(HORN_CONTROL);
 		}
 
-		// Sanity check brake position and calculate percentage
+		// Sanity check brake position and calculate percentage. Guard the divisor: an uncalibrated
+		// chip has both thresholds at 0xFF (resetConfig() deliberately never writes them), and a
+		// mis-calibration can land them within BRAKE_DEAD_ZONE*2 of each other - either way
+		// brakeHighThreshold <= brakeLowThreshold and the ratio would divide by zero (or go negative).
 		if(brakePosition < brakeLowThreshold)
 			brakePcnt = 0;
-		else
+		else if(brakeHighThreshold > brakeLowThreshold)
 			brakePcnt = 100 * (brakePosition - brakeLowThreshold) / (brakeHighThreshold - brakeLowThreshold);
+		else
+			brakePcnt = (brakePosition >= brakeLowThreshold) ? 100 : 0;   // degenerate/uncalibrated: all-or-nothing
 
 		// Handle emergency on brake control.  Do this outside the main brake state machine so the effect is immediate
 		if(optionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE))
@@ -4116,6 +4121,21 @@ int main(void)
 						case SELECT_BUTTON:
 							if(SELECT_BUTTON != previousButton)
 							{
+								// Reject a brake calibration where HIGH is not above LOW - it would
+								// make the brakePcnt divisor zero/negative (see the brake-percentage
+								// calc). A partial calibration (one still 0xFF) is allowed through.
+								if((0xFF != brakeLowThreshold) && (0xFF != brakeHighThreshold)
+								   && (brakeHighThreshold <= brakeLowThreshold))
+								{
+									lcd_clrscr();
+									lcd_gotoxy(0,0);
+									lcd_puts("BRK CAL");
+									lcd_gotoxy(1,1);
+									lcd_puts("HI<=LO");
+									wait100ms(10);
+									lcd_clrscr();
+									break;
+								}
 								eeprom_write_byte((uint8_t*)EE_HORN_THRESHOLD, hornThreshold);
 								eeprom_write_byte((uint8_t*)EE_HORN_THRESHOLD2, hornThreshold2);
 								eeprom_write_byte((uint8_t*)EE_BRAKE_THRESHOLD, brakeThreshold);

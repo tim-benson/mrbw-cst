@@ -224,7 +224,12 @@ functions. Which variant runs is selected by `BRK TYPE`, a 3-way cycle in `optio
 
 `EE_BRAKE_THRESHOLD` / `EE_BRAKE_LOW_THRESHOLD` / `EE_BRAKE_HIGH_THRESHOLD` are global (once-per-throttle,
 not per-profile — same as `EE_HORN_THRESHOLD`) calibration values set through the on-device
-threshold-calibration menu screens, not compile-time constants.
+threshold-calibration menu screens, not compile-time constants. `resetConfig()` deliberately does not
+touch them (they are per-physical-device). The lever percentage is
+`100 * (pos - low) / (high - low)`; that divisor is guarded — `high <= low` (an uncalibrated chip has
+both `0xFF`, or a mis-calibration can put the two capture points within `2 * BRAKE_DEAD_ZONE`) falls
+back to an all-or-nothing `brakePcnt`, and the `THRESHOLD CAL` `SELECT`-save refuses a `HIGH <= LOW`
+calibration (`BRK CAL` / `HI<=LO` screen).
 `OPTIONBITS_ESTOP_ON_BRAKE` ("BRK ESTP") is a mode-independent check that runs *before* the brake-mode
 dispatch, comparing raw `brakePosition` against `brakeLowThreshold`/`brakeHighThreshold` directly — pushing
 the lever to max triggers the throttle built-in emergency stop (if enabled) regardless of `BRK TYPE`,
