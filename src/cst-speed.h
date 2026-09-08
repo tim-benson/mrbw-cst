@@ -237,6 +237,24 @@ enum
 #define SPEED_DECEL_ADJ_DEFAULT           0
 #define SPEED_ADJ_MAG_MAX               127   // full ESU CV23/CV24 magnitude range
 
+// Momentum-ceiling linearization. Two BEMF-regulator control-loop corrections in cst-speed.c - the
+// standing-start cubic ramp (ACCPCT/ACCTGT) and the deceleration lag (DECPCT/DECTHR) - were
+// calibrated only to an effective momentum CV of ~230 and misbehave above it. A real ESU V5 decoder
+// runs its programmed accel/decel ramp linearly once the effective CV (CV3+CV23 / CV4+CV24) reaches
+// the 8-bit register ceiling of 255 (hardware-confirmed on both the accel and decel sides), so both
+// corrections are faded to their linear limit across this window:
+// ceilFadeNum() returns full weight (DEN) at or below LO, zero at or above HI, linear between. The
+// fade is driven by the RAW effective CV from speedEffAccelCV()/speedEffDecelCV() (0-382), not the
+// CV103/CV104 load-scaled time - the ceiling is a decoder-register property, and load scaling past
+// it is not separately modelled. One shared window for both corrections; if a hardware pass shows
+// the accel side wants a different band, split into _ACCEL_ / _DECEL_ pairs. The 231-254 interior is
+// a linear interpolation between the calibrated (<=230) strength and the linear (>=255) endpoint -
+// not itself hardware-calibrated.
+#define SPEED_CEIL_FADE_LO              230   // effective ACCEL/DECEL CV at or below which a correction is full strength
+#define SPEED_CEIL_FADE_HI             255   // effective CV at or above which it is fully linearized
+#define SPEED_CEIL_FADE_DEN             16   // fade-weight denominator
+#define SPEED_CEIL_FADE_SHIFT           4    // log2(SPEED_CEIL_FADE_DEN) - the blend divides by a shift
+
 // --- Decoder-family descriptor ---
 // TYPE (SPEED_ITEM_TYPE) tags a decoder family. Five SPEED CFG items are type-agnostic - they mean
 // the same thing for every family and always show first, in this order: TYPE, MAXSPEED, UNIT,

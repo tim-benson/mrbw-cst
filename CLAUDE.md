@@ -457,18 +457,12 @@ applied via one unconditional path — coast or brake, steady-state or interrupt
 Higher `DECPCT` → display reaches 0 sooner; higher `DECTHR` (~0.4 mph/unit) → the correction covers
 less of the run, display reaches 0 later.
 
-Calibrated (`DECTHR ≈ 11`, `DECPCT ≈ 22`) from hardware against `DECEL` 192/216/230. **The correction
-is required for accurate sync at effective `DECEL` (`CV4 + CV24`) up to ~230, and must be set to
-`DECPCT = 0` once effective `DECEL` reaches 255 or `CV4 + CV24` exceeds 255** — confirmed by hardware
-observation: the decoder deceleration goes genuinely linear at the momentum-register ceiling (the
-BEMF-regulator artifact washes out and the programmed ramp dominates), so the correction over-shaves
-there and the display runs ahead of the loco. The 231-254 band is a transition zone where no single
-`DECPCT` tracks perfectly. `ticksToCross()` itself is strictly linear in the CV at every value — this
-is a decoder characteristic, not a firmware bug.
-
-**Not yet done**: ramping `DECPCT` down automatically across effective `DECEL` 230→255 so the operator
-does not have to zero it manually — a separate change, needs its own hardware pass to fix the ramp
-shape and threshold.
+Calibrated (`DECTHR ≈ 11`, `DECPCT ≈ 22`) from hardware against `DECEL` 192/216/230. The correction
+is required for accurate sync at effective `DECEL` (`CV4 + CV24`) up to ~230; above that a real
+decoder deceleration goes genuinely linear at the momentum-register ceiling (the BEMF-regulator
+artifact washes out and the programmed ramp dominates), so `DECPCT` is faded out automatically —
+see "Momentum-ceiling linearization" below. `ticksToCross()` itself is strictly linear in the CV at
+every value — this is a decoder characteristic, not a firmware bug.
 
 **Standing-start acceleration (`ACCPCT`/`ACCTGT`)**: real locomotives reach any speed below 15mph faster
 than the plain `ACCEL` model predicts, by a roughly constant amount of time (not proportional to distance).
@@ -481,6 +475,30 @@ so the calibrated total time of `ACCPCT` to 15mph never changes regardless of `A
 *shorten* the onset from its own natural baseline, never push it later. Very aggressive `ACCTGT` values can make the
 ramp briefly non-monotonic later in its climb (confirmed tiny, below display resolution, at the one extreme
 tested).
+
+**Momentum-ceiling linearization**: the two BEMF-regulator corrections above — the standing-start cubic
+ramp and the `DECPCT` deceleration lag — were fitted only to an effective momentum CV of ~230. At the
+8-bit register ceiling a real ESU V5 decoder runs its programmed ramp linearly, so both are faded to
+their linear limit across a shared window on the *raw* effective CV (`speedEffAccelCV()` /
+`speedEffDecelCV()`, `SPEED_CEIL_FADE_LO` 230 → `SPEED_CEIL_FADE_HI` 255, `cst-speed.c`
+`ceilFadeNum()`). Hardware-confirmed on both sides: with the fade active the display tracks the loco
+at and above effective `DECEL` / `ACCEL` 255 (`CV4 + CV24` / `CV3 + CV23` past 255 via the adjusts
+included), where the pre-fade model drifted — the coast display reached 0 seconds early and the
+standing start rushed to ~14mph then dwelt.
+- **DECPCT** scales by the fade weight before the `steadyStopExtraMs` capture — full strength at
+  effective `DECEL` ≤ 230, zero at ≥ 255 (pure `ticksToCross()` coast/brake).
+- **Standing-start ramp**: the blend `f·cubic + (1−f)·(v·τ)` folds exactly into the precomputed
+  `rampP`/`rampQ`/`rampR0` (so `cubicRampPosition()` and the per-tick path are untouched). `f = 1`
+  (effective `ACCEL` ≤ 230) is byte-identical to the calibrated ramp; `f = 0` (≥ 255) sets
+  `rampP = rampQ = 0`, `rampR0 = v`, making the onset an exact linear `v·τ` crawl that hands off
+  seamlessly to the plain-rate climb at `rampT` — no S-curve, no dwell near 15mph, no head-start.
+
+`ACCELADJ`/`DECELADJ` feed the effective CV, so a large CV23/CV24 crosses the ceiling on its own. The
+230→255 transition sweeps smoothly with no visible discontinuity at either end; the exact interior
+(231-254) blend is a linear interpolation between the calibrated (≤230) strength and the linear (≥255)
+endpoint, not independently point-calibrated. `SPEED_CEIL_FADE_*` are compile-time `#define`s, one
+shared window, split into `_ACCEL_`/`_DECEL_` pairs if a later hardware pass shows the accel side wants
+a different band.
 
 **Requires a linearized decoder speed table**: the simulation assumes real locomotive speed scales linearly
 with the commanded DCC speed step — this only holds if the decoder own speed-table CVs are themselves
@@ -501,7 +519,7 @@ sentinel).
 | Item | Default | Tested | What it does | Increase | Decrease |
 |---|---|---|---|---|---|
 | `ACCEL` (CV3) | 60 | 60 | Time to cross the full speed range while speeding up. 0-255 | Slower acceleration | Faster acceleration |
-| `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). 0-255. **The `DECPCT`/`DECTHR` lag correction is only validated to effective `DECEL` (`CV4 + CV24`) ~230; set `DECPCT = 0` at effective `DECEL` 255 or `CV4 + CV24 > 255` (the real decoder goes linear at the momentum ceiling), and the 231-254 band is a transition zone.** | Slower coast-down (see `DECPCT` note) | Faster coast-down |
+| `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). 0-255. The `DECPCT`/`DECTHR` lag correction is validated to effective `DECEL` (`CV4 + CV24`) ~230 and fades itself out to a plain linear coast by effective `DECEL` 255 — see "Momentum-ceiling linearization". | Slower coast-down | Faster coast-down |
 | `ACCELADJ` (CV23) | 0 | — | Signed `-127..+127` added to `ACCEL` (V5 only). Effective CV3 = `ACCEL + ACCELADJ`, unclamped past 255 | Slower acceleration | Faster acceleration |
 | `DECELADJ` (CV24) | 0 | — | Signed `-127..+127` added to `DECEL` (V5 only). Effective CV4 = `DECEL + DECELADJ`, unclamped past 255 | Slower coast-down | Faster coast-down |
 | `BRK1` (CV179) | 130 | — | How strongly Brake1 shortens the stop when active — sums with `BRK2`/`BRK3` (capped at 255) | Faster/harder stop | Weaker braking |
@@ -542,16 +560,19 @@ sentinel).
 
 | Item | Default | Tested | What it does |
 |---|---|---|---|
-| `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time) |
+| `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time). Faded to a plain linear onset as effective `ACCEL` approaches 255 — see "Momentum-ceiling linearization" |
 | `ACCTGT` | 5 | 5 | Target time (0.1s/unit) for the display to first show 1mph |
-| `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the deceleration-lag correction. **Required for accurate sync at effective `DECEL` ≤ ~230; set to 0 once effective `DECEL` = 255 or `CV4 + CV24 > 255`** (see "How the simulation math works") |
+| `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the deceleration-lag correction. Faded automatically to 0 across effective `DECEL` 230→255 (see "Momentum-ceiling linearization") |
 | `DECTHR` | 11 | 11 | Speed (raw step, ~0.4 mph/unit) below which the `DECPCT` correction does not apply |
 
 Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
-`DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
-the shipped compile-time default, not independently re-validated against that locomotive.
-`ACCELADJ`/`DECELADJ` were bench-checked against the times LokProgrammer computes (V5DCC, and V5MULT for
-CV24 scaling) and confirmed on a locomotive with a non-zero CV23/CV24 in the normal momentum range.
+`DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). The momentum-ceiling fade
+was additionally validated on that locomotive at effective `ACCEL` / `DECEL` 255 and above (via the
+adjusts). Every other field above is still the shipped compile-time default, not independently
+re-validated against that locomotive. `ACCELADJ`/`DECELADJ` were bench-checked against the times
+LokProgrammer computes (V5DCC, and V5MULT for CV24 scaling), confirmed on a locomotive with a
+non-zero CV23/CV24 in the normal momentum range, and their effect at the ceiling is covered by that
+fade test.
 
 ### EEPROM layout and the reference-trace test
 
@@ -583,9 +604,12 @@ parameters no-oped — `ACCELADJ`/`DECELADJ`/`BRK2`/`BRK3` and the load CVs; `sp
 neutralises a stale slot) and exits non-zero on failure. `.githooks/pre-commit` runs it whenever a
 commit touches `cst-speed.c`, `cst-speed.h`, or that directory. The only host-build shim is
 `cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h` includes `<avr/pgmspace.h>`. Scenarios
-keep momentum CVs in non-zero ranges where AVR 16-bit `int` and host 32-bit `int` provably agree; the
-`accel_cv255`/`decel_cv255` scenarios deliberately exercise the ceiling (`accel_cv255` bakes in a
-~0.27-step, sub-display-resolution non-monotonic ramp wobble at that extreme `ACCEL`).
+keep momentum CVs in non-zero ranges where AVR 16-bit `int` and host 32-bit `int` provably agree. The
+`accel_cv255`/`decel_cv255` and `accel_ceil_fade_mid`/`decel_ceil_fade_mid`/`accel_adj_over_ceiling`
+scenarios exercise the momentum-ceiling linearization: at effective CV 255 both `accel_cv255` (a clean
+linear standing-start crawl) and `decel_cv255` (a plain linear coast) confirm the corrections are
+fully faded out; the `*_mid` pair holds the interior blend (`0 < f < 16`); `accel_adj_over_ceiling`
+proves `ACCELADJ` alone can cross the ceiling.
 
 ## AIRBRAKE — air-brake simulation
 

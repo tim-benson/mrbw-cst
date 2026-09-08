@@ -320,6 +320,21 @@ static uint16_t speedEffDecelCV(void)
 	return speedAdjustedCV(speedCfg[SPEED_ITEM_DECEL], speedCfg[SPEED_ITEM_DECEL_ADJ]);
 }
 
+// Fade weight (0 .. SPEED_CEIL_FADE_DEN) for the momentum-ceiling linearization - see cst-speed.h.
+// Full weight at or below LO effective CV, zero at or above HI, linear between. effCV is a raw
+// effective momentum CV (0-382 from speedEffAccelCV()/speedEffDecelCV()).
+static uint8_t ceilFadeNum(uint16_t effCV)
+{
+	if (effCV <= SPEED_CEIL_FADE_LO)
+		return SPEED_CEIL_FADE_DEN;
+	if (effCV >= SPEED_CEIL_FADE_HI)
+		return 0;
+	// effCV is in (LO, HI) here, so (HI - effCV) is 1..(HI-LO-1) and DEN*(HI-effCV) stays well
+	// inside 16 bits - a plain uint16 divide, no 32-bit helper.
+	return (uint8_t)((uint16_t)(SPEED_CEIL_FADE_DEN * (SPEED_CEIL_FADE_HI - effCV))
+	                 / (SPEED_CEIL_FADE_HI - SPEED_CEIL_FADE_LO));
+}
+
 // Optional/Primary Load CVs (CV103/CV104): scales a base CV3/CV4 value by loadValue/128 before it's
 // used, per the ESU manual's "Acceleration time = CV3 * (load value / 128)" formula. cv is the
 // already-adjusted effective CV (0-382); the return can exceed 255 (e.g. 382 * 255 / 128 = 761) and is
@@ -611,6 +626,34 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			rampP = P0 + (int64_t)rampR0 * (int64_t)rampT;
 			rampQ = Q0 - 2 * (int64_t)rampR0 * (int64_t)rampT * (int64_t)rampT;
 
+			// Momentum-ceiling linearization (see cst-speed.h): blend the calibrated cubic toward a
+			// plain linear climb v*tau as the effective ACCEL CV approaches the 8-bit register ceiling.
+			// blend = f*cubic + (1-f)*(v*tau) folds exactly into the precomputed terms -
+			// tau^2*(f*P*tau + f*Q)/T^3 + (f*r0 + (1-f)*v)*tau - so cubicRampPosition() and every
+			// continuing-tick evaluation stay unchanged. f==1 (effAccel <= LO) is a literal no-op; f==0
+			// (effAccel >= HI) gives rampP=rampQ=0, rampR0=v, so the ramp output is exactly v*tau and
+			// hands off seamlessly to the plain-rate climb at rampT. rampT itself is not faded - at f==0
+			// the linear output never gets ahead of the plain climb, so the head-start is invisible.
+			uint8_t rampFadeNum = ceilFadeNum(speedEffAccelCV());
+			if (0 == rampFadeNum)
+			{
+				// effAccel >= HI: exact linear climb, no 64-bit fade math. cubicRampPosition() with
+				// P=Q=0, r0=v returns v*tau; the ramp then hands off to the plain-rate climb at rampT.
+				rampP = 0;
+				rampQ = 0;
+				rampR0 = (int32_t)v;
+			}
+			else if (rampFadeNum < SPEED_CEIL_FADE_DEN)
+			{
+				// Interior fade band. >> SPEED_CEIL_FADE_SHIFT (== / SPEED_CEIL_FADE_DEN) - an
+				// arithmetic shift, so a negative rampP/rampQ floors by one LSB rather than truncating,
+				// which is far below the T^3 division that follows.
+				rampP = (rampP * rampFadeNum) >> SPEED_CEIL_FADE_SHIFT;
+				rampQ = (rampQ * rampFadeNum) >> SPEED_CEIL_FADE_SHIFT;
+				rampR0 = (int32_t)v
+				       + (int32_t)(((int64_t)(rampR0 - (int32_t)v) * rampFadeNum) >> SPEED_CEIL_FADE_SHIFT);
+			}
+
 			if (rampS > 0)
 			{
 				uint16_t liveRampTarget = (rampS > targetQ8) ? targetQ8 : rampS;
@@ -637,6 +680,14 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 	uint16_t ticks;
 	uint16_t delta;
 
+	// Momentum-ceiling linearization (see cst-speed.h): fade the DECPCT deceleration-lag correction
+	// to zero as the effective DECEL CV approaches the register ceiling, where a real decoder
+	// decelerates linearly. effDecel <= LO leaves DECPCT unchanged (byte-identical); effDecel >= HI
+	// gives decPctEff == 0, so the steadyStopExtraMs capture below is 0 and the coast/brake runs on
+	// the plain ticksToCross()/brakeTicksToCross() time.
+	uint8_t decPctEff = (uint8_t)(((uint16_t)speedCfg[SPEED_ITEM_DECEL_PCT]
+	                               * ceilFadeNum(speedEffDecelCV())) / SPEED_CEIL_FADE_DEN);
+
 	if (brakeActive)
 	{
 		// Brake overrides throttle demand entirely - always heads toward a full stop while held. The
@@ -659,7 +710,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			uint16_t excessQ8 = (current > thresholdQ8) ? (current - thresholdQ8) : 0;
 			uint32_t excessTicks = ((uint32_t)brakeBaseTicks * excessQ8) / current;
 
-			steadyStopExtraMs = (excessTicks * 100 * speedCfg[SPEED_ITEM_DECEL_PCT]) / 255;
+			steadyStopExtraMs = (excessTicks * 100 * decPctEff) / 255;
 		}
 
 		uint16_t reduceTicks = (uint16_t)(steadyStopExtraMs / 100);
@@ -699,7 +750,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 		uint16_t decelTicksFull = ticksToCross(applyLoad(speedEffDecelCV(), loadValue));
 		uint32_t excessTicks = ((uint32_t)decelTicksFull * excessQ8) / current;
 
-		steadyStopExtraMs = (excessTicks * 100 * speedCfg[SPEED_ITEM_DECEL_PCT]) / 255;
+		steadyStopExtraMs = (excessTicks * 100 * decPctEff) / 255;
 	}
 
 	if (accelerating)

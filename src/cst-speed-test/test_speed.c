@@ -455,17 +455,19 @@ static void sc_decel_cv230(void)
 	traceClose();
 }
 
-// DECEL is now a genuine 0-255 field. This is a linear extrapolation past the DECPCT/DECTHR
-// calibration ceiling of 230 - the code path is unchanged, only the correction's tuning is out of
-// scope up here (and a real ESU decoder goes non-monotonic). Still reaches a clean q8 = 0.
+// DECEL 255 sits at the momentum-register ceiling (SPEED_CEIL_FADE_HI), so ceilFadeNum() is 0 and
+// the DECPCT deceleration-lag correction is faded fully out - the coast is a pure linear
+// ticksToCross(255) ramp, matching a real ESU decoder (which goes linear at the ceiling). Compared
+// against the pre-fade reference this reaches q8 = 0 later (~1.7s in this scenario), since the
+// "subtract ticks" correction no longer speeds the display toward 0.
 static void sc_decel_cv255(void)
 {
 	cfgDefaults();
 	speedSet(SPEED_ITEM_DECEL, 255);
 	resetSpeed();
 	traceOpen("decel_cv255",
-	          "DECEL 255 (V5DCC) - genuine max CV4, past the validated range",
-	          "cmd=22 to tick 120 (settle), then cmd=0 - very slow coast to stop");
+	          "DECEL 255 (V5DCC) - at the momentum ceiling, DECPCT faded to 0",
+	          "cmd=22 to tick 120 (settle), then cmd=0 - pure linear coast to stop");
 	Inputs in = {0};
 	in.cmd = 22;
 	int t = runPhase(0, 120, &in);
@@ -474,22 +476,78 @@ static void sc_decel_cv255(void)
 	traceClose();
 }
 
-// ACCEL is now a genuine 0-255 field - exercises the widened speedEffAccelCV() path and the ramp
-// int64 math at the max CV with the default MAXSPEED. The standing-start cubic ramp shows a ~0.27
-// speed-step (well below display resolution, self-correcting) non-monotonic wobble near the top of
-// its climb at this ACCEL - the same class of artifact CLAUDE.md notes for aggressive ACCTGT, here
-// from an ACCEL far past the calibrated 30-180 range. Baked into the reference trace deliberately.
+// ACCEL 255 sits at the momentum-register ceiling (SPEED_CEIL_FADE_HI), so ceilFadeNum() is 0 and
+// the standing-start cubic ramp is blended fully to a plain linear climb (rampP = rampQ = 0,
+// rampR0 = v). The onset is a steady ~14 q8/tick crawl with no S-curve and no dwell near 15mph -
+// the pre-fade reference showed a fast climb to ~14mph then a long flat hold. Runs long enough
+// (760 ticks) to cross rampT (~614) and confirm the seamless hand-off to the plain-rate climb.
 static void sc_accel_cv255(void)
 {
 	cfgDefaults();
 	speedSet(SPEED_ITEM_ACCEL, 255);
 	resetSpeed();
 	traceOpen("accel_cv255",
-	          "ACCEL 255 (V5DCC) - genuine max CV3, default MAXSPEED",
-	          "cmd=100 from stop - very slow standing-start ramp");
+	          "ACCEL 255 (V5DCC) - at the momentum ceiling, ramp linearized",
+	          "cmd=100 from stop - pure linear standing-start crawl through the rampT hand-off");
 	Inputs in = {0};
 	in.cmd = 100;
-	runPhase(0, 560, &in);
+	runPhase(0, 760, &in);
+	traceClose();
+}
+
+// Effective ACCEL 242 (raw 242, no adjust) - mid fade band. ceilFadeNum(242) = 16*(255-242)/25 = 8,
+// so the cubic ramp is a 50/50 blend of the calibrated curve and the linear v*tau climb: a gentler
+// onset than the default, with the high-ACCEL dwell roughly halved. Below-230 scenarios are
+// untouched; this is the only trace exercising 0 < f < DEN on the accel side.
+static void sc_accel_ceil_fade_mid(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL, 242);
+	resetSpeed();
+	traceOpen("accel_ceil_fade_mid",
+	          "ACCEL 242 (V5DCC) - mid ceiling-fade band, cubic 50% blended to linear",
+	          "cmd=100 from stop");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 700, &in);
+	traceClose();
+}
+
+// Effective DECEL 242 (raw 242, no adjust) - mid fade band, ceilFadeNum(242) = 8, so DECPCT is
+// halved (22 -> 11) for the steadyStopExtraMs capture. Settles at a higher speed (cmd=40) than
+// decel_cv255 so the speed-scaled correction, and the difference the fade makes to it, are both
+// clearly visible in the trace.
+static void sc_decel_ceil_fade_mid(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_DECEL, 242);
+	resetSpeed();
+	traceOpen("decel_ceil_fade_mid",
+	          "DECEL 242 (V5DCC) - mid ceiling-fade band, DECPCT halved",
+	          "cmd=40 to tick 150 (settle), then cmd=0 - coast to stop");
+	Inputs in = {0};
+	in.cmd = 40;
+	int t = runPhase(0, 150, &in);
+	in.cmd = 0;
+	runPhase(t, 520, &in);
+	traceClose();
+}
+
+// Raw ACCEL 200 + ACCELADJ +55 -> effective ACCEL 255 (speedEffAccelCV()), so the ramp is fully
+// linearized even though the base CV is only 200. Proves the ceiling fade keys off the effective
+// CV, not the stored ACCEL byte - a decoder with a large CV23 crosses the ceiling early.
+static void sc_accel_adj_over_ceiling(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL, 200);
+	speedSet(SPEED_ITEM_ACCEL_ADJ, 55);          /* +55 -> effective 255 */
+	resetSpeed();
+	traceOpen("accel_adj_over_ceiling",
+	          "ACCEL 200 + ACCELADJ +55 (effective 255) - ramp linearized via the adjust",
+	          "cmd=100 from stop - pure linear crawl");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 640, &in);
 	traceClose();
 }
 
@@ -698,6 +756,9 @@ int main(int argc, char **argv)
 	sc_adjust_decel_pos();
 	sc_decel_cv255();
 	sc_accel_cv255();
+	sc_accel_ceil_fade_mid();
+	sc_decel_ceil_fade_mid();
+	sc_accel_adj_over_ceiling();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
 
