@@ -10,3 +10,5 @@ src/cst-speed-test/speedtest
 src/cst-speed-test/out/
 src/cst-pressure-test/pressuretest
 src/cst-pressure-test/out/
+src/cst-eeprom-test/eepromtest
+src/cst-eeprom-test/out/

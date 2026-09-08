@@ -1,6 +1,8 @@
 #ifndef _CST_EEPROM_H_
 #define _CST_EEPROM_H_
 
+#include <stdint.h>
+
 #define EE_VERSION_MAJOR              0x0E
 #define EE_VERSION_MINOR              0x0F
 
@@ -107,10 +109,33 @@
 #define EE_NEUTRAL_FUNCTION           (0x32 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_ALERTER_FUNCTION           (0x33 + CONFIG_OFFSET(WORKING_CONFIG))
 
+// STACK band->combo storage encoding. A stored byte is OR'd straight into the mrbw-cst.c `controls`
+// word, so STACK_COMBO_BRK1/2/3 MUST equal BRAKE_CONTROL/BK2_CONTROL/BK3_CONTROL there - mrbw-cst.c
+// carries a _Static_assert to lock the two in step. Defined here (with the factory defaults) so the
+// EEPROM_LAYOUT_VERSION 1->2 migration's repackDefault[] table can name them from cst-eeprom.c
+// without depending on the monolith.
+//   Both variants' steps are ordered by escalating *total* decoder brake force, not by which brake is
+//   used - for the CV mix these target (Brake1 130, Brake2 70, Brake3 100) 5-STEP runs
+//   100/130/170/200/230 and 3-STEP runs 70/100/130. All three brakes together (~300, past the
+//   decoder's 255 cap = near-instant stop) is deliberately NOT a step - it is left for a dedicated
+//   emergency-stop control, not normal lever travel.
+#define STACK_COMBO_BRK1        0x08
+#define STACK_COMBO_BRK2        0x20
+#define STACK_COMBO_BRK3        0x40
+#define STACK_COMBO_MASK        (STACK_COMBO_BRK1 | STACK_COMBO_BRK2 | STACK_COMBO_BRK3)
+#define STACK_5STEP_DEFAULT_1   STACK_COMBO_BRK3
+#define STACK_5STEP_DEFAULT_2   STACK_COMBO_BRK1
+#define STACK_5STEP_DEFAULT_3   (STACK_COMBO_BRK2 | STACK_COMBO_BRK3)
+#define STACK_5STEP_DEFAULT_4   (STACK_COMBO_BRK1 | STACK_COMBO_BRK2)
+#define STACK_5STEP_DEFAULT_5   (STACK_COMBO_BRK1 | STACK_COMBO_BRK3)
+#define STACK_3STEP_DEFAULT_1   STACK_COMBO_BRK2
+#define STACK_3STEP_DEFAULT_2   STACK_COMBO_BRK3
+#define STACK_3STEP_DEFAULT_3   STACK_COMBO_BRK1
+
 // STACK brake mode's 5-STEP band->combo mapping, one byte per band 1-5 (band 0 is fixed to "none" and
-// isn't stored). Each byte reuses the BRAKE_CONTROL/BK2_CONTROL/BK3_CONTROL bit values from mrbw-cst.c.
-// The 3-STEP variant (see EE_STACK_BAND_COMBOS_3STEP below) is stored completely separately, so toggling
-// between the two never cross-contaminates one variant's configured combos with the other's.
+// isn't stored) - the storage encoding is above. The 3-STEP variant (see EE_STACK_BAND_COMBOS_3STEP
+// below) is stored completely separately, so toggling between the two never cross-contaminates one
+// variant's configured combos with the other's.
 #define EE_STACK_BAND_COMBOS          (0x34 + CONFIG_OFFSET(WORKING_CONFIG))
 //      EE_STACK_BAND_COMBOS           0x35
 //      EE_STACK_BAND_COMBOS           0x36
@@ -192,5 +217,11 @@
 // 0x63-0x7F: per-slot space not yet in use - 0x63 reserved for a future SPEED model param, the rest
 // padding. The old SPEED holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the
 // layout 2->3 model-parameter move) are also free to reuse.
+
+// One-shot EEPROM layout migrations (cst-eeprom.c) - rewrites the EEPROM when newer firmware boots
+// over an older EEPROM_LAYOUT_VERSION. Called once from readConfig() with the pre-stamp
+// EE_LAYOUT_VERSION byte; a no-op once oldLayoutVersion == EEPROM_LAYOUT_VERSION. Covered by
+// `make eepromtest` (src/cst-eeprom-test/). See CLAUDE.md "EEPROM layout".
+void applyEepromMigrations(uint8_t oldLayoutVersion);
 
 #endif

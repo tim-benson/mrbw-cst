@@ -38,6 +38,8 @@ make speedtest       # host-compile cst-speed.c and diff its output against the 
 make speedtest-accept  # regenerate those reference traces from the current cst-speed.c
 make pressuretest    # same, for the cst-speed.c counterpart cst-pressure.c (the AIRBRAKE model)
 make pressuretest-accept  # regenerate the AIRBRAKE reference traces from the current cst-pressure.c
+make eepromtest      # same, for the EEPROM layout migrations in cst-eeprom.c (applyEepromMigrations)
+make eepromtest-accept  # regenerate the migration reference images from the current cst-eeprom.c
 make clean           # remove build artifacts
 ```
 
@@ -56,10 +58,11 @@ Target: **ATmega1284P** @ 11.0592 MHz / 3.3V, compiled with `avr-gcc` (`-std=gnu
 git hash are baked into the build from `git describe` via `src/git-revision.sh` — the working tree must be
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
-The automated firmware tests are `make speedtest` and `make pressuretest` - host-compiled
-reference-trace harnesses for the scale-speed model (`src/cst-speed-test/`, see the SPEED section)
-and the AIRBRAKE air-brake model (`src/cst-pressure-test/`, see the AIRBRAKE section). Nothing else in
-the firmware has a test or a linter. `src/eep-test/*.py` are standalone Python scripts (`mrbus.py`, `dumppkts.py`,
+The automated firmware tests are `make speedtest`, `make pressuretest` and `make eepromtest` - host-compiled
+reference-trace harnesses for the scale-speed model (`src/cst-speed-test/`, see the SPEED section), the
+AIRBRAKE air-brake model (`src/cst-pressure-test/`, see the AIRBRAKE section) and the EEPROM layout
+migrations (`src/cst-eeprom-test/`, see "EEPROM layout" below). Nothing else in the firmware has a test or
+a linter. `src/eep-test/*.py` are standalone Python scripts (`mrbus.py`, `dumppkts.py`,
 `test.py`) for sniffing/decoding MRBus/MRBee packets off the radio for manual debugging — not an
 automated test harness.
 
@@ -110,8 +113,10 @@ break-before-make directly from its datasheet — see "Light-knob debounce" belo
 entire on-device LCD menu system, and the brake/reverser/throttle state machines. There is no RTOS — it is
 a bare-metal `while(1)` loop: read hardware inputs → run state machines → build a DCC function bitmask →
 push a packet onto the MRBee transmit queue → sleep until the next tick. Supporting `.c`/`.h` pairs factor
-out specific subsystems (LCD driver, battery monitoring, EEPROM config, brake-pipe pressure simulation,
-tonnage/load sound, fast-clock time sync) but the orchestration logic all lives in `mrbw-cst.c`.
+out specific subsystems (LCD driver, battery monitoring, EEPROM config decode + layout migrations,
+brake-pipe pressure simulation, tonnage/load sound, fast-clock time sync) but the orchestration logic all
+lives in `mrbw-cst.c`. `readConfig()` decodes the current EEPROM layout into RAM globals and calls
+`applyEepromMigrations()` (`cst-eeprom.c`) once per boot to rewrite an older layout forward.
 
 **Function abstraction (`cst-functions.c`/`.h`)**: physical controls (brake lever, horn button, headlight
 switch, etc.) are decoupled from DCC output via a `Functions` enum (`BRAKE_FN`, `HORN_FN`, `BELL_FN`, ...).
@@ -140,6 +145,18 @@ all the `EE_*_FUNCTION`, threshold, and option-byte addresses are computed relat
 `CONFIG_OFFSET(WORKING_CONFIG)`. A blank, never-configured chip reads every EEPROM byte as `0xFF`; most
 fields are read through `readByteOrDefault()`, which detects that sentinel and substitutes+persists a real
 default rather than trusting a plainly-invalid raw byte.
+
+**EEPROM layout migrations (`cst-eeprom.c`)**: one bespoke per-slot byte-remapping transform per
+`EEPROM_LAYOUT_VERSION` bump (currently 4), factored out of `readConfig()` into
+`applyEepromMigrations(uint8_t oldLayoutVersion)` — the highest-risk, least-verifiable firmware code (a
+wrong offset silently corrupts every stored profile on upgrade). It touches only the EEPROM (no globals,
+no LCD, no radio) via the byte-at-a-time `eeprom_*` API and is self-limiting: `readConfig()` calls it once
+with the pre-stamp `EE_LAYOUT_VERSION` byte, and it stamps the current version so any later call the same
+boot is a no-op. `make eepromtest` (`src/cst-eeprom-test/`) is a golden-master harness that drives it over
+synthetic layout-N images and diffs the 4096-byte result — the only coverage of "an old-layout chip boots
+newer firmware", since `slot_codec.py` does not model migrations. The migration *comments* (in
+`cst-eeprom.c`) and the per-version narrative in the SPEED and AIRBRAKE sections are the authoritative
+description of each transform.
 
 **Brake logic**: see "Brake logic" below.
 
@@ -583,8 +600,9 @@ The 5 type-agnostic `SPEED` items (`TYPE`/`MAXSPEED`/`UNIT`/`ACCEL`/`DECEL`) kee
 scattered addresses (`ACCEL`/`DECEL` in the gaps left by `EE_BK2_FUNCTION`/`EE_BK3_FUNCTION`,
 `MAXSPEED`/`UNIT`/`TYPE` after `EE_STACK_BAND_COMBOS`); `BRK1` stays at `0x2B` but is a model-list item.
 The decoder-type-specific model parameters live in one contiguous block, `EE_SPEED_MODEL_PAYLOAD`
-(`0x54-0x63`, 15 used with `0x63` reserved — `ACCELADJ`/`DECELADJ` at `0x61`/`0x62`). Migrations in
-`readConfig()`:
+(`0x54-0x63`, 15 used with `0x63` reserved — `ACCELADJ`/`DECELADJ` at `0x61`/`0x62`). Migrations
+(`applyEepromMigrations()` in `cst-eeprom.c`, called once from `readConfig()`; covered by
+`make eepromtest`, see "EEPROM layout migrations" in Architecture):
 
 - **2 → 3** **relocates** the 13 scattered model parameters (`0x54-0x60`) into this block rather than
   resetting them: a layout-2 throttle keeps every tuned value (each byte copied from its old offset
@@ -770,10 +788,11 @@ were superseded by deriving/reusing a value that already exists elsewhere.
 
 A layout change here needs the usual `EEPROM_LAYOUT_VERSION` bump (see the maintenance checklist). The
 `AIRBRAKE CFG` bytes occupy `0x4A-0x53` (with the `HORN2` and `COMPRESSOR2` function slots at `0x49`/
-`0x52`); the SPEED model payload follows at `0x54-0x63`. The layout 1 -> 2 migration in `readConfig()`
-force-resets the `AIRBRAKE` region to defaults on a version upgrade, so a configured throttle should be
-exported with `cst_cfgtransfer.py` before an `AIRBRAKE`-layout upgrade and re-imported afterward — the
-later SPEED 2 -> 3 migration, by contrast, relocates rather than resets (see the SPEED section).
+`0x52`); the SPEED model payload follows at `0x54-0x63`. The layout 1 -> 2 migration in
+`applyEepromMigrations()` (`cst-eeprom.c`) force-resets the `AIRBRAKE` region to defaults on a version
+upgrade, so a configured throttle should be exported with `cst_cfgtransfer.py` before an
+`AIRBRAKE`-layout upgrade and re-imported afterward — the later SPEED 2 -> 3 migration, by contrast,
+relocates rather than resets (see the SPEED section).
 
 **AIRBRAKE screen** (`AIRBRAKE_SCREEN`; reached from the top-level menu when `AIRBRAKE` is on, or any
 time via a control set to `FN_AIRBRAKE`): a read-only viewport into the always-running model — it
@@ -1206,6 +1225,9 @@ required unless `--skip-backup`), reusing the same output-folder convention `exp
 New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 
 1. Add/change the field in `src/cst-eeprom.h` and wire up `readConfig()`/save-path code in `mrbw-cst.c`.
+   If old EEPROMs need forward-migrating, add the migration block to `applyEepromMigrations()` in
+   `src/cst-eeprom.c` (not `readConfig()`), plus a `sc_from_layoutN()` scenario and any invariant in
+   `src/cst-eeprom-test/test_eeprom.c`.
 2. Mirror the same offset/type/decode logic in `cst_eeprom_layout.py` and the
    `decode_slot()`/`decode_global()`/`encode_slot()`/`encode_global()` functions of `slot_codec.py`.
 3. Bump `EEPROM_LAYOUT_VERSION` in `cst-eeprom.h` — the Python tooling parses that `#define` at import
@@ -1218,9 +1240,10 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
    without the other: the `V5MULT`/`V4` split bumped the schema with no layout change; the SPEED
    payload relocation bumped the layout with no schema change; the `ACCELADJ`/`DECELADJ` +
    genuine-0-255 `ACCEL`/`DECEL` work bumped both).
-6. If the change touches `cst-speed.c` (or `cst-pressure.c`), regenerate the reference traces with
-   `make speedtest-accept` (or `make pressuretest-accept`) and review the `git diff` — that diff is
-   the human-readable statement of how the model output moved.
+6. If the change touches `cst-speed.c`, `cst-pressure.c` or `cst-eeprom.c`, regenerate the reference
+   traces with `make speedtest-accept` / `make pressuretest-accept` / `make eepromtest-accept` and
+   review the `git diff` — that diff is the human-readable statement of how the model output (or the
+   migration result) moved.
 
 One local git hook (`.githooks/pre-commit`, wired up by `make setup`) guards against this checklist being
 followed incompletely: `check_layout_change_bumps_version.py` catches a layout change that never bumped

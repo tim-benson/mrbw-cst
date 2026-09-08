@@ -22,3 +22,8 @@ if git diff --cached --name-only | grep -qE '^src/cst-pressure(\.c|\.h)$|^src/cs
 	echo "pre-commit: cst-pressure.c or its test changed - running air-brake model reference traces"
 	make -C "$REPO_ROOT/src" --no-print-directory pressuretest
 fi
+
+if git diff --cached --name-only | grep -qE '^src/cst-eeprom(\.c|\.h)$|^src/cst-eeprom-test/'; then
+	echo "pre-commit: cst-eeprom.c or its test changed - running EEPROM migration reference traces"
+	make -C "$REPO_ROOT/src" --no-print-directory eepromtest
+fi

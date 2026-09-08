@@ -52,7 +52,7 @@ MRBEE_PINS =
 #COMPILE_OPTIONS = -DDEMO_8290
 
 DEFINES := -DGIT_REV=0x$(GITREV)L -D'VERSION_STRING="$(REV)"' -DENABLE_WATCHDOG -DWATCHDOG_TIMEOUT=WDTO_1S -DHWREV_MAJOR=1 -DHWREV_MINOR=2 $(MRBEE_DEFINES) $(MRBEE_PINS) $(COMPILE_OPTIONS)
-SRCS = $(BASE_NAME).c lcd.c cst-common.c cst-lcd.c cst-math.c cst-hardware.c cst-functions.c cst-engine.c cst-pressure.c cst-time.c cst-battery.c cst-speed.c cst-sync.c $(MRBUS_LIB)/mrbee-avr.c $(MRBUS_LIB)/mrbus-crc.c $(MRBUS_LIB)/mrbus-queue.c
+SRCS = $(BASE_NAME).c lcd.c cst-common.c cst-lcd.c cst-math.c cst-hardware.c cst-functions.c cst-engine.c cst-eeprom.c cst-pressure.c cst-time.c cst-battery.c cst-speed.c cst-sync.c $(MRBUS_LIB)/mrbee-avr.c $(MRBUS_LIB)/mrbus-crc.c $(MRBUS_LIB)/mrbus-queue.c
 INCS = $(MRBUS_LIB)/mrbee.h $(MRBUS_LIB)/mrbee-avr.h $(wildcard *.h)
 
 AVRDUDE = avrdude -P $(PROGRAMMER_PORT) -c $(PROGRAMMER_TYPE) -p $(DEVICE) -B1
@@ -86,6 +86,7 @@ help:
 	@echo "make terminal... open up avrdude terminal"
 	@echo "make speedtest. run the scale-speed model reference-trace test (host cc)"
 	@echo "make pressuretest. run the air-brake model reference-trace test (host cc)"
+	@echo "make eepromtest. run the EEPROM layout-migration reference-trace test (host cc)"
 	@echo "cst_cfgtransfer.py .. export/import loco configs to/from JSON, see cst-cfgtransfer/README.md"
 
 hex: $(BASE_NAME).hex
@@ -186,11 +187,45 @@ pressuretest-accept: $(PRESSURETEST_BIN)
 	@rm -rf $(PRESSURETEST_DIR)/reference && mv $(PRESSURETEST_DIR)/out $(PRESSURETEST_DIR)/reference
 	@echo "reference traces regenerated from the current cst-pressure.c - review 'git diff' before committing"
 
+# --- host-compiled reference-trace test for the EEPROM layout migrations (cst-eeprom.c) ---
+# Same technique as speedtest/pressuretest, for applyEepromMigrations(): compiles
+# cst-eeprom.c natively and runs it over synthetic pre-migration EEPROM images (a
+# 4096-byte array), diffing the post-migration image against cst-eeprom-test/reference/.
+# <avr/eeprom.h> and <avr/wdt.h> are shimmed via cst-eeprom-test/stubs (the migrations
+# use only the byte-at-a-time eeprom API). See cst-eeprom-test/README.md.
+EEPROMTEST_DIR    = cst-eeprom-test
+EEPROMTEST_BIN    = $(EEPROMTEST_DIR)/eepromtest
+EEPROMTEST_CC    ?= cc
+# -Wno-int-to-pointer-cast: cst-eeprom.c casts small integer EEPROM addresses to
+# uint8_t* for the eeprom API. On AVR int and pointer are both 16-bit so this is
+# clean; on a 64-bit host the narrowing is harmless (the shim masks to 0x0FFF)
+# but noisy under -Wall.
+EEPROMTEST_CFLAGS = -std=gnu99 -O2 -fshort-enums -Wall -Wno-int-to-pointer-cast -I$(EEPROMTEST_DIR)/stubs
+
+$(EEPROMTEST_BIN): $(EEPROMTEST_DIR)/test_eeprom.c cst-eeprom.c cst-eeprom.h cst-functions.h cst-speed.h cst-pressure.h \
+	$(EEPROMTEST_DIR)/stubs/avr/eeprom.h $(EEPROMTEST_DIR)/stubs/avr/wdt.h
+	$(EEPROMTEST_CC) $(EEPROMTEST_CFLAGS) -o $@ $<
+
+eepromtest: $(EEPROMTEST_BIN)
+	@rm -rf $(EEPROMTEST_DIR)/out && mkdir -p $(EEPROMTEST_DIR)/out
+	@$(EEPROMTEST_BIN) $(EEPROMTEST_DIR)/out
+	@diff -ru $(EEPROMTEST_DIR)/reference $(EEPROMTEST_DIR)/out \
+		&& echo "PASS: EEPROM migration reference images match" \
+		|| { echo; echo "FAIL: migration output changed - review the diff above."; \
+		     echo "      If the change is intended: make eepromtest-accept"; exit 1; }
+
+eepromtest-accept: $(EEPROMTEST_BIN)
+	@rm -rf $(EEPROMTEST_DIR)/out && mkdir -p $(EEPROMTEST_DIR)/out
+	@$(EEPROMTEST_BIN) $(EEPROMTEST_DIR)/out
+	@rm -rf $(EEPROMTEST_DIR)/reference && mv $(EEPROMTEST_DIR)/out $(EEPROMTEST_DIR)/reference
+	@echo "reference images regenerated from the current cst-eeprom.c - review 'git diff' before committing"
+
 # rule for deleting dependent files (those which can be built by Make):
 clean:
 	rm -f $(BASE_NAME).hex $(BASE_NAME).lst $(BASE_NAME).obj $(BASE_NAME).cof $(BASE_NAME).list $(BASE_NAME).map $(BASE_NAME).eep.hex $(BASE_NAME).elf $(BASE_NAME).s $(OBJS) *.o *.tgz *~
 	rm -rf $(SPEEDTEST_BIN) $(SPEEDTEST_DIR)/out
 	rm -rf $(PRESSURETEST_BIN) $(PRESSURETEST_DIR)/out
+	rm -rf $(EEPROMTEST_BIN) $(EEPROMTEST_DIR)/out
 
 # Generic rule for compiling C files:
 .c.o:

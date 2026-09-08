@@ -152,29 +152,20 @@ static const uint8_t stackBandThresholds5Step[STACK_BAND_COUNT_5STEP - 1] = { 17
 #define BK2_CONTROL 0x20
 #define BK3_CONTROL 0x40
 
+// The STACK band->combo storage encoding (and its factory defaults) live in cst-eeprom.h so the
+// layout-1->2 migration in cst-eeprom.c can name them. A stored combo byte is OR'd straight into
+// `controls`, so the two must agree bit-for-bit:
+_Static_assert(BRAKE_CONTROL == STACK_COMBO_BRK1 && BK2_CONTROL == STACK_COMBO_BRK2
+               && BK3_CONTROL == STACK_COMBO_BRK3,
+               "STACK combo storage bits must match the controls BRAKE/BK2/BK3 bits");
+
 // Band->combo mapping, configurable on-device via OPTION_SCREEN (bands 1-3/1-5; band 0 is fixed to
 // "none", not stored/editable). Populated from EE_STACK_BAND_COMBOS_3STEP/EE_STACK_BAND_COMBOS by
-// readConfig(); see resetConfig() for factory defaults. Stored completely separately per variant, so
-// toggling OPTIONBITS_STACK_5STEP back and forth never cross-contaminates one variant's configured
-// combos with the other's.
+// readConfig(); see resetConfig() for factory defaults (STACK_*STEP_DEFAULT_* in cst-eeprom.h).
+// Stored completely separately per variant, so toggling OPTIONBITS_STACK_5STEP back and forth never
+// cross-contaminates one variant's configured combos with the other's.
 uint8_t stackBandCombos3Step[STACK_BAND_COUNT_3STEP];
 uint8_t stackBandCombos5Step[STACK_BAND_COUNT_5STEP];
-
-// Factory defaults for the two variants - named so readConfig() (0xFF-fallback for unprogrammed EEPROM)
-// and resetConfig() (factory-reset writes) can't drift out of sync with each other.
-// Both variants' steps are ordered by escalating *total* decoder brake force, not by which brake is
-// used - for the CV mix these target (Brake1 130, Brake2 70, Brake3 100) 5-STEP runs
-// 100/130/170/200/230 and 3-STEP runs 70/100/130. All three brakes together (~300, past the decoder's
-// 255 cap = near-instant stop) is deliberately NOT a step - it's left for a dedicated emergency-stop
-// control, not normal lever travel.
-#define STACK_5STEP_DEFAULT_1  BK3_CONTROL
-#define STACK_5STEP_DEFAULT_2  BRAKE_CONTROL
-#define STACK_5STEP_DEFAULT_3  (BK2_CONTROL | BK3_CONTROL)
-#define STACK_5STEP_DEFAULT_4  (BRAKE_CONTROL | BK2_CONTROL)
-#define STACK_5STEP_DEFAULT_5  (BRAKE_CONTROL | BK3_CONTROL)
-#define STACK_3STEP_DEFAULT_1  BK2_CONTROL
-#define STACK_3STEP_DEFAULT_2  BK3_CONTROL
-#define STACK_3STEP_DEFAULT_3  BRAKE_CONTROL
 
 // OPTION_SCREEN's STACK band-editor UP/DOWN cycle order: none -> each single brake -> each pair -> all three,
 // rather than a raw binary count - a more intuitive progression for a human turning the dial.
@@ -1053,124 +1044,10 @@ void readConfig(void)
 	if(eeprom_read_byte((uint8_t*)EE_VERSION_MINOR) != minor)
 		eeprom_write_byte((uint8_t*)EE_VERSION_MINOR, minor);
 
-	// EEPROM layout version, independent of the git-tag-derived major/minor above - see the comment by
-	// EEPROM_LAYOUT_VERSION's definition in cst-eeprom.h. Lets offline tooling detect a layout mismatch.
-	uint8_t oldLayoutVersion = eeprom_read_byte((uint8_t*)EE_LAYOUT_VERSION);
-	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
-		eeprom_write_byte((uint8_t*)EE_LAYOUT_VERSION, EEPROM_LAYOUT_VERSION);
-
-	// The per-slot SPEED + AIRBRAKE config (plus the HORN2/COMPRESSOR2 function slots wedged between
-	// them) was repacked contiguous into bytes 0x3C-0x53 - see cst-eeprom.h - closing the single-byte
-	// holes left by fields removed during their own uncommitted development. A throttle coming from the
-	// last committed layout has its old-offset values sitting where the repacked fields now read, so
-	// force the whole 0x3C-0x53 range back to defaults in every profile slot + the working config.
-	// Harmless on a fresh chip (would self-heal to the same values anyway) and a no-op once past this
-	// version. A configured throttle should be backed up (cst_cfgtransfer.py export) before upgrading
-	// and restored (import) afterward.
-	if(oldLayoutVersion < 2)
-	{
-		// One entry per byte 0x3C..0x53, in EEPROM-byte order.
-		static const uint8_t repackDefault[0x53 - 0x3C + 1] = {
-			SPEED_TYPE_DEFAULT, SPEED_OPLOAD_DEFAULT, SPEED_PRLOAD_DEFAULT,       // 0x3C-0x3E
-			SPEED_OPLOAD_FN_DEFAULT, SPEED_PRLOAD_FN_DEFAULT,                     // 0x3F-0x40
-			STACK_3STEP_DEFAULT_1, STACK_3STEP_DEFAULT_2, STACK_3STEP_DEFAULT_3,  // 0x41-0x43 (3-STEP combos)
-			SPEED_HOLD_WATCH_FN_DEFAULT,                                         // 0x44
-			SPEED_DECEL_THRESHOLD_DEFAULT, SPEED_DECEL_PCT_DEFAULT,              // 0x45-0x46
-			SPEED_ACCEL_PCT_DEFAULT, SPEED_ACCEL_TARGET_DEFAULT,                // 0x47-0x48
-			FN_OFF,                                                             // 0x49 HORN2_FUNCTION
-			AIRBRAKE_CHARGED_DEFAULT, AIRBRAKE_MR_CUTIN_DEFAULT,                // 0x4A-0x4B
-			AIRBRAKE_MR_CUTOUT_DEFAULT, AIRBRAKE_CHARGE_RATE_DEFAULT,           // 0x4C-0x4D
-			AIRBRAKE_LEAK_RATE_DEFAULT, AIRBRAKE_PUMP_RATE_DEFAULT,             // 0x4E-0x4F
-			AIRBRAKE_MR_LOAD_DEFAULT, AIRBRAKE_COMP_MODE_DEFAULT,               // 0x50-0x51
-			FN_OFF,                                                             // 0x52 COMPRESSOR2_FUNCTION
-			AIRBRAKE_DISPLAY_DEFAULT };                                         // 0x53
-		uint8_t s, k;
-		for(s = 1; s <= MAX_CONFIGS; s++)
-		{
-			wdt_reset();
-			for(k = 0; k < sizeof(repackDefault); k++)
-				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x3C + k), repackDefault[k]);
-		}
-		wdt_reset();
-		for(k = 0; k < sizeof(repackDefault); k++)
-			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x3C + k), repackDefault[k]);
-	}
-
-	// EEPROM_LAYOUT_VERSION 2 -> 3: the 13 decoder-type-specific SPEED model parameters (BRK2/BRK3/
-	// DELAY, HOLDFN/STOPFN, the load CVs and their watch functions, the four correction tunables) moved
-	// out of their scattered holes in 0x2C-0x48 into the contiguous EE_SPEED_MODEL_PAYLOAD block at
-	// 0x54-0x63 - see cst-eeprom.h. The 6 type-agnostic SPEED items (ACCEL/DECEL/BRK1/MAXSPEED/UNIT/
-	// TYPE) did not move. A blank chip reads 0xFF (255, not < 3) here and is skipped - every field
-	// self-heals via readByteOrDefault.
-	if(2 == oldLayoutVersion)
-	{
-		// Layout 2 has a real per-profile SPEED model config. Relocate every value in place - the new
-		// payload byte at 0x54+k takes the value from this profile's old scattered offset - so the
-		// upgrade preserves all tuning and needs no backup/restore. v3ModelSrc[k] is the pre-move
-		// offset for new payload byte 0x54+k (BRK2, BRK3, DELAY, HOLDFN, STOPFN, OPLOAD, OPLOADFN,
-		// PRLOAD, PRLOADFN, ACCPCT, ACCTGT, DECPCT, DECTHR). 0x61-0x63 stay as-is (reserved).
-		static const uint8_t v3ModelSrc[13] = {
-			0x2C, 0x2D, 0x2F, 0x44, 0x3B, 0x3D, 0x3F, 0x3E, 0x40, 0x47, 0x48, 0x46, 0x45 };
-		uint8_t s, k;
-		for(s = 1; s <= MAX_CONFIGS; s++)
-		{
-			wdt_reset();
-			for(k = 0; k < sizeof(v3ModelSrc); k++)
-				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x54 + k),
-				                  eeprom_read_byte((uint8_t*)(CONFIG_OFFSET(s) + v3ModelSrc[k])));
-		}
-		wdt_reset();
-		for(k = 0; k < sizeof(v3ModelSrc); k++)
-			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x54 + k),
-			                  eeprom_read_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + v3ModelSrc[k])));
-	}
-	else if(oldLayoutVersion < 2)
-	{
-		// A stock/pre-guard chip has no fork SPEED model config, and its bytes at the old scattered
-		// offsets are not meaningful - default the 13 payload bytes (0x54-0x60). 0x61-0x63 are reserved
-		// and left as read (0xFF on an erased chip; a future field self-heals via readByteOrDefault).
-		static const uint8_t speedModelDefault[13] = {
-			MOMENTUM_BRAKE2_CV180_DEFAULT, MOMENTUM_BRAKE3_CV181_DEFAULT, MOMENTUM_START_DELAY_DEFAULT,
-			SPEED_HOLD_WATCH_FN_DEFAULT, SPEED_STOP_WATCH_FN_DEFAULT,
-			SPEED_OPLOAD_DEFAULT, SPEED_OPLOAD_FN_DEFAULT, SPEED_PRLOAD_DEFAULT, SPEED_PRLOAD_FN_DEFAULT,
-			SPEED_ACCEL_PCT_DEFAULT, SPEED_ACCEL_TARGET_DEFAULT,
-			SPEED_DECEL_PCT_DEFAULT, SPEED_DECEL_THRESHOLD_DEFAULT };
-		uint8_t s, k;
-		for(s = 1; s <= MAX_CONFIGS; s++)
-		{
-			wdt_reset();
-			for(k = 0; k < sizeof(speedModelDefault); k++)
-				eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(s) + 0x54 + k), speedModelDefault[k]);
-		}
-		wdt_reset();
-		for(k = 0; k < sizeof(speedModelDefault); k++)
-			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x54 + k), speedModelDefault[k]);
-	}
-
-	// EEPROM_LAYOUT_VERSION -> 4. Five SPEED bytes leave readByteOrDefault() and are read RAW below, so
-	// a stored 0xFF now means a real value (ACCEL/DECEL 0x28/0x2E = 255; HOLDFN 0x57 = OFF;
-	// ACCELADJ/DECELADJ 0x61/0x62 = -127). readByteOrDefault()'s heal-on-0xFF no longer covers a
-	// never-written byte, so seed the defaults here. Gated on != EEPROM_LAYOUT_VERSION (not < 4) so it
-	// ALSO runs on a blank/wiped chip (oldLayoutVersion 0xFF) - the one migration that does. Runs once
-	// (the version stamp at the top). 0x28/0x2E/0x57 are only rewritten if currently 0xFF (a real value
-	// is preserved); 0x61/0x62 are written to 0 unconditionally - no layout-4 chip triggers this block,
-	// so there can be no real ADJ value to lose, and B1 left them as arbitrary reserved bytes.
-	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
-	{
-		static const uint8_t rawSeedOffset[3]  = { 0x28, 0x2E, 0x57 };
-		static const uint8_t rawSeedDefault[3] = { MOMENTUM_ACCEL_CV3_DEFAULT, MOMENTUM_DECEL_CV4_DEFAULT, SPEED_HOLD_WATCH_FN_DEFAULT };
-		uint8_t s, k;
-		for(s = 1; s <= MAX_CONFIGS + 1; s++)
-		{
-			uint16_t base = CONFIG_OFFSET((s <= MAX_CONFIGS) ? s : WORKING_CONFIG);
-			wdt_reset();
-			for(k = 0; k < 3; k++)
-				if(0xFF == eeprom_read_byte((uint8_t*)(base + rawSeedOffset[k])))
-					eeprom_write_byte((uint8_t*)(base + rawSeedOffset[k]), rawSeedDefault[k]);
-			eeprom_write_byte((uint8_t*)(base + 0x61), SPEED_ACCEL_ADJ_DEFAULT);
-			eeprom_write_byte((uint8_t*)(base + 0x62), SPEED_DECEL_ADJ_DEFAULT);
-		}
-	}
+	// EEPROM layout-version stamp + one-shot migrations from an older layout (cst-eeprom.c). Reads the
+	// pre-stamp EE_LAYOUT_VERSION byte and hands it in; a no-op once the chip is on the current layout.
+	// Covered by `make eepromtest`.
+	applyEepromMigrations(eeprom_read_byte((uint8_t*)EE_LAYOUT_VERSION));
 
 
 	update_decisecs = (uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_L) | (((uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_H)) << 8);
@@ -1377,14 +1254,14 @@ void readConfig(void)
 	{
 		// Mask off anything but the 3 valid bits, in case of other (non-0xFF) corrupt EEPROM - this
 		// value gets OR'd directly into controls, so stray bits here would corrupt unrelated bits.
-		stackBandCombos5Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
+		stackBandCombos5Step[i] &= STACK_COMBO_MASK;
 	}
 	stackBandCombos3Step[0] = 0x00;
 	stackBandCombos3Step[1] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 0), STACK_3STEP_DEFAULT_1);
 	stackBandCombos3Step[2] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 1), STACK_3STEP_DEFAULT_2);
 	stackBandCombos3Step[3] = readByteOrDefault((uint8_t*)(EE_STACK_BAND_COMBOS_3STEP + 2), STACK_3STEP_DEFAULT_3);
 	for(i=1; i<STACK_BAND_COUNT_3STEP; i++)
-		stackBandCombos3Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
+		stackBandCombos3Step[i] &= STACK_COMBO_MASK;
 
 	// Scale-speed simulation config - raw 0-255 values mirroring the loco's decoder CVs directly.
 	// ACCEL / DECEL are genuine 0-255 (a decoder's literal CV3 / CV4 can be 255), so they are read raw:
