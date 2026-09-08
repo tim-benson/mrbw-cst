@@ -196,16 +196,19 @@ class MenuOrderTests(unittest.TestCase):
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["options"]), expected)
 
     def test_speed_keys_match_speed_cfg_menu_order(self):
-        # SPEED CFG shows the 6 type-agnostic items first (TYPE leads), then the current TYPE's model
-        # params - V5DCC/V5MULT carry all 13, V4 the 7-item subset. Mirrors the cst-speed.c descriptors.
-        agnostic = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL", "BRK1"]
+        # SPEED CFG shows the 5 type-agnostic items first (TYPE leads), with ACCELADJ/DECELADJ spliced
+        # in right after the ACCEL/DECEL they adjust, then the rest of the current TYPE's model params -
+        # V5DCC/V5MULT carry all 16, V4 the 8-item subset (drops ACCELADJ/DECELADJ, BRK2/BRK3 and the
+        # load CVs; keeps BRK1). Mirrors speedItemAt() and the descriptors in cst-speed.c.
+        agnostic = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL"]
         self.assertEqual(layout.SPEED_AGNOSTIC_FIELDS, agnostic)
-        self.assertEqual(layout.speed_fields_for_type("V5DCC"), agnostic + [
-            "BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN",
-            "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
+        self.assertEqual(layout.speed_fields_for_type("V5DCC"), [
+            "TYPE", "MAXSPEED", "UNIT", "ACCEL", "ACCELADJ", "DECEL", "DECELADJ",
+            "BRK1", "BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN",
+            "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
         self.assertEqual(layout.speed_fields_for_type("V5MULT"), layout.speed_fields_for_type("V5DCC"))
         self.assertEqual(layout.speed_fields_for_type("V4"), agnostic + [
-            "DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
+            "BRK1", "DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"])
 
     def test_airbrake_keys_match_airbrake_cfg_menu_order(self):
         # = AIRBRAKE_CONFIG_SCREEN item order (cst-pressure.h AIRBRAKE_* enum) - all 9 always visible,
@@ -283,7 +286,12 @@ class SlotRoundTripTests(unittest.TestCase):
         for v in decoded["options"]["stack_band_combos_3step"]:
             self.assertEqual(v, slot_codec.UNSET)
         for key in layout.SPEED_FIELD_DEFAULTS:
-            self.assertEqual(decoded["speed"][key], slot_codec.UNSET)
+            if key in layout.SPEED_FULL_RANGE_FIELDS:
+                self.assertEqual(decoded["speed"][key], 255)   # genuine 0-255: raw 0xFF is a real 255
+            elif key in layout.SPEED_SIGNED_FIELDS:
+                self.assertEqual(decoded["speed"][key], -127)  # sign-magnitude: raw 0xFF is a real -127
+            else:
+                self.assertEqual(decoded["speed"][key], slot_codec.UNSET)
         for key, _off in layout.AIRBRAKE_FIELDS:
             self.assertEqual(decoded["airbrake"][key], slot_codec.UNSET)
         # Function bytes have no self-heal - an unrecognized raw byte round-trips as a RAW: passthrough.
@@ -304,8 +312,10 @@ class SlotRoundTripTests(unittest.TestCase):
             d["options"]["stack_band_combos_5step"][i] = slot_codec.UNSET
         for i in range(3):
             d["options"]["stack_band_combos_3step"][i] = slot_codec.UNSET
+        raw_speed = layout.SPEED_FULL_RANGE_FIELDS | layout.SPEED_SIGNED_FIELDS  # no UNSET state
         for key in d["speed"]:
-            d["speed"][key] = slot_codec.UNSET
+            if key not in raw_speed:   # leave the raw-read fields at 42
+                d["speed"][key] = slot_codec.UNSET
         encoded = slot_codec.encode_slot(d)
         self.assertEqual(encoded[layout.EE_OPTIONBITS], 0xFF)
         for i in range(5):
@@ -313,7 +323,10 @@ class SlotRoundTripTests(unittest.TestCase):
         for i in range(3):
             self.assertEqual(encoded[layout.EE_STACK_BAND_COMBOS_3STEP + i], 0xFF)
         for key in layout.SPEED_FIELD_OFFSET:
-            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], 0xFF)
+            if key in raw_speed:
+                self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], 42)
+            else:
+                self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], 0xFF)
         decoded = slot_codec.decode_slot(encoded, source=d["source"])
         self.assertEqual(decoded, d)
 
@@ -397,11 +410,11 @@ class SlotRoundTripTests(unittest.TestCase):
 
 
 class SpeedTypeTests(unittest.TestCase):
-    """The `speed` object is decoder-family-shaped: V5DCC/V5MULT carry all 13 model fields, V4 the
-    7-item subset (no BRK2/BRK3, no load CVs). Mirrors cst-speed.c's per-TYPE descriptors and
-    speedResetModel()/speedItemInert()."""
+    """The `speed` object is decoder-family-shaped: V5DCC/V5MULT carry all 16 model fields, V4 the
+    8-item subset (no ACCELADJ/DECELADJ, no BRK2/BRK3, no load CVs; keeps BRK1). Mirrors cst-speed.c's
+    per-TYPE descriptors and speedResetModel()/speedItemInert()."""
 
-    V4_DROPPED = {"BRK2", "BRK3", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN"}
+    V4_DROPPED = {"ACCELADJ", "DECELADJ", "BRK2", "BRK3", "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN"}
 
     def _slot_with_speed(self, speed):
         d = _valid_slot_dict("PULSE")
@@ -413,13 +426,14 @@ class SpeedTypeTests(unittest.TestCase):
             d = self._slot_with_speed(_valid_speed(tname))
             decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
             self.assertEqual(decoded["speed"], d["speed"])
-            self.assertEqual(len(decoded["speed"]), 19)
+            self.assertEqual(len(decoded["speed"]), 21)
 
-    def test_v4_speed_has_only_its_seven_model_fields(self):
+    def test_v4_speed_drops_the_v5_only_fields_keeps_brk1(self):
         d = self._slot_with_speed(_valid_speed("V4"))
         decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
         self.assertEqual(decoded["speed"], d["speed"])
         self.assertEqual(set(decoded["speed"]) & self.V4_DROPPED, set())
+        self.assertIn("BRK1", decoded["speed"])
         self.assertEqual(len(decoded["speed"]), 13)
 
     def test_encoding_v4_forces_dropped_slots_inert(self):
@@ -434,21 +448,48 @@ class SpeedTypeTests(unittest.TestCase):
         # dropped slots hold.
         raw = bytearray(b"\xFF" * layout.CONFIG_SIZE)
         raw[layout.EE_SPEED_TYPE] = layout.SPEED_TYPE_V4
-        raw[layout.SPEED_FIELD_OFFSET["BRK2"]] = 90   # stale value the V4 shape must not surface
+        raw[layout.SPEED_FIELD_OFFSET["BRK2"]] = 90    # stale value the V4 shape must not surface
+        raw[layout.SPEED_FIELD_OFFSET["ACCELADJ"]] = 20  # ditto
         speed = slot_codec.decode_slot(bytes(raw), source={})["speed"]
         self.assertEqual(speed["TYPE"], "V4")
         self.assertNotIn("BRK2", speed)
+        self.assertNotIn("ACCELADJ", speed)
         self.assertEqual(len(speed), 13)
 
     def test_v4_slot_rejects_a_dropped_field(self):
         speed = _valid_speed("V4")
-        speed["BRK2"] = 70
+        speed["ACCELADJ"] = 10
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_slot(self._slot_with_speed(speed))
 
+    def test_adjust_signed_round_trip(self):
+        # full -127..+127 range; -127 is byte 0xFF (sign-magnitude), which decodes back to -127 (not
+        # "UNSET") because the firmware reads these bytes raw.
+        for val, byte in ((0, 0x00), (20, 0x14), (-15, 0x8F), (63, 0x3F), (-63, 0xBF),
+                          (127, 0x7F), (-127, 0xFF), (-126, 0xFE)):
+            d = self._slot_with_speed(_valid_speed("V5DCC"))
+            d["speed"]["ACCELADJ"] = val
+            d["speed"]["DECELADJ"] = -val if val != -127 else 127
+            encoded = slot_codec.encode_slot(d)
+            self.assertEqual(encoded[layout.EE_SPEED_ACCEL_ADJ], byte)
+            decoded = slot_codec.decode_slot(encoded, source=d["source"])
+            self.assertEqual(decoded["speed"]["ACCELADJ"], val)
+
+    def test_adjust_out_of_range_rejected(self):
+        d = self._slot_with_speed(_valid_speed("V5DCC"))
+        d["speed"]["ACCELADJ"] = 128   # 127 is the max
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+
+    def test_adjust_unset_maps_to_zero(self):
+        d = self._slot_with_speed(_valid_speed("V5DCC"))
+        d["speed"]["ACCELADJ"] = slot_codec.UNSET
+        encoded = slot_codec.encode_slot(d)
+        self.assertEqual(encoded[layout.EE_SPEED_ACCEL_ADJ], 0)   # not the 0xFF sentinel
+
     def test_flat_v4_backup_needs_import_old_then_round_trips(self):
-        # A pre-split flat backup (all 19 fields) with TYPE hand-changed to V4: rejected on a plain
-        # import, accepted with --import-old (the inapplicable fields ignored, slots forced inert).
+        # A pre-split flat backup with TYPE hand-changed to V4: rejected on a plain import, accepted
+        # with --import-old (the inapplicable fields ignored, slots forced inert).
         flat = _valid_speed("V5DCC")
         flat["TYPE"] = "V4"
         d = self._slot_with_speed(flat)
@@ -459,6 +500,55 @@ class SpeedTypeTests(unittest.TestCase):
             self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], inert)
         decoded = slot_codec.decode_slot(encoded, source=d["source"])
         self.assertEqual(decoded["speed"], _valid_speed("V4"))
+
+
+class SpeedFullRangeTests(unittest.TestCase):
+    """ACCEL/DECEL are genuine 0-255 fields (a decoder's literal CV3/CV4 can be 255); every other
+    plain-numeric SPEED field still self-heals from 0xFF and so stays 0-254 + "UNSET". Pins
+    _decode_speed / _encode_speed (SPEED_FULL_RANGE_FIELDS)."""
+
+    def _slot_with_speed(self, speed):
+        d = _valid_slot_dict("PULSE")
+        d["speed"] = speed
+        return d
+
+    def test_accel_decel_round_trip_across_range(self):
+        for key in ("ACCEL", "DECEL"):
+            for val in (0, 1, 60, 230, 254, 255):
+                d = self._slot_with_speed(_valid_speed("V5DCC"))
+                d["speed"][key] = val
+                encoded = slot_codec.encode_slot(d)
+                self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], val)
+                decoded = slot_codec.decode_slot(encoded, source=d["source"])
+                self.assertEqual(decoded["speed"][key], val)
+
+    def test_raw_0xff_decodes_to_255(self):
+        raw = bytearray(b"\xFF" * layout.CONFIG_SIZE)
+        raw[layout.EE_SPEED_TYPE] = layout.SPEED_TYPE_V5DCC
+        speed = slot_codec.decode_slot(bytes(raw), source={})["speed"]
+        self.assertEqual(speed["ACCEL"], 255)
+        self.assertEqual(speed["DECEL"], 255)
+
+    def test_unset_on_import_maps_to_default(self):
+        for key, default in (("ACCEL", 60), ("DECEL", 230)):
+            d = self._slot_with_speed(_valid_speed("V5DCC"))
+            d["speed"][key] = slot_codec.UNSET
+            encoded = slot_codec.encode_slot(d)
+            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], default)
+
+    def test_out_of_range_rejected(self):
+        d = self._slot_with_speed(_valid_speed("V5DCC"))
+        d["speed"]["ACCEL"] = 256
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+
+    def test_brk1_still_rejects_255(self):
+        d = self._slot_with_speed(_valid_speed("V5DCC"))
+        d["speed"]["BRK1"] = 255
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
+        d["speed"]["BRK1"] = 254   # 254 is fine
+        slot_codec.encode_slot(d)
 
 
 class AirbrakeFieldTests(unittest.TestCase):
@@ -543,6 +633,16 @@ class GlobalRoundTripTests(unittest.TestCase):
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_global(d)
 
+    def test_tx_holdoff_ceiling_is_254(self):
+        # The firmware caps TX HLDOF at 254 and heals a stored 0xFF, so 255 is no longer valid.
+        d = _valid_global_dict()
+        d["comm"]["tx_holdoff_centisecs"] = 255
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_global(d)
+        d["comm"]["tx_holdoff_centisecs"] = 254
+        encoded = slot_codec.encode_global(d)
+        self.assertEqual(encoded[layout.EE_TX_HOLDOFF], 254)
+
 
 class AllowMissingTests(unittest.TestCase):
     """`allow_missing=True` (the `--import-old` CLI flag) is for restoring a JSON backup taken under an
@@ -565,10 +665,20 @@ class AllowMissingTests(unittest.TestCase):
 
     def test_missing_speed_key_allowed_and_decodes_to_unset(self):
         d = _valid_slot_dict()
-        del d["speed"]["ACCEL"]
+        del d["speed"]["BRK1"]   # a self-healing field - a missing key -> 0xFF -> "UNSET"
         encoded = slot_codec.encode_slot(d, allow_missing=True)
         decoded = slot_codec.decode_slot(encoded, source=d["source"])
-        self.assertEqual(decoded["speed"]["ACCEL"], slot_codec.UNSET)
+        self.assertEqual(decoded["speed"]["BRK1"], slot_codec.UNSET)
+
+    def test_missing_full_range_speed_key_defaults_not_unset(self):
+        # ACCEL/DECEL have no "unset" byte (0xFF is a real 255), so a missing key -> the real default.
+        for key, default in (("ACCEL", 60), ("DECEL", 230)):
+            d = _valid_slot_dict()
+            del d["speed"][key]
+            encoded = slot_codec.encode_slot(d, allow_missing=True)
+            self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], default)
+            decoded = slot_codec.decode_slot(encoded, source=d["source"])
+            self.assertEqual(decoded["speed"][key], default)
 
     def test_missing_airbrake_key_allowed_and_decodes_to_unset(self):
         d = _valid_slot_dict()

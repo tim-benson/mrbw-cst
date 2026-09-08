@@ -4,11 +4,12 @@
 #define LOCO_ADDRESS_SHORT 0x8000
 
 // CGRAM slots are reused per LcdMode: slots 6/7 - PSI_CHAR_L/R under LCD_DEFAULT (AIRBRAKE unit
-// glyph), BELL_CHAR/HORN_CHAR under LCD_DIAGS. All 8 slots (0-7) - GAUGE_CHAR_A0-A3/B0-B3 under
-// LCD_AIRBRAKE_ALT (the analogue gauge dial face, one custom char per 5x8 cell of a 2-row x 4-col
-// canvas - no room left for anything else while this mode is active). setupLCD() reloads the
-// static ones on every mode change; the gauge's cells are additionally rewritten every render pass
-// (setupGaugeChars() in cst-lcd.c) since the needle moves live.
+// glyph), BELL_CHAR/HORN_CHAR under LCD_DIAGS, slot 5 - PLUSMINUS_CHAR under LCD_SPEED_ADJ (SPEED
+// CFG ACCEL/DECEL adjust labels, borrowing the AUX slot which is main-screen-only). All 8 slots
+// (0-7) - GAUGE_CHAR_A0-A3/B0-B3 under LCD_AIRBRAKE_ALT (the analogue gauge dial face, one custom
+// char per 5x8 cell of a 2-row x 4-col canvas - no room left for anything else while this mode is
+// active). setupLCD() reloads the static ones on every mode change; the gauge's cells are
+// additionally rewritten every render pass (setupGaugeChars() in cst-lcd.c) since the needle moves live.
 
 // Default
 #define BATTERY_CHAR            0
@@ -23,6 +24,10 @@
 // Diags
 #define BELL_CHAR               6
 #define HORN_CHAR               7
+
+// SPEED CFG ACCEL/DECEL adjust ("ACCEL +/-") - reuses the AUX slot (rendered only on MAIN_SCREEN;
+// the menu-exit setupLCD(LCD_DEFAULT) restores AUX before the main screen can draw it)
+#define PLUSMINUS_CHAR          5
 
 // AIRBRAKE ALT (analogue gauge) - consumes all 8 slots
 #define GAUGE_CHAR_A0           0

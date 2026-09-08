@@ -108,6 +108,25 @@ void setupAuxChars(void)
 	lcd_setup_custom(AUX_CHAR, Aux);
 }
 
+// "+/-" for the SPEED CFG ACCEL/DECEL adjust labels (ACCELADJ/DECELADJ). A full '+' (rows 0-4) over a
+// '-' bar (row 6). Reuses the AUX CGRAM slot under LCD_SPEED_ADJ - see cst-common.h.
+const uint8_t PlusMinus[8] =
+{
+	0b00000100,
+	0b00000100,
+	0b00011111,
+	0b00000100,
+	0b00000100,
+	0b00000000,
+	0b00011111,
+	0b00000000
+};
+
+void setupPlusMinusChar(void)
+{
+	lcd_setup_custom(PLUSMINUS_CHAR, PlusMinus);
+}
+
 // "PSI" unit label for the AIRBRAKE screen - a hand-drawn 2-cell glyph (P S I across 10x8).
 const uint8_t PsiCharL[8] =
 {
@@ -604,6 +623,12 @@ void setupLCD(LcdMode mode)
 				// setupGaugeChars() instead (the needle moves live). This case only exists so
 				// currentMode tracks reality, letting a later setupLCD(LCD_DEFAULT) correctly
 				// detect the change and reload the battery/softkey/clock/aux/PSI glyphs.
+				break;
+			case LCD_SPEED_ADJ:
+				// = LCD_DEFAULT with the AUX slot reused for the "+/-" glyph. SPEED CFG is always
+				// entered from a LCD_DEFAULT context so the other 7 slots are already loaded; the
+				// menu-exit setupLCD(LCD_DEFAULT) restores AUX because currentMode changed here.
+				setupPlusMinusChar();
 				break;
 		}
 		currentMode = mode;

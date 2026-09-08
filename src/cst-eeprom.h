@@ -11,7 +11,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          3
+#define EEPROM_LAYOUT_VERSION          4
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -122,10 +122,13 @@
 // Group 1 - decoder-type-agnostic (6 bytes): these mean the same thing for every SPEED_TYPE and keep
 // their original scattered addresses. ACCEL/DECEL/BRK1 (CV3/CV4/CV179 mirrors - "momentum" is the
 // correct NMRA/ESU term) reuse the isolated single-byte gaps left by EE_BK2_FUNCTION/EE_BK3_FUNCTION;
-// MAX_MPH/UNIT/TYPE take the free bytes after EE_STACK_BAND_COMBOS.
-#define EE_MOMENTUM_ACCEL_CV3         (0x28 + CONFIG_OFFSET(WORKING_CONFIG))  // CV3, agnostic
+// MAX_MPH/UNIT/TYPE take the free bytes after EE_STACK_BAND_COMBOS. ACCEL/DECEL are read raw by
+// readConfig() (a decoder's literal CV3/CV4 can be 255, so a stored 0xFF is a real 255, not "unset" -
+// the layout -> 4 seed migration initialises any never-written byte). BRK1 and every other
+// plain-numeric SPEED item still self-heal from 0xFF via readByteOrDefault(), so their max is 254.
+#define EE_MOMENTUM_ACCEL_CV3         (0x28 + CONFIG_OFFSET(WORKING_CONFIG))  // CV3, agnostic, raw 0-255
 #define EE_MOMENTUM_BRAKE1_CV179      (0x2B + CONFIG_OFFSET(WORKING_CONFIG))  // CV179, agnostic
-#define EE_MOMENTUM_DECEL_CV4         (0x2E + CONFIG_OFFSET(WORKING_CONFIG))  // CV4, agnostic
+#define EE_MOMENTUM_DECEL_CV4         (0x2E + CONFIG_OFFSET(WORKING_CONFIG))  // CV4, agnostic, raw 0-255
 #define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126, agnostic
 #define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH, agnostic
 #define EE_SPEED_TYPE                 (0x3C + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_* - tags the decoder family
@@ -162,12 +165,12 @@
 #define EE_COMPRESSOR2_FUNCTION      (0x52 + CONFIG_OFFSET(WORKING_CONFIG))  // "COMPRSR2" - routine/staggered compressor event
 #define EE_AIRBRAKE_DISPLAY          (0x53 + CONFIG_OFFSET(WORKING_CONFIG))  // DUAL(0)/SINGLE(1) - see AIRBRAKE_DISPLAY
 
-// SPEED model payload (group 2): the 13 decoder-type-specific parameters, in one contiguous 16-byte
-// block (13 used, 0x61-0x63 reserved for future model params such as CV26/ADJUST). Which of these a
-// given SPEED_TYPE actually uses, and in what menu order, is decided by the per-family descriptor in
-// cst-speed.c (speedItemAt()); this is only their fixed storage. The EEPROM_LAYOUT_VERSION 2->3
-// migration in readConfig() relocates the parameters here from their former scattered offsets,
-// preserving every value for a layout-2 throttle (a stock/pre-guard chip gets model defaults).
+// SPEED model payload (group 2): the decoder-type-specific parameters, in one contiguous 16-byte
+// block (15 used, 0x63 reserved). Which of these a given SPEED_TYPE actually uses, and in what menu
+// order, is decided by the per-family descriptor in cst-speed.c (speedItemAt()); this is only their
+// fixed storage. The EEPROM_LAYOUT_VERSION 2->3 migration in readConfig() relocated 0x54-0x60 here
+// from their former scattered offsets (preserving every value for a layout-2 throttle); the 3->4
+// migration inits 0x61/0x62 (ACCELADJ/DECELADJ) to 0.
 #define EE_SPEED_MODEL_PAYLOAD       (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // block base
 #define EE_MOMENTUM_BRAKE2_CV180     (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // CV180 mirror
 #define EE_MOMENTUM_BRAKE3_CV181     (0x55 + CONFIG_OFFSET(WORKING_CONFIG))  // CV181 mirror
@@ -182,10 +185,12 @@
 #define EE_SPEED_ACCEL_TARGET        (0x5E + CONFIG_OFFSET(WORKING_CONFIG))  // target ticks-to-1mph (0.1s/tick)
 #define EE_SPEED_DECEL_PCT           (0x5F + CONFIG_OFFSET(WORKING_CONFIG))  // 0-255=0-100%, steady-state decel-lag strength
 #define EE_SPEED_DECEL_THRESHOLD     (0x60 + CONFIG_OFFSET(WORKING_CONFIG))  // raw speed step below which decel-lag does not apply
-//      reserved                      0x61 - 0x63
+#define EE_SPEED_ACCEL_ADJ           (0x61 + CONFIG_OFFSET(WORKING_CONFIG))  // CV23 mirror (Adjust Acceleration), signed, V5 only
+#define EE_SPEED_DECEL_ADJ           (0x62 + CONFIG_OFFSET(WORKING_CONFIG))  // CV24 mirror (Adjust Deceleration), signed, V5 only
+//      reserved                      0x63
 
-// 0x61-0x7F: per-slot space not yet in use - 0x61-0x63 reserved for future SPEED model params, the
-// rest padding. The old SPEED holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the
+// 0x63-0x7F: per-slot space not yet in use - 0x63 reserved for a future SPEED model param, the rest
+// padding. The old SPEED holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the
 // layout 2->3 model-parameter move) are also free to reuse.
 
 #endif

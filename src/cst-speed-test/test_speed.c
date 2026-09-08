@@ -149,6 +149,8 @@ static void cfgDefaults(void)
 	speedSet(SPEED_ITEM_ACCEL_TARGET,    SPEED_ACCEL_TARGET_DEFAULT);
 	speedSet(SPEED_ITEM_DECEL_PCT,       SPEED_DECEL_PCT_DEFAULT);
 	speedSet(SPEED_ITEM_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT);
+	speedSet(SPEED_ITEM_ACCEL_ADJ,       SPEED_ACCEL_ADJ_DEFAULT);
+	speedSet(SPEED_ITEM_DECEL_ADJ,       SPEED_DECEL_ADJ_DEFAULT);
 }
 
 static void traceOpen(const char *name, const char *cfgLine, const char *inputsLine)
@@ -453,6 +455,44 @@ static void sc_decel_cv230(void)
 	traceClose();
 }
 
+// DECEL is now a genuine 0-255 field. This is a linear extrapolation past the DECPCT/DECTHR
+// calibration ceiling of 230 - the code path is unchanged, only the correction's tuning is out of
+// scope up here (and a real ESU decoder goes non-monotonic). Still reaches a clean q8 = 0.
+static void sc_decel_cv255(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_DECEL, 255);
+	resetSpeed();
+	traceOpen("decel_cv255",
+	          "DECEL 255 (V5DCC) - genuine max CV4, past the validated range",
+	          "cmd=22 to tick 120 (settle), then cmd=0 - very slow coast to stop");
+	Inputs in = {0};
+	in.cmd = 22;
+	int t = runPhase(0, 120, &in);
+	in.cmd = 0;
+	runPhase(t, 560, &in);
+	traceClose();
+}
+
+// ACCEL is now a genuine 0-255 field - exercises the widened speedEffAccelCV() path and the ramp
+// int64 math at the max CV with the default MAXSPEED. The standing-start cubic ramp shows a ~0.27
+// speed-step (well below display resolution, self-correcting) non-monotonic wobble near the top of
+// its climb at this ACCEL - the same class of artifact CLAUDE.md notes for aggressive ACCTGT, here
+// from an ACCEL far past the calibrated 30-180 range. Baked into the reference trace deliberately.
+static void sc_accel_cv255(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL, 255);
+	resetSpeed();
+	traceOpen("accel_cv255",
+	          "ACCEL 255 (V5DCC) - genuine max CV3, default MAXSPEED",
+	          "cmd=100 from stop - very slow standing-start ramp");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 560, &in);
+	traceClose();
+}
+
 static void sc_maxspeed_120_kmh(void)
 {
 	cfgDefaults();
@@ -519,18 +559,22 @@ static void sc_type_v4(void)
 	traceClose();
 }
 
-/* Proof that V4 ignores the parameters it drops: Brake1+2+3 all held and Optional Load engaged, yet
- * the speed column must still track type_v5mult (brakeSum stays BRK1 only, applyLoad is a no-op). If
- * the inert- isation regressed, brakeSum would hit the 255 cap and the loco would stop almost at once. */
+/* Proof that V4 ignores the parameters it drops: Brake1+2+3 all held, Optional Load engaged, and a
+ * non-zero ACCELADJ/DECELADJ set, yet the speed column must still track type_v5mult (brakeSum stays BRK1
+ * only, applyLoad is a no-op, the effective ACCEL/DECEL stay the base CVs). If the inert-isation
+ * regressed, brakeSum would hit the 255 cap and the loco would stop almost at once, or the adjust
+ * would visibly bend the ramp. */
 static void sc_type_v4_extras_noop(void)
 {
 	cfgDefaults();
 	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4);
 	speedSet(SPEED_ITEM_OPLOAD, 200);                   /* a real value - must still read as inert */
+	speedSet(SPEED_ITEM_ACCEL_ADJ, 40);                 /* +40 - must still read as inert on V4 */
+	speedSet(SPEED_ITEM_DECEL_ADJ, 0x80 | 20);          /* -20 - ditto */
 	speedResetModel(SPEED_TYPE_V5DCC, SPEED_TYPE_V4);
 	resetSpeed();
 	traceOpen("type_v4_extras_noop",
-	          "TYPE V4, OPLOAD 200 set; Brake1+2+3 + Optional Load all asserted",
+	          "TYPE V4; OPLOAD 200, ACCELADJ +40, DECELADJ -20 set; Brake1+2+3 + Optional Load asserted",
 	          "cmd=60 settle, then Brake1+2+3 held - speed column tracks type_v5mult (extras no-op)");
 	Inputs in = {0};
 	in.cmd = 60;
@@ -538,6 +582,54 @@ static void sc_type_v4_extras_noop(void)
 	int t = runPhase(0, 180, &in);
 	in.b1 = in.b2 = in.b3 = 1;
 	runPhase(t, 320, &in);
+	traceClose();
+}
+
+/* ACCELADJ / DECELADJ (ESU CV23 / CV24): a signed factor added to the base ACCEL / DECEL CV before the
+ * family multiplier and any load scaling. Default 0 is a pass-through - every other trace proves
+ * that by staying byte-identical - so these three exercise the non-zero paths. */
+static void sc_adjust_accel_pos(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL_ADJ, 40);     /* +40 -> effective ACCEL 100 (slower standing start) */
+	resetSpeed();
+	traceOpen("adjust_accel_pos",
+	          "V5DCC, ACCELADJ +40 (effective ACCEL 60+40=100), otherwise defaults",
+	          "cmd=100 from stop - ramp is slower than the default ACCEL 60");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 400, &in);
+	traceClose();
+}
+
+static void sc_adjust_accel_neg(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_ACCEL_ADJ, 0x80 | 20);   /* -20 -> effective ACCEL 40 (faster standing start) */
+	resetSpeed();
+	traceOpen("adjust_accel_neg",
+	          "V5DCC, ACCELADJ -20 (effective ACCEL 60-20=40), otherwise defaults",
+	          "cmd=100 from stop - ramp is faster than the default");
+	Inputs in = {0};
+	in.cmd = 100;
+	runPhase(0, 300, &in);
+	traceClose();
+}
+
+static void sc_adjust_decel_pos(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_DECEL, 120);        /* same base as coast_to_stop, for a direct comparison */
+	speedSet(SPEED_ITEM_DECEL_ADJ, 40);     /* +40 -> effective DECEL 160 (slower coast) */
+	resetSpeed();
+	traceOpen("adjust_decel_pos",
+	          "V5DCC, DECEL 120 + DECELADJ +40 (effective DECEL 160), otherwise defaults",
+	          "cmd=30 to tick 150 (settle), then cmd=0 - coast is slower than coast_to_stop (DECEL 120)");
+	Inputs in = {0};
+	in.cmd = 30;
+	int t = runPhase(0, 150, &in);
+	in.cmd = 0;
+	runPhase(t, 450, &in);
 	traceClose();
 }
 
@@ -601,6 +693,11 @@ int main(int argc, char **argv)
 	sc_type_v5mult();
 	sc_type_v4();
 	sc_type_v4_extras_noop();
+	sc_adjust_accel_pos();
+	sc_adjust_accel_neg();
+	sc_adjust_decel_pos();
+	sc_decel_cv255();
+	sc_accel_cv255();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
 
@@ -609,13 +706,19 @@ int main(int argc, char **argv)
 	int inv = tracesAgree("type_v4", "type_v5mult", 0)
 	       && tracesAgree("type_v4_extras_noop", "type_v5mult", 1);
 
-	/* speedApplyTypeInert() (the readConfig() guard) neutralises a stale value in a dropped slot. */
+	/* speedApplyTypeInert() (the readConfig() guard) neutralises every V4-dropped param no matter what
+	 * is stored - BRK2/BRK3 -> 0, ACCELADJ/DECELADJ -> 0, the load CVs -> 128 / OFF. */
 	cfgDefaults();
 	speedSet(SPEED_ITEM_TYPE, SPEED_TYPE_V4);
 	speedSet(SPEED_ITEM_BRAKE2, 90);
+	speedSet(SPEED_ITEM_BRAKE3, 200);
 	speedSet(SPEED_ITEM_OPLOAD, 200);
+	speedSet(SPEED_ITEM_ACCEL_ADJ, 40);
+	speedSet(SPEED_ITEM_DECEL_ADJ, 0x80 | 20);
 	speedApplyTypeInert();
-	int guard = (0 == speedGet(SPEED_ITEM_BRAKE2)) && (128 == speedGet(SPEED_ITEM_OPLOAD));
+	int guard = (0 == speedGet(SPEED_ITEM_BRAKE2)) && (0 == speedGet(SPEED_ITEM_BRAKE3))
+	         && (128 == speedGet(SPEED_ITEM_OPLOAD))
+	         && (0 == speedGet(SPEED_ITEM_ACCEL_ADJ)) && (0 == speedGet(SPEED_ITEM_DECEL_ADJ));
 
 	printf("invariant  V4 model == V5MULT model:   %s\n", inv ? "PASS" : "FAIL");
 	printf("invariant  speedApplyTypeInert() V4:   %s\n", guard ? "PASS" : "FAIL");

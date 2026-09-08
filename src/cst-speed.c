@@ -76,6 +76,8 @@ static uint8_t speedCfg[SPEED_ITEM_COUNT] =
 	[SPEED_ITEM_ACCEL_TARGET]     = SPEED_ACCEL_TARGET_DEFAULT,
 	[SPEED_ITEM_DECEL_PCT]        = SPEED_DECEL_PCT_DEFAULT,
 	[SPEED_ITEM_DECEL_THRESHOLD]  = SPEED_DECEL_THRESHOLD_DEFAULT,
+	[SPEED_ITEM_ACCEL_ADJ]        = SPEED_ACCEL_ADJ_DEFAULT,
+	[SPEED_ITEM_DECEL_ADJ]        = SPEED_DECEL_ADJ_DEFAULT,
 };
 
 // Drive Hold falling-edge detection - see updateSpeed10Hz()'s top-of-function comment for why this only
@@ -109,42 +111,47 @@ static uint16_t deltaRemainder     = 0;
 
 // --- Decoder-family descriptor (see cst-speed.h) ------------------------------
 // One row per SPEED_TYPE_*: the momentum multiplier used by ticksToCross()/brakeTicksToCross(),
-// plus the ordered set of model parameters the SPEED CFG menu shows after the six type-agnostic
+// plus the ordered set of model parameters the SPEED CFG menu shows after the five type-agnostic
 // items. speedItemAt() walks these to resolve a menu position.
 
 typedef struct
 {
 	const char    *name;            // 8-char padded display label (fills the LCD row)
 	uint16_t       multiplier;      // momentum multiplier x1000
-	const uint8_t *modelItems;      // SPEED_ITEM_* values, in menu order, shown after the agnostic six
+	const uint8_t *modelItems;      // SPEED_ITEM_* values, in menu order, shown after the agnostic five
 	uint8_t        modelItemCount;
 } SpeedTypeDesc;
 
-// The six type-agnostic items, menu positions 1-6, identical for every family.
+// The five type-agnostic items, menu positions 1-5, identical for every family.
 static const uint8_t speedAgnosticItems[] =
 {
 	SPEED_ITEM_TYPE, SPEED_ITEM_MAX_MPH, SPEED_ITEM_UNIT,
-	SPEED_ITEM_ACCEL, SPEED_ITEM_DECEL, SPEED_ITEM_BRAKE1,
+	SPEED_ITEM_ACCEL, SPEED_ITEM_DECEL,
 };
 #define SPEED_AGNOSTIC_COUNT ((uint8_t)(sizeof(speedAgnosticItems) / sizeof(speedAgnosticItems[0])))
 
-// ESU LokSound/LokPilot V5 model parameters (13), shared by V5DCC and V5MULT. The four correction
-// tunables stay last so the ADV FUNC gate remains a tail skip.
+// ESU LokSound/LokPilot V5 model parameters (16), shared by V5DCC and V5MULT. ACCELADJ/DECELADJ (CV23/
+// CV24) lead the array so speedTypeUsesItem() reports them for V5, but speedItemAt() splices them into
+// the menu right after the ACCEL/DECEL they adjust (ahead of BRK1), not at this list position. BRK1
+// follows so BRK1/BRK2/BRK3 stay contiguous. The four correction tunables stay last so the ADV FUNC
+// gate remains a tail skip.
 static const uint8_t esuModelItems[] =
 {
-	SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3, SPEED_ITEM_START_DELAY,
+	SPEED_ITEM_ACCEL_ADJ, SPEED_ITEM_DECEL_ADJ,
+	SPEED_ITEM_BRAKE1, SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3, SPEED_ITEM_START_DELAY,
 	SPEED_ITEM_HOLD_FN, SPEED_ITEM_STOP_FN,
 	SPEED_ITEM_OPLOAD, SPEED_ITEM_OPLOAD_FN, SPEED_ITEM_PRLOAD, SPEED_ITEM_PRLOAD_FN,
 	SPEED_ITEM_ACCEL_PCT, SPEED_ITEM_ACCEL_TARGET, SPEED_ITEM_DECEL_PCT, SPEED_ITEM_DECEL_THRESHOLD,
 };
 #define ESU_MODEL_ITEM_COUNT ((uint8_t)(sizeof(esuModelItems) / sizeof(esuModelItems[0])))
 
-// ESU LokPilot/LokSound V4 model parameters (7): the V5 set minus BRK2/BRK3 (no CV180/CV181) and the
-// load CVs (no CV103/CV104). speedResetModel()/speedApplyTypeInert() force the dropped parameters
-// inert, so V4 runs the identical model math as V5MULT with stacked braking and load scaling off.
+// ESU LokPilot/LokSound V4 model parameters (8): the V5 set minus ACCELADJ/DECELADJ (no CV23/CV24),
+// BRK2/BRK3 (no CV180/CV181) and the load CVs (no CV103/CV104). BRK1 stays. speedResetModel()/
+// speedApplyTypeInert() force the dropped parameters inert, so V4 runs the identical model math as
+// V5MULT with the adjusts, stacked braking and load scaling off.
 static const uint8_t esuV4ModelItems[] =
 {
-	SPEED_ITEM_START_DELAY,
+	SPEED_ITEM_BRAKE1, SPEED_ITEM_START_DELAY,
 	SPEED_ITEM_HOLD_FN, SPEED_ITEM_STOP_FN,
 	SPEED_ITEM_ACCEL_PCT, SPEED_ITEM_ACCEL_TARGET, SPEED_ITEM_DECEL_PCT, SPEED_ITEM_DECEL_THRESHOLD,
 };
@@ -187,19 +194,22 @@ static uint8_t speedItemDefault(uint8_t item)
 {
 	switch (item)
 	{
-		case SPEED_ITEM_BRAKE2:    return MOMENTUM_BRAKE2_CV180_DEFAULT;
-		case SPEED_ITEM_BRAKE3:    return MOMENTUM_BRAKE3_CV181_DEFAULT;
-		case SPEED_ITEM_OPLOAD:    return SPEED_OPLOAD_DEFAULT;
-		case SPEED_ITEM_OPLOAD_FN: return SPEED_OPLOAD_FN_DEFAULT;
-		case SPEED_ITEM_PRLOAD:    return SPEED_PRLOAD_DEFAULT;
-		case SPEED_ITEM_PRLOAD_FN: return SPEED_PRLOAD_FN_DEFAULT;
+		case SPEED_ITEM_BRAKE2:     return MOMENTUM_BRAKE2_CV180_DEFAULT;
+		case SPEED_ITEM_BRAKE3:     return MOMENTUM_BRAKE3_CV181_DEFAULT;
+		case SPEED_ITEM_OPLOAD:     return SPEED_OPLOAD_DEFAULT;
+		case SPEED_ITEM_OPLOAD_FN:  return SPEED_OPLOAD_FN_DEFAULT;
+		case SPEED_ITEM_PRLOAD:     return SPEED_PRLOAD_DEFAULT;
+		case SPEED_ITEM_PRLOAD_FN:  return SPEED_PRLOAD_FN_DEFAULT;
+		case SPEED_ITEM_ACCEL_ADJ:  return SPEED_ACCEL_ADJ_DEFAULT;
+		case SPEED_ITEM_DECEL_ADJ:  return SPEED_DECEL_ADJ_DEFAULT;
 		default:                   return 0;
 	}
 }
 
 // Inert value for a model parameter a family does not use - the value at which updateSpeed10Hz()
 // ignores it. Only the extra brake CVs differ from their default here (0, so they add nothing to the
-// brake sum); the load CVs are already neutral at 128 and their watch functions OFF by default.
+// brake sum); the load CVs are neutral at 128 by default, the watch functions OFF, and ACCELADJ/DECELADJ
+// zero (no adjustment).
 static uint8_t speedItemInert(uint8_t item)
 {
 	return (SPEED_ITEM_BRAKE2 == item || SPEED_ITEM_BRAKE3 == item) ? 0 : speedItemDefault(item);
@@ -221,9 +231,11 @@ void speedResetModel(uint8_t oldType, uint8_t newType)
 
 void speedApplyTypeInert(void)
 {
-	// Only the six droppable parameters need checking - every other model item is in every family.
+	// Only the eight droppable parameters need checking - every other model item (including BRK1) is
+	// in every family.
 	static const uint8_t droppable[] =
 	{
+		SPEED_ITEM_ACCEL_ADJ, SPEED_ITEM_DECEL_ADJ,
 		SPEED_ITEM_BRAKE2, SPEED_ITEM_BRAKE3,
 		SPEED_ITEM_OPLOAD, SPEED_ITEM_OPLOAD_FN, SPEED_ITEM_PRLOAD, SPEED_ITEM_PRLOAD_FN,
 	};
@@ -245,29 +257,74 @@ uint8_t speedItemAt(uint8_t pos, uint8_t advFunc)
 	if (0 == pos)
 		return SPEED_ITEM_COUNT;
 
-	uint8_t want = (uint8_t)(pos - 1);
-	if (want < SPEED_AGNOSTIC_COUNT)
-		return speedAgnosticItems[want];
-
 	const SpeedTypeDesc *d = &speedTypeDesc[speedType()];
-	uint8_t visible = SPEED_AGNOSTIC_COUNT;
+	uint8_t want = (uint8_t)(pos - 1);
+	uint8_t visible = 0;
+
+	// The five agnostic items lead, but ACCELADJ/DECELADJ (CV23/CV24) are spliced in right after the
+	// ACCEL/DECEL they adjust for any family that exposes them - so on V5 the menu runs
+	// ...ACCEL, ACCELADJ, DECEL, DECELADJ, then the rest of the model list.
+	for (uint8_t i = 0; i < SPEED_AGNOSTIC_COUNT; i++)
+	{
+		if (visible++ == want)
+			return speedAgnosticItems[i];
+		uint8_t adj = (SPEED_ITEM_ACCEL == speedAgnosticItems[i]) ? SPEED_ITEM_ACCEL_ADJ
+		            : (SPEED_ITEM_DECEL == speedAgnosticItems[i]) ? SPEED_ITEM_DECEL_ADJ
+		            : SPEED_ITEM_COUNT;
+		if ((SPEED_ITEM_COUNT != adj) && speedTypeUsesItem(d, adj))
+		{
+			if (visible++ == want)
+				return adj;
+		}
+	}
+
 	for (uint8_t i = 0; i < d->modelItemCount; i++)
 	{
 		uint8_t item = d->modelItems[i];
+		if ((SPEED_ITEM_ACCEL_ADJ == item) || (SPEED_ITEM_DECEL_ADJ == item))
+			continue;  // already emitted next to ACCEL/DECEL above
 		if (!advFunc && speedItemIsAdvGated(item))
 			continue;
-		if (visible == want)
+		if (visible++ == want)
 			return item;
-		visible++;
 	}
 	return SPEED_ITEM_COUNT;
 }
 
+// Effective CV3 / CV4 after applying the decoder's CV23 / CV24 adjust (ACCELADJ / DECELADJ): a signed
+// factor added to the base momentum CV. The stored adjust byte carries the decoder's own encoding -
+// magnitude in bits 0-6, subtract when bit 7 is set - so this decodes it, adds, and clamps. The base
+// (ACCEL / DECEL) is a genuine 0-255 CV; ESU does not clamp CV3+CV23 / CV4+CV24 at 255, so the result
+// is allowed up to 255 + 127 = 382 (uint16_t) - ticksToCross() has ample headroom. Floored at 0. On a
+// V4 profile the adjust byte is 0 (forced inert), so both helpers are plain pass-throughs.
+static uint16_t speedAdjustedCV(uint16_t base, uint8_t adjByte)
+{
+	int16_t adj = (int16_t)(adjByte & 0x7F);
+	if (adjByte & 0x80)
+		adj = (int16_t)(-adj);
+	int16_t v = (int16_t)base + adj;
+	if (v < 0)
+		return 0;
+	if (v > 382)
+		return 382;
+	return (uint16_t)v;
+}
+
+static uint16_t speedEffAccelCV(void)
+{
+	return speedAdjustedCV(speedCfg[SPEED_ITEM_ACCEL], speedCfg[SPEED_ITEM_ACCEL_ADJ]);
+}
+
+static uint16_t speedEffDecelCV(void)
+{
+	return speedAdjustedCV(speedCfg[SPEED_ITEM_DECEL], speedCfg[SPEED_ITEM_DECEL_ADJ]);
+}
+
 // Optional/Primary Load CVs (CV103/CV104): scales a base CV3/CV4 value by loadValue/128 before it's
-// used, per the ESU manual's "Acceleration time = CV3 * (load value / 128)" formula. Widened to
-// uint16_t since cv*loadValue can exceed 255 (e.g. CV=255, loadValue=255 -> 508) - only the raw CV
-// inputs are 0-255, not the resulting scaled time, so this deliberately isn't clamped back to 8 bits.
-static uint16_t applyLoad(uint8_t cv, uint8_t loadValue)
+// used, per the ESU manual's "Acceleration time = CV3 * (load value / 128)" formula. cv is the
+// already-adjusted effective CV (0-382); the return can exceed 255 (e.g. 382 * 255 / 128 = 761) and is
+// deliberately not clamped back to 8 bits - only the raw CV inputs are byte-range, not the scaled time.
+static uint16_t applyLoad(uint16_t cv, uint8_t loadValue)
 {
 	return (uint16_t)(((uint32_t)cv * loadValue) / 128);
 }
@@ -528,9 +585,13 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			// low notch would reach its target via a different early slope than a high notch, making
 			// time-to-first-visible-mph depend on the commanded speed, which defeats the point of a
 			// uniform onset paid back by 15mph.
-			uint16_t accelTicksNow = ticksToCross(applyLoad(speedCfg[SPEED_ITEM_ACCEL], loadValue));
+			uint16_t accelTicksNow = ticksToCross(applyLoad(speedEffAccelCV(), loadValue));
 			uint16_t v = (accelTicksNow > 0) ? (uint16_t)(((uint32_t)126 << 8) / accelTicksNow) : 0xFFFF;
-			uint32_t s15Q8 = ((uint32_t)15 * 126 * 256) / speedCfg[SPEED_ITEM_MAX_MPH];
+			// MAXSPEED is a divisor here and at desiredPos below. The editor floors it at 1, but a 0
+			// could still arrive via import / CNF / a corrupt byte - fall back to the default rather
+			// than divide by zero.
+			uint16_t maxMph = speedCfg[SPEED_ITEM_MAX_MPH] ? speedCfg[SPEED_ITEM_MAX_MPH] : SPEED_MAX_MPH_DEFAULT;
+			uint32_t s15Q8 = ((uint32_t)15 * 126 * 256) / maxMph;
 			rampS = (uint16_t)s15Q8;
 
 			// ACCPCT's leadTime budget - the ramp's *total* duration to 15mph, unaffected by
@@ -545,7 +606,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			// fallback (r0=0, today's unmodified curve) when the target can't be reached by speeding up.
 			int64_t P0 = (int64_t)v * (int64_t)rampT - 2 * (int64_t)rampS;
 			int64_t Q0 = 3 * (int64_t)rampS * (int64_t)rampT - (int64_t)v * (int64_t)rampT * (int64_t)rampT;
-			uint16_t desiredPos = (uint16_t)(((uint32_t)126 << 8) / (2 * (uint32_t)speedCfg[SPEED_ITEM_MAX_MPH]));  // ~0.5mph
+			uint16_t desiredPos = (uint16_t)(((uint32_t)126 << 8) / (2 * (uint32_t)maxMph));  // ~0.5mph
 			rampR0 = solveRampR0(speedCfg[SPEED_ITEM_ACCEL_TARGET], P0, Q0, rampT, rampS, desiredPos);
 			rampP = P0 + (int64_t)rampR0 * (int64_t)rampT;
 			rampQ = Q0 - 2 * (int64_t)rampR0 * (int64_t)rampT * (int64_t)rampT;
@@ -588,7 +649,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 		if (0 == current)
 			return;
 
-		uint16_t brakeBaseTicks = brakeTicksToCross(brakeSum, applyLoad(speedCfg[SPEED_ITEM_DECEL], loadValue));
+		uint16_t brakeBaseTicks = brakeTicksToCross(brakeSum, applyLoad(speedEffDecelCV(), loadValue));
 
 		if (0 == steadyStopExtraMs)
 		{
@@ -620,7 +681,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 	// deceleration, not just from a genuine steady state - see the comment on WINDUP's removal in
 	// CLAUDE.md for why the earlier interrupted-acceleration-only distinction was dropped.
 	uint8_t accelerating = (targetQ8 > current);
-	uint16_t accelTicks = ticksToCross(applyLoad(speedCfg[SPEED_ITEM_ACCEL], loadValue));
+	uint16_t accelTicks = ticksToCross(applyLoad(speedEffAccelCV(), loadValue));
 
 	if (accelerating)
 	{
@@ -635,7 +696,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 		// accelerating==true instead).
 		uint16_t thresholdQ8 = (uint16_t)speedCfg[SPEED_ITEM_DECEL_THRESHOLD] << 8;
 		uint16_t excessQ8 = (current > thresholdQ8) ? (current - thresholdQ8) : 0;
-		uint16_t decelTicksFull = ticksToCross(applyLoad(speedCfg[SPEED_ITEM_DECEL], loadValue));
+		uint16_t decelTicksFull = ticksToCross(applyLoad(speedEffDecelCV(), loadValue));
 		uint32_t excessTicks = ((uint32_t)decelTicksFull * excessQ8) / current;
 
 		steadyStopExtraMs = (excessTicks * 100 * speedCfg[SPEED_ITEM_DECEL_PCT]) / 255;
@@ -650,7 +711,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 		// Real decoder stops faster than plain DECEL predicts - speed the simulation up to match
 		// (subtract ticks), floored at 1 so it can't underflow to 0 or negative if the correction
 		// would otherwise exceed the whole decel time.
-		uint16_t decelBaseTicks = ticksToCross(applyLoad(speedCfg[SPEED_ITEM_DECEL], loadValue));
+		uint16_t decelBaseTicks = ticksToCross(applyLoad(speedEffDecelCV(), loadValue));
 		uint16_t reduceTicks = (uint16_t)(steadyStopExtraMs / 100);
 		ticks = (reduceTicks >= decelBaseTicks) ? 1 : decelBaseTicks - reduceTicks;
 	}

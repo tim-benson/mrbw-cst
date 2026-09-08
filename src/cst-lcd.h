@@ -6,7 +6,8 @@ typedef enum
 	LCD_RESET = 0,
 	LCD_DEFAULT,
 	LCD_DIAGS,
-	LCD_AIRBRAKE_ALT
+	LCD_AIRBRAKE_ALT,
+	LCD_SPEED_ADJ       // = LCD_DEFAULT with the AUX CGRAM slot reused for the "+/-" glyph (SPEED CFG ACCEL/DECEL adjust items)
 } LcdMode;
 
 void displaySplashScreen(void);

@@ -43,11 +43,13 @@ enum
 	SPEED_ITEM_OPLOAD_FN,       // OPLOADFN - watched DCC fn 0-28, 255=OFF
 	SPEED_ITEM_PRLOAD,          // PRLOAD  - mirrors decoder CV104
 	SPEED_ITEM_PRLOAD_FN,       // PRLOADFN - watched DCC fn 0-28, 255=OFF
-	SPEED_ITEM_TYPE,            // TYPE    - SPEED_TYPE_V5DCC/_V4V5MULT
+	SPEED_ITEM_TYPE,            // TYPE    - SPEED_TYPE_V5DCC/_V5MULT/_V4
 	SPEED_ITEM_ACCEL_PCT,       // ACCPCT  - standing-start head-start, ADV FUNC only
 	SPEED_ITEM_ACCEL_TARGET,    // ACCTGT  - target ticks-to-1mph, ADV FUNC only
 	SPEED_ITEM_DECEL_PCT,       // DECPCT  - steady-state decel-lag strength, ADV FUNC only
 	SPEED_ITEM_DECEL_THRESHOLD, // DECTHR  - decel-lag speed threshold, ADV FUNC only
+	SPEED_ITEM_ACCEL_ADJ,       // ACCELADJ  - mirrors decoder CV23 (added to CV3), V5 only
+	SPEED_ITEM_DECEL_ADJ,       // DECELADJ  - mirrors decoder CV24 (added to CV4), V5 only
 	SPEED_ITEM_COUNT
 };
 
@@ -223,13 +225,29 @@ enum
 // hold to a target).
 #define SPEED_ACCEL_TARGET_DEFAULT       5
 
+// ACCELADJ / DECELADJ mirror ESU LokSound/LokPilot 5 CV23 (Adjust Acceleration) / CV24 (Adjust
+// Deceleration): a signed factor -127..+127 added to CV3 / CV4. The stored byte uses the decoder's
+// own encoding - magnitude 0-127 in bits 0-6, subtract if bit 7 (0x80) is set - so it reads the same
+// as the value on the physical decoder. -127 is stored as 0xFF, which collides with the
+// readByteOrDefault sentinel, so readConfig() reads these two bytes RAW (like ACCEL/DECEL/HOLDFN) and
+// the layout -> 4 migration seeds 0x61/0x62 to 0. speedEffAccelCV()/speedEffDecelCV() in cst-speed.c
+// decode the byte, add to the base, and clamp. V5 only; a V4 decoder has no CV23/CV24, so V4 forces
+// both to 0.
+#define SPEED_ACCEL_ADJ_DEFAULT           0
+#define SPEED_DECEL_ADJ_DEFAULT           0
+#define SPEED_ADJ_MAG_MAX               127   // full ESU CV23/CV24 magnitude range
+
 // --- Decoder-family descriptor ---
-// TYPE (SPEED_ITEM_TYPE) tags a decoder family. Six SPEED CFG items are type-agnostic - they mean
+// TYPE (SPEED_ITEM_TYPE) tags a decoder family. Five SPEED CFG items are type-agnostic - they mean
 // the same thing for every family and always show first, in this order: TYPE, MAXSPEED, UNIT,
-// ACCEL, DECEL, BRK1. Everything after them is a model parameter whose presence and menu order come
-// from the family's descriptor in cst-speed.c; speedItemAt() walks that descriptor to map a menu
-// position to a SPEED_ITEM_*. V5DCC and V5MULT carry the identical 13-parameter model set (only the
-// multiplier differs); V4 carries a 7-parameter subset (see the SPEED_TYPE_* comment above).
+// ACCEL, DECEL - except that ACCELADJ/DECELADJ (V5 only) are spliced into that run immediately
+// after the ACCEL/DECEL they adjust. Everything else is a model parameter whose presence and menu
+// order come from the per-family descriptor in cst-speed.c; speedItemAt() walks that descriptor
+// (after the agnostic spine and the adjust splice) to map a menu position to a SPEED_ITEM_*.
+// BRK1 (CV179) is the shared lead brake item every family exposes - present for all three, but
+// grouped with BRK2/BRK3 rather than sitting in the agnostic block. V5DCC and V5MULT carry the
+// identical 16-parameter model set (only the multiplier differs); V4 carries an 8-parameter subset -
+// it drops ACCELADJ/DECELADJ, BRK2/BRK3 and the load CVs.
 #define SPEED_TYPE_COUNT                 3
 
 uint8_t speedType(void);

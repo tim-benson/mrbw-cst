@@ -97,6 +97,7 @@ LICENSE:
 
 #define TX_HOLDOFF_MIN                     10
 #define TX_HOLDOFF_DEFAULT                 15
+#define TX_HOLDOFF_MAX                    254   // one below the 0xFF erased-byte sentinel (see readConfig)
 
 #define UPDATE_DECISECS_MIN                10
 #define UPDATE_DECISECS_DEFAULT            10
@@ -363,7 +364,7 @@ enum
 	COMM_ITEM_BASE_ADR,      // newBaseAddr,     MRBUS_BASE_ADDR_MIN..MAX
 	COMM_ITEM_TIME_ADR,      // newTimeAddr,     0..255 (0 = BASE, 0xFF = ALL, else 0xNN)
 	COMM_ITEM_TX_INTVL,      // newUpdate_seconds, 1..UPDATE_DECISECS_MAX/10, seconds
-	COMM_ITEM_TX_HLDOF,      // txHoldoff_centisecs, TX_HOLDOFF_MIN..255, shown N.NN s
+	COMM_ITEM_TX_HLDOF,      // txHoldoff_centisecs, TX_HOLDOFF_MIN..TX_HOLDOFF_MAX, shown N.NN s
 	COMM_ITEM_COUNT
 };
 
@@ -503,6 +504,29 @@ static uint8_t speedItemIsWatchFn(uint8_t item)
 {
 	return (SPEED_ITEM_HOLD_FN == item) || (SPEED_ITEM_STOP_FN == item)
 	    || (SPEED_ITEM_OPLOAD_FN == item) || (SPEED_ITEM_PRLOAD_FN == item);
+}
+
+// SPEED_CONFIG_SCREEN: ACCELADJ/DECELADJ (CV23/CV24) are shown and edited as a signed value; the stored
+// byte carries the ESU sign-bit encoding (bit 7 = subtract, bits 0-6 = magnitude).
+static uint8_t speedItemIsSignedAdjust(uint8_t item)
+{
+	return (SPEED_ITEM_ACCEL_ADJ == item) || (SPEED_ITEM_DECEL_ADJ == item);
+}
+
+// SPEED_CONFIG_SCREEN: ACCEL/DECEL are genuine 0-255 fields (read raw, so a stored 0xFF is a real 255);
+// the other plain-numeric items still self-heal from 0xFF so their editor ceiling is 254 (matching the
+// AIRBRAKE editor - a saved 255 would silently revert on the next load).
+static uint8_t speedItemIsFullRange(uint8_t item)
+{
+	return (SPEED_ITEM_ACCEL == item) || (SPEED_ITEM_DECEL == item);
+}
+static int8_t speedAdjDecode(uint8_t b)
+{
+	return (b & 0x80) ? (int8_t)(-(int8_t)(b & 0x7F)) : (int8_t)(b & 0x7F);
+}
+static uint8_t speedAdjEncode(int8_t v)
+{
+	return (v < 0) ? (uint8_t)(0x80 | (uint8_t)(-v)) : (uint8_t)v;
 }
 
 // PREFS_SCREEN: the three value items (SLEEP/ALERTER/TIMEOUT) are contiguous in the enum;
@@ -1123,6 +1147,31 @@ void readConfig(void)
 			eeprom_write_byte((uint8_t*)(CONFIG_OFFSET(WORKING_CONFIG) + 0x54 + k), speedModelDefault[k]);
 	}
 
+	// EEPROM_LAYOUT_VERSION -> 4. Five SPEED bytes leave readByteOrDefault() and are read RAW below, so
+	// a stored 0xFF now means a real value (ACCEL/DECEL 0x28/0x2E = 255; HOLDFN 0x57 = OFF;
+	// ACCELADJ/DECELADJ 0x61/0x62 = -127). readByteOrDefault()'s heal-on-0xFF no longer covers a
+	// never-written byte, so seed the defaults here. Gated on != EEPROM_LAYOUT_VERSION (not < 4) so it
+	// ALSO runs on a blank/wiped chip (oldLayoutVersion 0xFF) - the one migration that does. Runs once
+	// (the version stamp at the top). 0x28/0x2E/0x57 are only rewritten if currently 0xFF (a real value
+	// is preserved); 0x61/0x62 are written to 0 unconditionally - no layout-4 chip triggers this block,
+	// so there can be no real ADJ value to lose, and B1 left them as arbitrary reserved bytes.
+	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
+	{
+		static const uint8_t rawSeedOffset[3]  = { 0x28, 0x2E, 0x57 };
+		static const uint8_t rawSeedDefault[3] = { MOMENTUM_ACCEL_CV3_DEFAULT, MOMENTUM_DECEL_CV4_DEFAULT, SPEED_HOLD_WATCH_FN_DEFAULT };
+		uint8_t s, k;
+		for(s = 1; s <= MAX_CONFIGS + 1; s++)
+		{
+			uint16_t base = CONFIG_OFFSET((s <= MAX_CONFIGS) ? s : WORKING_CONFIG);
+			wdt_reset();
+			for(k = 0; k < 3; k++)
+				if(0xFF == eeprom_read_byte((uint8_t*)(base + rawSeedOffset[k])))
+					eeprom_write_byte((uint8_t*)(base + rawSeedOffset[k]), rawSeedDefault[k]);
+			eeprom_write_byte((uint8_t*)(base + 0x61), SPEED_ACCEL_ADJ_DEFAULT);
+			eeprom_write_byte((uint8_t*)(base + 0x62), SPEED_DECEL_ADJ_DEFAULT);
+		}
+	}
+
 
 	update_decisecs = (uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_L) | (((uint16_t)eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_UPDATE_H)) << 8);
 	if(update_decisecs < UPDATE_DECISECS_MIN)
@@ -1139,10 +1188,21 @@ void readConfig(void)
 	}
 	
 	txHoldoff_centisecs = eeprom_read_byte((uint8_t*)EE_TX_HOLDOFF);
-	if(txHoldoff_centisecs < TX_HOLDOFF_MIN)
 	{
-		txHoldoff_centisecs = TX_HOLDOFF_MIN;
-		eeprom_write_byte((uint8_t*)EE_TX_HOLDOFF, txHoldoff_centisecs);
+		// 0xFF is the erased value, not a real 2.55s hold-off - heal it to the default, then clamp to
+		// [MIN, MAX] (MAX is 254, one below the 0xFF sentinel, matching the editor's new ceiling).
+		uint8_t healed = txHoldoff_centisecs;
+		if(0xFF == healed)
+			healed = TX_HOLDOFF_DEFAULT;
+		if(healed < TX_HOLDOFF_MIN)
+			healed = TX_HOLDOFF_MIN;
+		else if(healed > TX_HOLDOFF_MAX)
+			healed = TX_HOLDOFF_MAX;
+		if(healed != txHoldoff_centisecs)
+		{
+			txHoldoff_centisecs = healed;
+			eeprom_write_byte((uint8_t*)EE_TX_HOLDOFF, txHoldoff_centisecs);
+		}
 	}
 
 	// Battery stuff
@@ -1327,8 +1387,12 @@ void readConfig(void)
 		stackBandCombos3Step[i] &= (BRAKE_CONTROL | BK2_CONTROL | BK3_CONTROL);
 
 	// Scale-speed simulation config - raw 0-255 values mirroring the loco's decoder CVs directly.
-	speedSet(SPEED_ITEM_ACCEL,            readByteOrDefault((uint8_t*)EE_MOMENTUM_ACCEL_CV3, MOMENTUM_ACCEL_CV3_DEFAULT));
-	speedSet(SPEED_ITEM_DECEL,            readByteOrDefault((uint8_t*)EE_MOMENTUM_DECEL_CV4, MOMENTUM_DECEL_CV4_DEFAULT));
+	// ACCEL / DECEL are genuine 0-255 (a decoder's literal CV3 / CV4 can be 255), so they are read raw:
+	// a stored 0xFF is a real 255, not "unset". The layout -> 4 seed above initialised any never-written
+	// 0x28 / 0x2E byte to the default so a blank chip does not read 255. BRK1 (and the rest) stay on
+	// readByteOrDefault - for a brake CV 254 and 255 are indistinguishable (the brake sum caps at 255).
+	speedSet(SPEED_ITEM_ACCEL,            eeprom_read_byte((uint8_t*)EE_MOMENTUM_ACCEL_CV3));
+	speedSet(SPEED_ITEM_DECEL,            eeprom_read_byte((uint8_t*)EE_MOMENTUM_DECEL_CV4));
 	speedSet(SPEED_ITEM_BRAKE1,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE1_CV179, MOMENTUM_BRAKE1_CV179_DEFAULT));
 	speedSet(SPEED_ITEM_BRAKE2,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE2_CV180, MOMENTUM_BRAKE2_CV180_DEFAULT));
 	speedSet(SPEED_ITEM_BRAKE3,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE3_CV181, MOMENTUM_BRAKE3_CV181_DEFAULT));
@@ -1341,12 +1405,18 @@ void readConfig(void)
 	speedSet(SPEED_ITEM_PRLOAD,           readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD, SPEED_PRLOAD_DEFAULT));
 	speedSet(SPEED_ITEM_OPLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_OPLOAD_FN, SPEED_OPLOAD_FN_DEFAULT));
 	speedSet(SPEED_ITEM_PRLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD_FN, SPEED_PRLOAD_FN_DEFAULT));
-	speedSet(SPEED_ITEM_HOLD_FN,          readByteOrDefault((uint8_t*)EE_SPEED_HOLD_WATCH_FN, SPEED_HOLD_WATCH_FN_DEFAULT));
+	// HOLDFN read raw so OFF (0xFF) sticks - its readByteOrDefault default is F09, not OFF, so the heal
+	// would silently revert a user-set OFF. The layout -> 4 seed initialised any never-written 0x57.
+	speedSet(SPEED_ITEM_HOLD_FN,          eeprom_read_byte((uint8_t*)EE_SPEED_HOLD_WATCH_FN));
 	speedSet(SPEED_ITEM_DECEL_THRESHOLD,  readByteOrDefault((uint8_t*)EE_SPEED_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT));
 	speedSet(SPEED_ITEM_DECEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_PCT,        readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT));
 	speedSet(SPEED_ITEM_ACCEL_TARGET,     readByteOrDefault((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT));
-	speedApplyTypeInert();  // V4 has no CV180/CV181/CV103/CV104 - force those inert whatever is stored
+	// ACCELADJ/DECELADJ read raw: -127 is byte 0xFF (sign-magnitude), which collides with the
+	// readByteOrDefault sentinel. The layout -> 4 seed initialised any never-written 0x61/0x62 to 0.
+	speedSet(SPEED_ITEM_ACCEL_ADJ,       eeprom_read_byte((uint8_t*)EE_SPEED_ACCEL_ADJ));
+	speedSet(SPEED_ITEM_DECEL_ADJ,       eeprom_read_byte((uint8_t*)EE_SPEED_DECEL_ADJ));
+	speedApplyTypeInert();  // V4 has no CV23/CV24/CV180/CV181/CV103/CV104 - force those inert whatever is stored
 
 	// AIRBRAKE per-profile model config (src/cst-pressure.c)
 	airbrakeSet(AIRBRAKE_CHARGED,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_CHARGED,     AIRBRAKE_CHARGED_DEFAULT));
@@ -3369,6 +3439,11 @@ int main(void)
 						speedItem = speedItemAt(1, speedAdvFunc);  // never render the past-end sentinel
 					uint8_t speedVal = speedGet(speedItem);
 
+					// ACCELADJ/DECELADJ render a "+/-" CGRAM glyph in their label - load it (and restore
+					// the default glyphs for every other item). The menu-exit setupLCD(LCD_DEFAULT) calls
+					// restore AUX afterward since currentMode changed.
+					setupLCD(speedItemIsSignedAdjust(speedItem) ? LCD_SPEED_ADJ : LCD_DEFAULT);
+
 					lcd_gotoxy(0,0);
 					switch(speedItem)
 					{
@@ -3391,6 +3466,8 @@ int main(void)
 						case SPEED_ITEM_ACCEL_TARGET:    lcd_puts("ACCTGT"); break;
 						case SPEED_ITEM_DECEL_PCT:       lcd_puts("DECPCT"); break;
 						case SPEED_ITEM_DECEL_THRESHOLD: lcd_puts("DECTHR"); break;
+						case SPEED_ITEM_ACCEL_ADJ:       lcd_puts("ACCEL "); lcd_putc(PLUSMINUS_CHAR); break;  // CV23
+						case SPEED_ITEM_DECEL_ADJ:       lcd_puts("DECEL "); lcd_putc(PLUSMINUS_CHAR); break;  // CV24
 					}
 					lcd_gotoxy(0,1);
 					if(SPEED_ITEM_UNIT == speedItem)
@@ -3407,6 +3484,19 @@ int main(void)
 					}
 					else if(SPEED_ITEM_TYPE == speedItem)
 						lcd_puts(speedTypeName(speedVal));  // 8-char padded, fills the row
+					else if(speedItemIsSignedAdjust(speedItem))
+					{
+						// -127..+127 -> a fixed 4-char field ("   0" / "+063" / "-127") so a shrinking
+						// magnitude can't leave a stale digit behind on an in-place edit.
+						int8_t adj = speedAdjDecode(speedVal);
+						if(0 == adj)
+							lcd_puts("   0");
+						else
+						{
+							lcd_putc((adj < 0) ? '-' : '+');
+							printDec3DigWZero((uint16_t)((adj < 0) ? -adj : adj));
+						}
+					}
 					else
 						printDec3Dig(speedVal);
 
@@ -3433,10 +3523,18 @@ int main(void)
 										speedResetModel(speedVal, speedVal + 1);
 									}
 								}
+								else if(speedItemIsSignedAdjust(speedItem))
+								{
+									int8_t adj = speedAdjDecode(speedVal);
+									if(adj < SPEED_ADJ_MAG_MAX)
+										speedSet(speedItem, speedAdjEncode(adj + 1));
+								}
 								else
 								{
-									// UNIT is a 0/1 toggle; the rest clamp at 255.
-									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1 : 255;
+									// UNIT is a 0/1 toggle; ACCEL/DECEL are genuine 0-255; every other
+									// plain-numeric item self-heals from 0xFF so it caps at 254.
+									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1
+									                 : speedItemIsFullRange(speedItem) ? 255 : 254;
 									if(speedVal < speedMax)
 										speedSet(speedItem, speedVal + 1);
 								}
@@ -3463,10 +3561,18 @@ int main(void)
 										speedResetModel(speedVal, speedVal - 1);
 									}
 								}
+								else if(speedItemIsSignedAdjust(speedItem))
+								{
+									int8_t adj = speedAdjDecode(speedVal);
+									if(adj > -SPEED_ADJ_MAG_MAX)
+										speedSet(speedItem, speedAdjEncode(adj - 1));
+								}
 								else
 								{
-									// UNIT steps down toward 0 (MPH); the rest clamp at 0.
-									if(speedVal > 0)
+									// UNIT steps down toward 0 (MPH); MAXSPEED floors at 1 (it is a
+									// divisor in the standing-start ramp math); the rest clamp at 0.
+									uint8_t speedMin = (SPEED_ITEM_MAX_MPH == speedItem) ? 1 : 0;
+									if(speedVal > speedMin)
 										speedSet(speedItem, speedVal - 1);
 								}
 								ticks_autoincrement = 0;
@@ -3494,6 +3600,8 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_TARGET,     speedGet(SPEED_ITEM_ACCEL_TARGET));
 								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_PCT,        speedGet(SPEED_ITEM_DECEL_PCT));
 								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_THRESHOLD,  speedGet(SPEED_ITEM_DECEL_THRESHOLD));
+								eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_ADJ,       speedGet(SPEED_ITEM_ACCEL_ADJ));
+								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_ADJ,       speedGet(SPEED_ITEM_DECEL_ADJ));
 								readConfig();
 								lcd_clrscr();
 								lcd_gotoxy(1,0);
@@ -4143,7 +4251,7 @@ int main(void)
 												newUpdate_seconds++;
 											break;
 										case COMM_ITEM_TX_HLDOF:
-											if(txHoldoff_centisecs < 0xFF)
+											if(txHoldoff_centisecs < TX_HOLDOFF_MAX)
 												txHoldoff_centisecs++;
 											break;
 									}

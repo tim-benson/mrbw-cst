@@ -304,11 +304,12 @@ precise timing. Brake-active flags and the other inputs are passed to `updateSpe
 rather than read via `extern`, so the module has no dependency on the internal bit layout of
 `mrbw-cst.c`.
 
-**ESU LokSound/LokPilot formulas modeled** (from ESU community documentation — covers both V4 and V5, see
-`TYPE` below):
-- Accel/decel: time to cross the full speed range = `CV × multiplier` seconds (CV3 for accel, CV4 for
-  decel). The multiplier is decoder-family-dependent — see `TYPE` below.
-- Brake override: `stopSeconds = (255-CVbrakeSum)/255 × (CV4 × multiplier)`.
+**ESU LokSound/LokPilot formulas modeled** (from ESU community documentation + the times LokProgrammer computes,
+times — covers both V4 and V5, see `TYPE` below):
+- Accel/decel: time to cross the full speed range = `(CV + CVadj) × multiplier` seconds (CV3 + CV23
+  for accel, CV4 + CV24 for decel). The multiplier is decoder-family-dependent — see `TYPE` below.
+  ESU does not clamp `CV3+CV23` / `CV4+CV24` at 255; the model allows the sum up to 382.
+- Brake override: `stopSeconds = (255-CVbrakeSum)/255 × ((CV4 + CV24) × multiplier)`.
 - Start delay (decoder CV167): `delaySeconds = CV167 × 0.25`.
 
 **Brake semantics**: Brake1/2/3 (`CV179`/`180`/`181`, mirroring the same three DCC functions STACK brake
@@ -322,29 +323,52 @@ notch position.
 
 ### On-device editor
 
-`SPEED_CONFIG_SCREEN` (landing page `SPEED CFG`). Six items are decoder-type-agnostic and always lead,
-in this order: `TYPE`, `MAXSPEED`, `UNIT`, `ACCEL`, `DECEL`, `BRK1`. After them come the model
-parameters the current `TYPE` uses, in the order fixed by the per-family descriptor in `cst-speed.c`
-(`speedTypeDesc[]`): `speedItemAt(subscreenState, advFunc)` (the shape of `optionItemAt()`) walks that
-descriptor to resolve a menu position to a `SPEED_ITEM_*`, returning the `SPEED_ITEM_COUNT` sentinel
-once past the last visible item. `V5DCC` and `V5MULT` expose all 13 model parameters
-(`BRK2`/`BRK3`/`DELAY`, `HOLDFN`/`STOPFN`, `OPLOAD`/`OPLOADFN`/`PRLOAD`/`PRLOADFN`, and the four
-correction tunables); `V4` exposes 7 (it drops `BRK2`/`BRK3` and the load CVs — see "How the
-simulation math works" below). The four correction tunables (`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) stay
-last in every family so the `ADV FUNC` (`SYSTEM` screen) gate that hides them is a tail skip; they are
-always read via `readByteOrDefault()` with real defaults regardless of visibility, so hiding them
-never risks an unset field. `UNIT` is a two-way toggle; `TYPE` cycles the three families and calls
-`speedResetModel()` on each change; `HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+`SPEED_CONFIG_SCREEN` (landing page `SPEED CFG`). Five items are decoder-type-agnostic and always
+lead, in this order: `TYPE`, `MAXSPEED`, `UNIT`, `ACCEL`, `DECEL` — except that `ACCELADJ`/`DECELADJ`
+(`SPEED_ITEM_ACCEL_ADJ`/`_DECEL_ADJ`, V5 only) are spliced into the menu immediately after the
+`ACCEL`/`DECEL` they adjust, so on V5 the run is `... ACCEL, ACCELADJ, DECEL, DECELADJ, ...`. After
+them come the rest of the model parameters the current `TYPE` uses, in the order fixed by the
+per-family descriptor in `cst-speed.c` (`speedTypeDesc[]`): `speedItemAt(subscreenState, advFunc)`
+(the shape of `optionItemAt()`) resolves a menu position to a `SPEED_ITEM_*` — it walks the agnostic
+spine with that adjust splice, then the descriptor model list (skipping `ACCELADJ`/`DECELADJ`, already
+emitted, and the ADV-FUNC-gated tunables while `ADV FUNC` is off), returning the `SPEED_ITEM_COUNT`
+sentinel once past the last visible item. `V5DCC` and `V5MULT` expose all 16 model parameters —
+`ACCELADJ`/`DECELADJ` (shown next to `ACCEL`/`DECEL` as above), then `BRK1`/`BRK2`/`BRK3`/`DELAY`,
+`HOLDFN`/`STOPFN`, `OPLOAD`/`OPLOADFN`/`PRLOAD`/`PRLOADFN`, and the four correction tunables; `V4`
+exposes 8 (`BRK1`, `DELAY`, `HOLDFN`, `STOPFN`, and the four tunables — it drops `ACCELADJ`/`DECELADJ`,
+`BRK2`/`BRK3` and the load CVs, see "How the simulation math works" below). `BRK1` is present for every
+family but sits in the model list (contiguous with `BRK2`/`BRK3`), not the agnostic block — its EEPROM
+offset `0x2B` and save/read path are unchanged, only its menu slot. The four correction tunables
+(`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) stay last in every family so the `ADV FUNC` (`SYSTEM` screen) gate
+that hides them is a tail skip; they are always read via `readByteOrDefault()` with real defaults
+regardless of visibility, so hiding them never risks an unset field. `UNIT` is a two-way toggle;
+`TYPE` cycles the three families and calls `speedResetModel()` on each change;
+`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN` show `OFF` or `F##`.
+
+**Editor ranges and the `0xFF` sentinel**: most plain-numeric SPEED bytes self-heal from `0xFF` via
+`readByteOrDefault()`, so a stored 255 would silently revert on the next load — those items
+(`BRK1`/`BRK2`/`BRK3`/`DELAY`/`OPLOAD`/`PRLOAD`/`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) cap at **254** in
+the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL` are genuine **0-255** (a decoder CV3/CV4 can
+itself be 255): `readConfig()` reads `0x28`/`0x2E` raw, and the `EEPROM_LAYOUT_VERSION` → 4
+migration seeds any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
+setting it to `OFF` persists (its `readByteOrDefault` default is F09, which would otherwise revert a
+user-set OFF). `MAXSPEED` is **1-254** (0 is a divisor in the standing-start ramp — `updateSpeed10Hz()`
+also guards it). `ACCELADJ`/`DECELADJ` are a signed `-127..+127` (the full ESU CV23/CV24 magnitude
+range) shown as a fixed 4-char field `   0` / `+063` / `-127`; the stored byte uses the decoder
+sign-magnitude encoding (bit 7 = subtract), so `-127` is byte `0xFF` and `0x61`/`0x62` are read raw
+too. Their menu label is `ACCEL ` / `DECEL ` followed by a `±` CGRAM glyph — the NHD-0208AZ font ROM
+has no `±`, so `LCD_SPEED_ADJ` (a `LcdMode`) loads the glyph into the `AUX_CHAR` slot (main-screen
+only) while an adjust item is shown; the menu-exit `setupLCD(LCD_DEFAULT)` restores `AUX_CHAR`.
 
 **`speedResetModel(oldType, newType)`** (from the `TYPE` edit) and **`speedApplyTypeInert()`** (from
 `readConfig()`) keep the parameters a family does not use out of the model. `speedResetModel()` sets a
-parameter the new family drops to its inert value (`BRK2`/`BRK3` to 0, the load CVs to 128, their
-watch functions to `OFF`) and one it gains back to its default; `speedApplyTypeInert()` does the same
-one-shot on load for whatever is stored. The inert values are exactly where `updateSpeed10Hz()`
-already ignores a parameter, so the model runs one code path for every family — there is no
-`switch(speedType())` in the simulation math. `V5DCC` <-> `V5MULT` is a no-op (identical parameter
-sets). The `SELECT`-save still writes all 19 `SPEED_ITEM_*` bytes regardless of family, so a `V4`
-profile persists inert zeros in the dropped slots.
+parameter the new family drops to its inert value (`ACCELADJ`/`DECELADJ`/`BRK2`/`BRK3` to 0, the load
+CVs to 128, their watch functions to `OFF`) and one it gains back to its default;
+`speedApplyTypeInert()` does the same one-shot on load for whatever is stored. The inert values are
+exactly where `updateSpeed10Hz()` already ignores a parameter, so the model runs one code path for
+every family — there is no `switch(speedType())` in the simulation math. `V5DCC` <-> `V5MULT` is a
+no-op (identical parameter sets). The `SELECT`-save still writes all 21 `SPEED_ITEM_*` bytes
+regardless of family, so a `V4` profile persists inert zeros in the dropped slots.
 
 `printSpeed()` converts the configured `MAXSPEED` into km/h once before computing the displayed value
 (rather than converting an already-rounded mph figure) to avoid compounding rounding error, and decides its
@@ -389,13 +413,23 @@ mechanism is needed.
 **Decoder family (`TYPE`)**: three values, selecting the momentum-CV time convention `ACCEL`/`DECEL`/
 `BRK1-3` use and which model parameters apply. `V5DCC` — 0.896s per CV unit, ESU LokSound 5 DCC only,
 the NMRA S9.2.2 multiplier. `V5MULT` — 0.25s per CV unit, ESU LokSound/LokPilot V5 MultiProtocol; the
-same 13-parameter model as `V5DCC`, only the multiplier differs. `V4` — 0.25s per CV unit,
+same 16-parameter model as `V5DCC`, only the multiplier differs. `V4` — 0.25s per CV unit,
 LokPilot/LokSound V4; the identical model math and multiplier as `V5MULT`, but a V4 decoder has no
-CV180/CV181 and no CV103/CV104, so `BRK2`/`BRK3` and the load CVs are dropped from its menu and forced
-inert (see the editor section above), making `V4` behave as `V5MULT` with stacked braking and load
-scaling off. `SPEED_TYPE_V5MULT` keeps the byte value (1) the old combined `V4V5MULT` used, so a stored
-`TYPE` of 1 upgrades to `V5MULT` with no behavior change; `V4` is the new value 2, and there is no
-`EEPROM_LAYOUT_VERSION` bump for the split (no byte moves, value 1 keeps its meaning).
+CV23/CV24, no CV180/CV181 and no CV103/CV104, so `ACCELADJ`/`DECELADJ`, `BRK2`/`BRK3` and the load CVs
+are dropped from its menu and forced inert (see the editor section above), making `V4` behave as
+`V5MULT` with the adjusts, stacked braking and load scaling off. `SPEED_TYPE_V5MULT` keeps the byte
+value (1) the old combined `V4V5MULT` used, so a stored `TYPE` of 1 upgrades to `V5MULT` with no
+behavior change; `V4` is the new value 2, and there is no `EEPROM_LAYOUT_VERSION` bump for the split
+(no byte moves, value 1 keeps its meaning).
+
+**Acceleration/deceleration adjust (`ACCELADJ`/`DECELADJ`, V5 only)**: mirrors decoder CV23/CV24 — a
+signed factor `-127..+127` added to `ACCEL`/`DECEL` before the family multiplier, so the effective CV
+is `CV3 + CV23` / `CV4 + CV24`. ESU does not clamp the sum at 255, so `speedEffAccelCV()` /
+`speedEffDecelCV()` allow it up to `255 + 127 = 382` (`uint16_t`), floored at 0. These two helpers
+replace every raw `ACCEL`/`DECEL` read in `updateSpeed10Hz()`; on a V4 profile the adjust byte is 0
+(forced inert) so they are plain pass-throughs — no `speedType()` check inside the model. `V5MULT`
+uses the same `-127..+127` semantics as `V5DCC` (only the base multiplier differs); LokProgrammer
+confirms CV24 scales with the family multiplier just like CV4.
 
 **Load simulation (`OPLOAD`/`PRLOAD`/`OPLOADFN`/`PRLOADFN`)**: mirrors decoder CV103 (Optional Load)/CV104
 (Primary Load) — each a 0-255 value (128 = neutral) that scales the base `ACCEL`/`DECEL` CV while its
@@ -409,13 +443,27 @@ inactive) — its pulses are a one-directional decoder-side ratchet the sum-base
 represent; Step remains the one brake mode where the simulated behavior can diverge from a real
 Step-braking locomotive.
 
-**Deceleration lag correction (`DECTHR`/`DECPCT`)**: real decoders decelerate faster than the plain `DECEL`
-(or summed brake) model predicts. `lag(speed) = slope × max(0, speedStep − DECTHR)`, slope proportional to
-the relevant reference time. Calibrated from hardware measurement: `DECTHR≈11` (~4.2mph, roughly constant
-across `DECEL`), validated for `DECEL 0-230` (values above showed non-monotonic real-decoder behavior and
-are outside the validated scope — the underlying `ticksToCross()` math itself is strictly linear, so this
-is a decoder characteristic, not a firmware bug). Applies to any deceleration via one unconditional path —
-coast or brake, steady-state or interrupting an active climb.
+**Deceleration lag correction (`DECTHR`/`DECPCT`)**: in the normal momentum range a real ESU V5 decoder
+decelerates *faster* than the plain `DECEL` (or summed brake) linear model predicts — a BEMF-regulator
+control-loop artifact. `DECPCT` (0-255 = 0-100% strength) *subtracts* ticks from the coast/brake to
+match: `lag(speed) = slope × max(0, speedStep − DECTHR)`, slope proportional to the reference time
+`ticksToCross(effectiveDECEL)`. Captured once at the transition into decelerating, held for the run,
+applied via one unconditional path — coast or brake, steady-state or interrupting an active climb.
+Higher `DECPCT` → display reaches 0 sooner; higher `DECTHR` (~0.4 mph/unit) → the correction covers
+less of the run, display reaches 0 later.
+
+Calibrated (`DECTHR ≈ 11`, `DECPCT ≈ 22`) from hardware against `DECEL` 192/216/230. **The correction
+is required for accurate sync at effective `DECEL` (`CV4 + CV24`) up to ~230, and must be set to
+`DECPCT = 0` once effective `DECEL` reaches 255 or `CV4 + CV24` exceeds 255** — confirmed by hardware
+observation: the decoder deceleration goes genuinely linear at the momentum-register ceiling (the
+BEMF-regulator artifact washes out and the programmed ramp dominates), so the correction over-shaves
+there and the display runs ahead of the loco. The 231-254 band is a transition zone where no single
+`DECPCT` tracks perfectly. `ticksToCross()` itself is strictly linear in the CV at every value — this
+is a decoder characteristic, not a firmware bug.
+
+**Not yet done**: ramping `DECPCT` down automatically across effective `DECEL` 230→255 so the operator
+does not have to zero it manually — a separate change, needs its own hardware pass to fix the ramp
+shape and threshold.
 
 **Standing-start acceleration (`ACCPCT`/`ACCTGT`)**: real locomotives reach any speed below 15mph faster
 than the plain `ACCEL` model predicts, by a roughly constant amount of time (not proportional to distance).
@@ -439,14 +487,18 @@ characteristic entirely outside this codebase.
 
 `ACCEL`/`DECEL`/`BRK1-3`/`DELAY` are named after their CV role, but the CV convention itself is inverted
 from what the name suggests — a *bigger* number means *slower*/*weaker* (a time constant, not a rate); that
-is an NMRA convention, not a naming choice made here.
+is an NMRA convention, not a naming choice made here. `ACCEL`/`DECEL` are genuine 0-255; the other
+plain-numeric items cap at 254 in the editor (a stored 255 would collide with the `0xFF` self-heal
+sentinel).
 
 **Momentum CVs (direct decoder mirrors)**
 
 | Item | Default | Tested | What it does | Increase | Decrease |
 |---|---|---|---|---|---|
-| `ACCEL` (CV3) | 60 | 60 | Time to cross the full speed range while speeding up | Slower acceleration | Faster acceleration |
-| `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). **Values above 230 showed non-linear behavior on real decoder hardware during calibration — not recommended; `DECTHR`/`DECPCT` were only validated up to `DECEL=230`.** | Slower coast-down (up to 230) | Faster coast-down |
+| `ACCEL` (CV3) | 60 | 60 | Time to cross the full speed range while speeding up. 0-255 | Slower acceleration | Faster acceleration |
+| `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). 0-255. **The `DECPCT`/`DECTHR` lag correction is only validated to effective `DECEL` (`CV4 + CV24`) ~230; set `DECPCT = 0` at effective `DECEL` 255 or `CV4 + CV24 > 255` (the real decoder goes linear at the momentum ceiling), and the 231-254 band is a transition zone.** | Slower coast-down (see `DECPCT` note) | Faster coast-down |
+| `ACCELADJ` (CV23) | 0 | — | Signed `-127..+127` added to `ACCEL` (V5 only). Effective CV3 = `ACCEL + ACCELADJ`, unclamped past 255 | Slower acceleration | Faster acceleration |
+| `DECELADJ` (CV24) | 0 | — | Signed `-127..+127` added to `DECEL` (V5 only). Effective CV4 = `DECEL + DECELADJ`, unclamped past 255 | Slower coast-down | Faster coast-down |
 | `BRK1` (CV179) | 130 | — | How strongly Brake1 shortens the stop when active — sums with `BRK2`/`BRK3` (capped at 255) | Faster/harder stop | Weaker braking |
 | `BRK2` (CV180) | 70 | — | Same as `BRK1`, second stackable brake | Faster/harder stop | Weaker braking |
 | `BRK3` (CV181) | 100 | — | Same as `BRK1`, third stackable brake | Faster/harder stop | Weaker braking |
@@ -456,14 +508,14 @@ is an NMRA convention, not a naming choice made here.
 
 | Item | Default | Tested | What it does |
 |---|---|---|---|
-| `MAXSPEED` | 50 | 50 | Real-world scale speed (mph) at speed step 126 — the calibration anchor |
+| `MAXSPEED` | 50 | 50 | Real-world scale speed (mph) at speed step 126 — the calibration anchor. 1-254 (0 is a divisor in the ramp math) |
 | `UNIT` | MPH | — | MPH or KMH display |
 
 **Watched-function triggers**
 
 | Item | Default | What it does |
 |---|---|---|
-| `HOLDFN` | F09 | DCC function watched for ESU Drive Hold — display freezes while asserted |
+| `HOLDFN` | F09 | DCC function watched for ESU Drive Hold — display freezes while asserted. `OFF` persists (read raw, not `readByteOrDefault`) |
 | `STOPFN` | OFF | DCC function watched to snap the display to 0mph |
 
 **Load simulation (CV103/CV104)**
@@ -479,7 +531,7 @@ is an NMRA convention, not a naming choice made here.
 
 | Item | Default | What it does |
 |---|---|---|
-| `TYPE` | V5DCC | `V5DCC` (0.896s/unit), `V5MULT` (0.25s/unit, same 13-parameter model), or `V4` (0.25s/unit, drops `BRK2`/`BRK3` and the load CVs) |
+| `TYPE` | V5DCC | `V5DCC` (0.896s/unit), `V5MULT` (0.25s/unit, same 16-parameter model), or `V4` (0.25s/unit, drops `ACCELADJ`/`DECELADJ`, `BRK2`/`BRK3` and the load CVs) |
 
 **Correction tunables** (hidden behind `ADV FUNC`)
 
@@ -487,35 +539,48 @@ is an NMRA convention, not a naming choice made here.
 |---|---|---|---|
 | `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time) |
 | `ACCTGT` | 5 | 5 | Target time (0.1s/unit) for the display to first show 1mph |
-| `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the steady-state deceleration-lag correction |
-| `DECTHR` | 11 | 11 | Speed (raw step) below which the `DECPCT` correction does not apply |
+| `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the deceleration-lag correction. **Required for accurate sync at effective `DECEL` ≤ ~230; set to 0 once effective `DECEL` = 255 or `CV4 + CV24 > 255`** (see "How the simulation math works") |
+| `DECTHR` | 11 | 11 | Speed (raw step, ~0.4 mph/unit) below which the `DECPCT` correction does not apply |
 
 Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). Every other field above is still
 the shipped compile-time default, not independently re-validated against that locomotive.
+`ACCELADJ`/`DECELADJ` were bench-checked against the times LokProgrammer computes (V5DCC, and V5MULT for
+CV24 scaling) and confirmed on a locomotive with a non-zero CV23/CV24 in the normal momentum range.
 
 ### EEPROM layout and the reference-trace test
 
-The 6 type-agnostic `SPEED` items keep their original scattered addresses (`ACCEL`/`DECEL`/`BRK1` in the
-gaps left by `EE_BK2_FUNCTION`/`EE_BK3_FUNCTION`, `MAXSPEED`/`UNIT`/`TYPE` after `EE_STACK_BAND_COMBOS`).
-The 13 decoder-type-specific model parameters live in one contiguous block, `EE_SPEED_MODEL_PAYLOAD`
-(`0x54-0x63`, 13 used with `0x61-0x63` reserved). The `EEPROM_LAYOUT_VERSION` 2 -> 3 migration in
-`readConfig()` **relocates** the model parameters into this block from their former scattered holes
-rather than resetting them: a layout-2 throttle keeps every tuned value (the migration copies each byte
-from its old offset across all 20 profiles plus the working config), a stock or pre-guard chip gets
-model defaults, a blank chip self-heals. No backup or re-import is needed for that upgrade.
+The 5 type-agnostic `SPEED` items (`TYPE`/`MAXSPEED`/`UNIT`/`ACCEL`/`DECEL`) keep their original
+scattered addresses (`ACCEL`/`DECEL` in the gaps left by `EE_BK2_FUNCTION`/`EE_BK3_FUNCTION`,
+`MAXSPEED`/`UNIT`/`TYPE` after `EE_STACK_BAND_COMBOS`); `BRK1` stays at `0x2B` but is a model-list item.
+The decoder-type-specific model parameters live in one contiguous block, `EE_SPEED_MODEL_PAYLOAD`
+(`0x54-0x63`, 15 used with `0x63` reserved — `ACCELADJ`/`DECELADJ` at `0x61`/`0x62`). Migrations in
+`readConfig()`:
+
+- **2 → 3** **relocates** the 13 scattered model parameters (`0x54-0x60`) into this block rather than
+  resetting them: a layout-2 throttle keeps every tuned value (each byte copied from its old offset
+  across all 20 profiles plus the working config), a stock or pre-guard chip gets model defaults, a
+  blank chip self-heals. No backup or re-import needed.
+- **3 → 4** — the one migration gated `!= EEPROM_LAYOUT_VERSION` rather than `< N`, so it **also runs
+  on a blank/wiped chip**. Five SPEED bytes now leave `readByteOrDefault()` and are read raw so a
+  stored `0xFF` is a real value — `ACCEL`/`DECEL` (`0x28`/`0x2E`, `0xFF` = 255), `HOLDFN` (`0x57`,
+  `0xFF` = OFF), `ACCELADJ`/`DECELADJ` (`0x61`/`0x62`, `0xFF` = −127). The migration seeds
+  `0x28`/`0x2E`/`0x57` where currently `0xFF` (a real 0-254 value is preserved) and inits `0x61`/`0x62`
+  to 0. Non-destructive — no config byte is overwritten, only version stamp + `0xFF → default`.
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
 per-tick `simSpeedStepQ8` and `printSpeed()` output against checked-in reference traces
 (`reference/*.txt`). It is the regression net for any change to the model — a diff means the output
 moved, either intended (`make speedtest-accept` re-blesses the traces) or a regression. It also asserts
-two invariants as `PASS`/`FAIL` lines (the `V4` model equals the `V5MULT` model with its dropped
-parameters no-oped; `speedApplyTypeInert()` neutralises a stale slot) and exits non-zero on failure.
-`.githooks/pre-commit` runs it whenever a commit touches `cst-speed.c`, `cst-speed.h`, or that
-directory. The only host-build shim is `cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h`
-includes `<avr/pgmspace.h>`; scenarios stay in realistic non-zero CV ranges, where the model is
-provably identical between AVR 16-bit `int` and host 32-bit `int`.
+two invariants as `PASS`/`FAIL` lines (the `V4` model equals the `V5MULT` model with all its dropped
+parameters no-oped — `ACCELADJ`/`DECELADJ`/`BRK2`/`BRK3` and the load CVs; `speedApplyTypeInert()`
+neutralises a stale slot) and exits non-zero on failure. `.githooks/pre-commit` runs it whenever a
+commit touches `cst-speed.c`, `cst-speed.h`, or that directory. The only host-build shim is
+`cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h` includes `<avr/pgmspace.h>`. Scenarios
+keep momentum CVs in non-zero ranges where AVR 16-bit `int` and host 32-bit `int` provably agree; the
+`accel_cv255`/`decel_cv255` scenarios deliberately exercise the ceiling (`accel_cv255` bakes in a
+~0.27-step, sub-display-resolution non-monotonic ramp wobble at that extreme `ACCEL`).
 
 ## AIRBRAKE — air-brake simulation
 
@@ -790,6 +855,13 @@ Every editable config menu (`SPEED CFG`, `AIRBRAKE CFG`, `OPTIONS`, `SYSTEM`, `C
   the landing page with a `SAVED!` flash. A long-press of `MENU` anywhere in the list discards the
   edit and exits to the main screen (see "Long-press Menu to cancel a subscreen edit").
 
+**Editor ceiling for a `readByteOrDefault` byte is 254, not 255**: a stored `0xFF` is that helper
+"unset → default" sentinel, so a value cranked to 255 silently reverts on the next load. `AIRBRAKE
+CFG`, the non-full-range `SPEED CFG` numerics, and `TX HLDOF` (`COMM CFG`) all cap at 254 for this
+reason; for `TX HLDOF` `readConfig()` additionally heals a stored `0xFF` to `TX_HOLDOFF_DEFAULT`. The
+exceptions are the five raw-read `SPEED` bytes — `ACCEL`/`DECEL` (0-255), `HOLDFN` (`OFF`),
+`ACCELADJ`/`DECELADJ` (−127…+127) — see the SPEED editor section.
+
 Two item-dispatch styles are in use:
 
 1. **Indexed accessor** (`AIRBRAKE_CONFIG_SCREEN`): a named-item enum in the module header
@@ -801,8 +873,9 @@ Two item-dispatch styles are in use:
    header) in on-screen order, resolved from `subscreenState` — `item = subscreenState - 1` for the
    fixed-layout screens (`PREFS`/`COMM`/`SYSTEM`), or a resolver where the layout is not fixed:
    `optionItemAt()` for `OPTION_SCREEN` (STACK inserts N band-editor items, and it also yields the
-   band number), `speedItemAt()` for `SPEED_CONFIG_SCREEN` (the item set after the six agnostic ones
-   depends on `TYPE`). `switch(item)` blocks handle label, display, and per-kind edit behaviour, with
+   band number), `speedItemAt()` for `SPEED_CONFIG_SCREEN` (the item set after the five agnostic ones
+   depends on `TYPE`, and `ACCELADJ`/`DECELADJ` are spliced into the agnostic run after `ACCEL`/`DECEL`).
+   `switch(item)` blocks handle label, display, and per-kind edit behaviour, with
    small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where
    the values are heterogeneous — bits of `configBits`/`optionBits`/`systemBits`, a 3-way field
    (`GET`/`SET_BRK_TYPE`), deterministic toggles (STEPS, HORNTYPE), the STACK band→combo cycle,
@@ -950,14 +1023,20 @@ menus — **one object per config menu**, objects and keys in menu order: a slot
 are string enums, everything else a plain number) / `options` (the OPTIONS menu — brake config plus
 `reverser_swap`/`horn_type`; its meta-field is `unset`); `device.json` is `system` (ADV-FUNC battery
 thresholds) / `comm` / `prefs` (`config_bits` nested here) / `calibration`. The `speed` object is
-decoder-family-shaped: the six agnostic fields (`TYPE`/`MAXSPEED`/`UNIT`/`ACCEL`/`DECEL`/`BRK1`) plus
+decoder-family-shaped: the five agnostic fields (`TYPE`/`MAXSPEED`/`UNIT`/`ACCEL`/`DECEL`) plus
 only the model fields the `TYPE` uses (`speed_fields_for_type()` in `cst_eeprom_layout.py` — a `V4`
-slot has 13 keys, a `V5` slot 19); the encoder writes inert values to the slots a `V4` drops so the
-image byte-matches the firmware. `SLOT_SCHEMA_VERSION` is 4. `encode_slot` / `encode_global` also
-accept the older pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` /
-`options_unset`, and — via `--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is
-`V4`). `MenuOrderTests` in `test_slot_codec.py` locks
-the ordering so a `slot_codec.py` change is deliberate.
+slot has 13 keys, a `V5` slot 21); `ACCELADJ`/`DECELADJ` are keyed right after `ACCEL`/`DECEL`
+(matching the on-device splice), then `BRK1` leads the rest of the model list for every family. The
+encoder writes inert values to the slots a `V4` drops so the image byte-matches the firmware.
+`ACCEL`/`DECEL` and `ACCELADJ`/`DECELADJ` are read raw by the firmware (a stored `0xFF` is a real value — 255, or −127
+sign-magnitude), so the codec decodes `0xFF` to that rather than `"UNSET"`, accepts `ACCEL`/`DECEL`
+`0-255` and `ACCELADJ`/`DECELADJ` `-127..127`, and maps a bare `"UNSET"` for one of these to its
+default value; `SPEED_FULL_RANGE_FIELDS` / `SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
+`SLOT_SCHEMA_VERSION` is 5. `encode_slot` / `encode_global` also accept the older pre-schema shapes on
+import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`, and — via
+`--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is `V4`, or a pre-5 `speed` object
+missing `ACCELADJ`/`DECELADJ`). `MenuOrderTests` in `test_slot_codec.py` locks the ordering so a
+`slot_codec.py` change is deliberate.
 
 **CNF format version guard**: since the codec is a hand-maintained mirror, a stale copy of this tool run
 against a newer/older device could silently misdecode. `EEPROM_LAYOUT_VERSION` on the chip is compared
@@ -1083,7 +1162,8 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
    vocabulary, and bump `SLOT_SCHEMA_VERSION` in `slot_codec.py` if the exported JSON shape changes
    (this is the JSON schema version, independent of `EEPROM_LAYOUT_VERSION` — a change can move one
    without the other: the `V5MULT`/`V4` split bumped the schema with no layout change; the SPEED
-   payload relocation bumped the layout with no schema change).
+   payload relocation bumped the layout with no schema change; the `ACCELADJ`/`DECELADJ` +
+   genuine-0-255 `ACCEL`/`DECEL` work bumped both).
 6. If the change touches `cst-speed.c`, regenerate the reference traces with `make speedtest-accept`
    and review the `git diff` — that diff is the human-readable statement of how the model output moved.
 

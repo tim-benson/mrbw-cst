@@ -98,6 +98,7 @@ SLEEP_TMR_MAX = 99
 ALERTER_TMR_MIN = 0
 ALERTER_TMR_MAX = 60
 TX_HOLDOFF_MIN = 10
+TX_HOLDOFF_MAX = 254   # one below the 0xFF erased-byte sentinel (firmware heals 0xFF -> default)
 
 CONFIGBITS_LED_BLINK = 0
 CONFIGBITS_MAIN_SCREEN_SPEED = 1  # bit clear = clock (default), set = scale speed
@@ -184,9 +185,10 @@ EE_SPEED_TYPE = 0x3C
 EE_STACK_BAND_COMBOS_3STEP = 0x41  # 3 bytes, bands 1-3
 
 # SPEED group 2 - decoder-type-specific model parameters, contiguous EE_SPEED_MODEL_PAYLOAD block
-# (0x54-0x63, 13 used + 0x61-0x63 reserved). Moved here from scattered holes in 0x2C-0x48 by the
-# EEPROM_LAYOUT_VERSION 2->3 migration. Which of these a TYPE uses is a firmware-descriptor concern
-# (cst-speed.c); the codec just mirrors every slot.
+# (0x54-0x63, 15 used + 0x63 reserved). 0x54-0x60 moved here from scattered holes in 0x2C-0x48 by the
+# EEPROM_LAYOUT_VERSION 2->3 migration; ACCELADJ/DECELADJ (0x61/0x62) were added by the 3->4 migration.
+# Which of these a TYPE uses is a firmware-descriptor concern (cst-speed.c); the codec just mirrors
+# every slot.
 EE_SPEED_MODEL_PAYLOAD = 0x54
 EE_MOMENTUM_BRAKE2_CV180 = 0x54
 EE_MOMENTUM_BRAKE3_CV181 = 0x55
@@ -201,12 +203,15 @@ EE_SPEED_ACCEL_PCT = 0x5D
 EE_SPEED_ACCEL_TARGET = 0x5E
 EE_SPEED_DECEL_PCT = 0x5F
 EE_SPEED_DECEL_THRESHOLD = 0x60
+EE_SPEED_ACCEL_ADJ = 0x61   # CV23 mirror (signed, V5 only) - layout 3->4
+EE_SPEED_DECEL_ADJ = 0x62   # CV24 mirror (signed, V5 only) - layout 3->4
 
 # AIRBRAKE per-profile air-brake model config (src/cst-pressure.c / AIRBRAKE_CONFIG_SCREEN), raw
 # 0-255 bytes, all self-healing via readByteOrDefault(). 0x49 is EE_HORN2_FUNCTION and 0x52 is
 # EE_COMPRESSOR2_FUNCTION (both in FUNCTION_FIELDS - wedged in this block because the 0x30 function
-# region is fully packed). AIRBRAKE occupies 0x4A-0x53, the SPEED model payload 0x54-0x63; the SPEED
-# group-1 holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 are free. 0x64-0x7F is per-slot padding.
+# region is fully packed). AIRBRAKE occupies 0x4A-0x53, the SPEED model payload 0x54-0x63 (0x63
+# reserved); the SPEED group-1 holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 are free.
+# 0x64-0x7F is per-slot padding.
 EE_AIRBRAKE_CHARGED = 0x4A
 EE_AIRBRAKE_MR_CUTIN = 0x4B
 EE_AIRBRAKE_MR_CUTOUT = 0x4C
@@ -297,6 +302,8 @@ SPEED_FIELD_DEFAULTS = {
     "ACCTGT": 5,
     "DECPCT": 22,
     "DECTHR": 11,
+    "ACCELADJ": 0,
+    "DECELADJ": 0,
 }
 
 # json_key -> EEPROM offset for every SPEED field (agnostic + every family's model params). All are
@@ -321,18 +328,25 @@ SPEED_FIELD_OFFSET = {
     "ACCTGT": EE_SPEED_ACCEL_TARGET,
     "DECPCT": EE_SPEED_DECEL_PCT,
     "DECTHR": EE_SPEED_DECEL_THRESHOLD,
+    "ACCELADJ": EE_SPEED_ACCEL_ADJ,
+    "DECELADJ": EE_SPEED_DECEL_ADJ,
 }
 
-# The 6 type-agnostic SPEED CFG fields, in on-device menu order (TYPE first). Present for every family.
-SPEED_AGNOSTIC_FIELDS = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL", "BRK1"]
+# The 5 type-agnostic SPEED CFG fields, in on-device menu order (TYPE first). Present for every family.
+# BRK1 (CV179) is present for every family too, but it is grouped with BRK2/BRK3 in each family's
+# model list rather than here.
+SPEED_AGNOSTIC_FIELDS = ["TYPE", "MAXSPEED", "UNIT", "ACCEL", "DECEL"]
 
-# Per-family model fields, in on-device menu order (shown after the agnostic 6). Mirrors the
-# descriptors in cst-speed.c: V5DCC and V5MULT carry the identical 13; V4 drops BRK2/BRK3 (no
-# CV180/CV181) and the load CVs (no CV103/CV104).
-_ESU_V5_MODEL_FIELDS = ["BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN",
+# Per-family model fields. Mirrors the descriptors in cst-speed.c: V5DCC and V5MULT carry the identical
+# 16; V4 drops ACCELADJ/DECELADJ (no CV23/CV24), BRK2/BRK3 (no CV180/CV181) and the load CVs (no
+# CV103/CV104), keeping BRK1. ACCELADJ/DECELADJ lead this list for the "family has it" membership test,
+# but speed_fields_for_type() splices them into the menu right after the ACCEL/DECEL they adjust; the
+# rest follow the agnostic 5 in this order.
+_ESU_V5_MODEL_FIELDS = ["ACCELADJ", "DECELADJ",
+                        "BRK1", "BRK2", "BRK3", "DELAY", "HOLDFN", "STOPFN",
                         "OPLOAD", "OPLOADFN", "PRLOAD", "PRLOADFN",
                         "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"]
-_ESU_V4_MODEL_FIELDS = ["DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"]
+_ESU_V4_MODEL_FIELDS = ["BRK1", "DELAY", "HOLDFN", "STOPFN", "ACCPCT", "ACCTGT", "DECPCT", "DECTHR"]
 SPEED_MODEL_FIELDS = {
     "V5DCC": _ESU_V5_MODEL_FIELDS,
     "V5MULT": _ESU_V5_MODEL_FIELDS,
@@ -341,15 +355,37 @@ SPEED_MODEL_FIELDS = {
 
 # Value written to a model slot the family does not use - mirrors speedItemInert() in cst-speed.c, so
 # a V4 EEPROM image matches what the firmware produces after speedResetModel()/speedApplyTypeInert().
-SPEED_MODEL_INERT = {"BRK2": 0, "BRK3": 0, "OPLOAD": 128, "PRLOAD": 128,
+SPEED_MODEL_INERT = {"ACCELADJ": 0, "DECELADJ": 0, "BRK2": 0, "BRK3": 0, "OPLOAD": 128, "PRLOAD": 128,
                      "OPLOADFN": WATCHED_FN_OFF, "PRLOADFN": WATCHED_FN_OFF}
+
+# Fields shown/edited as a signed value (-127..127 - the full ESU CV23/CV24 magnitude range); the
+# stored byte carries the decoder's sign-bit encoding (bit 7 = subtract, bits 0-6 = magnitude), so
+# -127 is byte 0xFF. The firmware reads these two bytes raw (0xFF is a real -127, never "unset"), and
+# so does _decode_speed. Decoded/encoded in slot_codec.py.
+SPEED_SIGNED_FIELDS = {"ACCELADJ", "DECELADJ"}
+SPEED_ADJ_MAG_MAX = 127
+
+# ACCEL / DECEL are genuine 0-255 CVs (a decoder's literal CV3 / CV4 can be 255): the firmware reads
+# them raw, so a stored 0xFF is a real 255, not "UNSET". Every other plain-numeric SPEED field still
+# self-heals from 0xFF, so its max is 254. See _decode_speed / _encode_speed in slot_codec.py.
+SPEED_FULL_RANGE_FIELDS = {"ACCEL", "DECEL"}
 
 
 def speed_fields_for_type(type_name):
-    """The json keys a `speed` object carries for the given decoder family, in menu order
-    (agnostic 6 + that family's model params). Unknown type_name falls back to the V5DCC set."""
+    """The json keys a `speed` object carries for the given decoder family, in on-device menu order:
+    the 5 agnostic fields, with ACCELADJ/DECELADJ spliced in right after the ACCEL/DECEL they adjust
+    for a family that has them, then the rest of that family's model params. Unknown type_name falls
+    back to the V5DCC set."""
     model = SPEED_MODEL_FIELDS.get(type_name, _ESU_V5_MODEL_FIELDS)
-    return SPEED_AGNOSTIC_FIELDS + list(model)
+    out = []
+    for f in SPEED_AGNOSTIC_FIELDS:
+        out.append(f)
+        if f == "ACCEL" and "ACCELADJ" in model:
+            out.append("ACCELADJ")
+        elif f == "DECEL" and "DECELADJ" in model:
+            out.append("DECELADJ")
+    out += [f for f in model if f not in ("ACCELADJ", "DECELADJ")]
+    return out
 
 
 # Fields whose value is a raw 0-255 number (as opposed to UNIT, TYPE, or a *FN watched-function field

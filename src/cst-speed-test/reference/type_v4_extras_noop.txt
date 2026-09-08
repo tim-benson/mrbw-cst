@@ -1,5 +1,5 @@
 # scenario: type_v4_extras_noop
-# config:   TYPE V4, OPLOAD 200 set; Brake1+2+3 + Optional Load all asserted
+# config:   TYPE V4; OPLOAD 200, ACCELADJ +40, DECELADJ -20 set; Brake1+2+3 + Optional Load asserted
 # inputs:   cmd=60 settle, then Brake1+2+3 held - speed column tracks type_v5mult (extras no-op)
 #
 #  tick  cmd  flags(EHS123OP)      q8   display

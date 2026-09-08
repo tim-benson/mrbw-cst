@@ -26,11 +26,19 @@ UNSET = "UNSET"
 # --import-old. (DISPLAY was added to the airbrake section after v3 without a bump - the feature has
 # only ever run on one test throttle, nothing in the wild; an older export whose airbrake object lacks
 # DISPLAY needs --import-old on a plain import.)
-# 4: the `speed` object is now decoder-family-shaped - it carries the 6 type-agnostic fields plus only
-# the model fields the TYPE uses (V4 drops BRK2/BRK3 and the load CVs). A pre-4 flat backup (all 19
-# fields) still imports without --import-old for a V5DCC/V5MULT TYPE (identical field set); a hand-set
-# V4 TYPE on a flat backup needs --import-old to ignore the inapplicable fields.
-SLOT_SCHEMA_VERSION = 4
+# 4: the `speed` object is now decoder-family-shaped - it carries the type-agnostic fields plus only
+# the model fields the TYPE uses (V4 drops BRK2/BRK3 and the load CVs). A pre-4 flat backup with a
+# V4 TYPE needs --import-old to ignore the inapplicable fields.
+# 5: V5DCC/V5MULT gain ACCELADJ/DECELADJ (decoder CV23/CV24, signed -127..127), keyed in the object
+# right after the ACCEL/DECEL they adjust; BRK1 moves from the agnostic block into every family's
+# model list (menu grouping only - it is still present for every TYPE). A pre-5 backup missing
+# ACCELADJ/DECELADJ needs --import-old (they default to 0). Also under
+# schema 5: ACCEL/DECEL become genuine 0-255 fields (a decoder's literal CV3/CV4 can be 255). ACCEL/
+# DECEL and ACCELADJ/DECELADJ are all read raw by the firmware - a stored 0xFF is a real value (255,
+# or -127 sign-magnitude), so a raw 0xFF decodes to that, never "UNSET", and a bare "UNSET" on import
+# maps to the default value, not the 0xFF sentinel. Every other plain-numeric SPEED field stays
+# 0-254 + "UNSET". (device: tx_holdoff_centisecs now validates 10-254, not 10-255 - firmware heals 0xFF.)
+SLOT_SCHEMA_VERSION = 5
 
 
 class SlotValidationError(ValueError):
@@ -289,7 +297,13 @@ def _decode_speed(raw):
     out = {}
     for key in layout.speed_fields_for_type(type_name):
         val = raw[layout.SPEED_FIELD_OFFSET[key]]
-        if val == 0xFF:
+        # ACCEL/DECEL and ACCELADJ/DECELADJ are read raw by the firmware - a stored 0xFF is a real
+        # value (255, or -127 sign-magnitude), never "UNSET" - so these come first.
+        if key in layout.SPEED_FULL_RANGE_FIELDS:
+            out[key] = val
+        elif key in layout.SPEED_SIGNED_FIELDS:
+            out[key] = -(val & 0x7F) if (val & 0x80) else (val & 0x7F)
+        elif val == 0xFF:
             out[key] = UNSET
         elif key == "UNIT":
             out[key] = layout.SPEED_UNIT_TO_NAME.get(val, "RAW:%d" % val)
@@ -347,15 +361,25 @@ def _encode_speed(d, errors, allow_missing=False):
     out = {}
     for key in expected:
         offset = layout.SPEED_FIELD_OFFSET[key]
+        full_range = key in layout.SPEED_FULL_RANGE_FIELDS
+        # ACCEL/DECEL and ACCELADJ/DECELADJ are read raw by the firmware - a stored 0xFF is a real
+        # value, not "unset" - so a missing key / bare "UNSET" defaults to the real default byte.
+        no_unset = full_range or key in layout.SPEED_SIGNED_FIELDS
         if key not in d:
             if not allow_missing:
                 errors.append("speed.%s: missing" % key)
-            out[offset] = 0xFF
+            out[offset] = layout.SPEED_FIELD_DEFAULTS[key] if no_unset else 0xFF
             continue
         val = d[key]
         label = "speed.%s" % key
         if val == UNSET:
-            out[offset] = 0xFF
+            out[offset] = layout.SPEED_FIELD_DEFAULTS[key] if no_unset else 0xFF
+        elif full_range:
+            if not (isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 255):
+                errors.append("%s: must be an integer 0-255, or \"UNSET\"" % label)
+                out[offset] = layout.SPEED_FIELD_DEFAULTS[key]
+            else:
+                out[offset] = val
         elif key == "UNIT":
             if val not in layout.SPEED_UNIT_FROM_NAME:
                 errors.append("%s: must be one of %s" % (label, sorted(layout.SPEED_UNIT_FROM_NAME)))
@@ -366,6 +390,13 @@ def _encode_speed(d, errors, allow_missing=False):
             out[offset] = layout.SPEED_TYPE_FROM_NAME.get(val, 0xFF)  # UNSET/invalid already flagged above
         elif key in layout.SPEED_WATCHED_FN_FIELDS:
             out[offset] = _encode_watched_fn(val, errors, label)
+        elif key in layout.SPEED_SIGNED_FIELDS:
+            m = layout.SPEED_ADJ_MAG_MAX
+            if not (isinstance(val, int) and not isinstance(val, bool) and -m <= val <= m):
+                errors.append("%s: must be an integer %d..%d, or \"UNSET\"" % (label, -m, m))
+                out[offset] = 0
+            else:
+                out[offset] = (0x80 | (-val)) if val < 0 else val
         else:
             if not (isinstance(val, int) and not isinstance(val, bool) and 0 <= val <= 254):
                 # 254 not 255: 255/0xFF on a plain numeric field means UNSET (handled above), so a
@@ -887,7 +918,7 @@ def encode_global(d, base=None):
                       errors, out, layout.EE_ALERTER_TIMEOUT)
     _encode_u8_field(d, "dead_reckoning_time", 0, 255, errors, out, layout.EE_DEAD_RECKONING_TIME)
     _encode_u8_field(d, "time_source_address", 0, 255, errors, out, layout.EE_TIME_SOURCE_ADDRESS)
-    _encode_u8_field(d, "tx_holdoff_centisecs", layout.TX_HOLDOFF_MIN, 255, errors, out,
+    _encode_u8_field(d, "tx_holdoff_centisecs", layout.TX_HOLDOFF_MIN, layout.TX_HOLDOFF_MAX, errors, out,
                       layout.EE_TX_HOLDOFF)
     _encode_u8_field(d, "battery_okay_decivolts", 0, 255, errors, out, layout.EE_BATTERY_OKAY)
     _encode_u8_field(d, "battery_warn_decivolts", 0, 255, errors, out, layout.EE_BATTERY_WARN)
