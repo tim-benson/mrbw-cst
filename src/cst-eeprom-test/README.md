@@ -32,9 +32,11 @@ For each starting version (`from_blank`, `from_layout1`, `from_layout2`,
 `from_layout3`, `from_layout4_noop`) it dumps the post-migration 4096-byte image
 (16 bytes/row, all-`0xFF` rows elided) to a plain-text **trace**, one file per
 scenario, compared byte-for-byte against the checked-in copies under
-`reference/`.
+`reference/`. A sixth scenario, `reset_model`, does the same for
+`eepromResetProfileModel()` (the factory-default writer `resetConfig()` uses)
+run over a sentinel-filled working-config slot.
 
-`main()` also asserts four invariants it prints as `PASS`/`FAIL` lines, exiting
+`main()` also asserts seven invariants it prints as `PASS`/`FAIL` lines, exiting
 non-zero if any fails:
 
 1. a current-layout (`4`) image is left **completely untouched** - zero bytes
@@ -45,12 +47,21 @@ non-zero if any fails:
    the five raw-read SPEED bytes (`0x28`/`0x2E`/`0x57`/`0x61`/`0x62`) are seeded
    to their defaults;
 4. the **`2 -> 3` relocation preserves every value** - a sentinel at each old
-   scattered offset lands at its new `EE_SPEED_MODEL_PAYLOAD` slot.
+   scattered offset lands at its new `EE_SPEED_MODEL_PAYLOAD` slot;
+5. **`eepromResetProfileModel()` covers every model offset** - each of `0x28-0x62`
+   is a model field (set to its default), a function slot, or a freed hole, and
+   the three sets partition the range exactly (a new field missed here, or a
+   reused hole, fails);
+6. `eepromResetProfileModel()` is **confined** - it writes only the model
+   offsets, nothing else in the slot or the image;
+7. the reset and the `< 2` migration **agree** on the `0x54-0x60` SPEED payload
+   defaults (the two default sources in `cst-eeprom.c` must not drift).
 
-A difference means the migration output moved - either an intended change (a new
-migration block, a fix) and the reference is re-blessed, or an unintended
-regression and the code is fixed. Snapshot / characterization / golden-master
-testing; "reference trace" is the name used in this tree.
+A difference means the migration or reset output moved - either an intended
+change (a new migration block, a new field, a fix) and the reference is
+re-blessed, or an unintended regression and the code is fixed. Snapshot /
+characterization / golden-master testing; "reference trace" is the name used in
+this tree.
 
 ## Running it
 
@@ -101,10 +112,15 @@ The harness passes the pre-stamp `EE_LAYOUT_VERSION` byte to
 `applyEepromMigrations()` exactly as `readConfig()` does, so the version-gate
 behaviour (stamp-then-no-op, `!= VERSION` vs `< N`) is exercised as shipped.
 
-It covers only `applyEepromMigrations()`. The rest of `readConfig()` - decoding
-the *current* layout into RAM globals - is out of scope (and unchanged from its
-near-upstream shape once the migrations are factored out here).
+It covers `applyEepromMigrations()` and `eepromResetProfileModel()`. The rest of
+`readConfig()` / `resetConfig()` - decoding the *current* layout into RAM
+globals, and the non-model per-profile / global-config writes - is out of scope.
 
 Adding a migration block: add it to `applyEepromMigrations()`, add a
 `sc_from_layoutN()` scenario and any invariant that locks the new transform, run
 `make eepromtest-accept`, review every changed `reference/` file, commit.
+
+Adding a per-profile SPEED/AIRBRAKE/STACK model field: add its offset to
+`eepromResetProfileModel()` and to `resetModel_check[]` in `test_eeprom.c` (if
+it reuses a freed hole, also move that offset out of `isFreedHole()`), run
+`make eepromtest-accept`, review the `reset_model.txt` diff.

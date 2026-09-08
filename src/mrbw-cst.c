@@ -1391,41 +1391,11 @@ void resetConfig(void)
 	notchSpeedStep[7] = 119;
 	eeprom_write_block((void *)notchSpeedStep, (void *)EE_NOTCH_SPEEDSTEP, 8);
 
-	// Scale-speed simulation config - factory defaults, same values readByteOrDefault() falls
-	// back to in readConfig() if it finds unprogrammed (0xFF) EEPROM on an upgraded chip.
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_ACCEL_CV3, MOMENTUM_ACCEL_CV3_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_DECEL_CV4, MOMENTUM_DECEL_CV4_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE1_CV179, MOMENTUM_BRAKE1_CV179_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE2_CV180, MOMENTUM_BRAKE2_CV180_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_BRAKE3_CV181, MOMENTUM_BRAKE3_CV181_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_MOMENTUM_START_DELAY, MOMENTUM_START_DELAY_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_MAX_MPH, SPEED_MAX_MPH_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_UNIT_KMH, SPEED_UNIT_KMH_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_STOP_WATCH_FN, SPEED_STOP_WATCH_FN_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_TYPE, SPEED_TYPE_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD, SPEED_OPLOAD_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD, SPEED_PRLOAD_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_OPLOAD_FN, SPEED_OPLOAD_FN_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_PRLOAD_FN, SPEED_PRLOAD_FN_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_HOLD_WATCH_FN, SPEED_HOLD_WATCH_FN_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_THRESHOLD, SPEED_DECEL_THRESHOLD_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_PCT, SPEED_DECEL_PCT_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_PCT, SPEED_ACCEL_PCT_DEFAULT);
-	eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_TARGET, SPEED_ACCEL_TARGET_DEFAULT);
-
-	stackBandCombos5Step[1] = STACK_5STEP_DEFAULT_1;
-	stackBandCombos5Step[2] = STACK_5STEP_DEFAULT_2;
-	stackBandCombos5Step[3] = STACK_5STEP_DEFAULT_3;
-	stackBandCombos5Step[4] = STACK_5STEP_DEFAULT_4;
-	stackBandCombos5Step[5] = STACK_5STEP_DEFAULT_5;
-	eeprom_write_block((void *)&stackBandCombos5Step[1], (void *)EE_STACK_BAND_COMBOS, 5);
-
-	// 3-STEP factory defaults: each step maps to just its own single brake number - see the #define
-	// comments above for why this is simpler than 5-STEP's own tuned combo-based defaults.
-	stackBandCombos3Step[1] = STACK_3STEP_DEFAULT_1;
-	stackBandCombos3Step[2] = STACK_3STEP_DEFAULT_2;
-	stackBandCombos3Step[3] = STACK_3STEP_DEFAULT_3;
-	eeprom_write_block((void *)&stackBandCombos3Step[1], (void *)EE_STACK_BAND_COMBOS_3STEP, 3);
+	// Per-profile SPEED / AIRBRAKE / STACK model defaults (eepromResetProfileModel() in cst-eeprom.c) -
+	// the portion of a profile that grows as decoder families and simulation parameters are added.
+	// Same values readByteOrDefault() falls back to in readConfig() on an unprogrammed (0xFF) byte.
+	// Covered by `make eepromtest`. readConfig() at the end of this function reloads the RAM arrays.
+	eepromResetProfileModel(CONFIG_OFFSET(WORKING_CONFIG));
 
 	for (i=1; i<=MAX_CONFIGS; i++)
 	{

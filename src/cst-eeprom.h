@@ -224,4 +224,10 @@
 // `make eepromtest` (src/cst-eeprom-test/). See CLAUDE.md "EEPROM layout".
 void applyEepromMigrations(uint8_t oldLayoutVersion);
 
+// Factory defaults for the per-profile SPEED / AIRBRAKE / STACK "model" bytes at configBase (raw
+// in-slot offsets). resetConfig() in mrbw-cst.c calls this for the working config; it writes the
+// loco / force-func / brake-pulse / optionBits / notch bytes itself and cst-functions.c owns the
+// function bytes. Covered by `make eepromtest`.
+void eepromResetProfileModel(uint16_t configBase);
+
 #endif

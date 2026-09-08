@@ -218,6 +218,32 @@ static void sc_from_layout4_noop(void)
 	dumpImage("from_layout4_noop", "layout 4 (current), every slot byte = 0x40 + offset");
 }
 
+/* Fill one 128-byte slot with the 0x40 + offset sentinel (only that slot, so
+ * the reset_model trace stays small). Lets a check tell "written to its default"
+ * from "left untouched" even for the fields whose default is 0xFF (STOPFN /
+ * OPLOADFN / PRLOADFN). */
+static void fillSlotSentinels(uint16_t base)
+{
+	int off;
+	for (off = 0; off < 0x80; off++)
+		g_eeprom[base + off] = slotSentinel(off);
+}
+
+/* eepromResetProfileModel() over a sentinel-filled working-config slot: the
+ * SPEED / AIRBRAKE / STACK "model" bytes 0x28..0x62 are overwritten with their
+ * factory defaults; the function slots (0x29/0x2A/0x30-0x33/0x49/0x52) and the
+ * freed holes keep their sentinel; nothing outside the model offsets is touched.
+ * resetConfig() calls this for the working config then copies it to all 20
+ * profiles. */
+static void sc_reset_model(void)
+{
+	uint16_t wc = CONFIG_OFFSET(WORKING_CONFIG);
+	buildBlank();
+	fillSlotSentinels(wc);
+	eepromResetProfileModel(wc);
+	dumpImage("reset_model", "working-config slot = 0x40 + offset, then eepromResetProfileModel()");
+}
+
 /* ---- invariants (asserted in main() as PASS/FAIL, exit non-zero on any fail) ---
  * Properties the reference files alone cannot express - same role as the
  * V4==V5MULT check in the scale-speed harness. */
@@ -308,9 +334,132 @@ static int inv_relocation_preserves(void)
 	return ok;
 }
 
+/* ---- eepromResetProfileModel() coverage ---------------------------------- */
+
+/* The complete set of per-profile model offsets eepromResetProfileModel() must
+ * write, with the factory default expected at each - an INDEPENDENT restatement
+ * of the writes in cst-eeprom.c (the v3ModelSrc_check[] idiom). Adding a field
+ * to the reset function without adding it here (or vice versa) fails a check. */
+static const struct { uint8_t off; uint8_t val; } resetModel_check[] = {
+	{ 0x28, MOMENTUM_ACCEL_CV3_DEFAULT },    { 0x2B, MOMENTUM_BRAKE1_CV179_DEFAULT }, { 0x2E, MOMENTUM_DECEL_CV4_DEFAULT },
+	{ 0x34, STACK_5STEP_DEFAULT_1 }, { 0x35, STACK_5STEP_DEFAULT_2 }, { 0x36, STACK_5STEP_DEFAULT_3 },
+	{ 0x37, STACK_5STEP_DEFAULT_4 }, { 0x38, STACK_5STEP_DEFAULT_5 },
+	{ 0x39, SPEED_MAX_MPH_DEFAULT }, { 0x3A, SPEED_UNIT_KMH_DEFAULT }, { 0x3C, SPEED_TYPE_DEFAULT },
+	{ 0x41, STACK_3STEP_DEFAULT_1 }, { 0x42, STACK_3STEP_DEFAULT_2 }, { 0x43, STACK_3STEP_DEFAULT_3 },
+	{ 0x4A, AIRBRAKE_CHARGED_DEFAULT },     { 0x4B, AIRBRAKE_MR_CUTIN_DEFAULT },  { 0x4C, AIRBRAKE_MR_CUTOUT_DEFAULT },
+	{ 0x4D, AIRBRAKE_CHARGE_RATE_DEFAULT }, { 0x4E, AIRBRAKE_LEAK_RATE_DEFAULT }, { 0x4F, AIRBRAKE_PUMP_RATE_DEFAULT },
+	{ 0x50, AIRBRAKE_MR_LOAD_DEFAULT },     { 0x51, AIRBRAKE_COMP_MODE_DEFAULT }, { 0x53, AIRBRAKE_DISPLAY_DEFAULT },
+	{ 0x54, MOMENTUM_BRAKE2_CV180_DEFAULT }, { 0x55, MOMENTUM_BRAKE3_CV181_DEFAULT }, { 0x56, MOMENTUM_START_DELAY_DEFAULT },
+	{ 0x57, SPEED_HOLD_WATCH_FN_DEFAULT }, { 0x58, SPEED_STOP_WATCH_FN_DEFAULT },
+	{ 0x59, SPEED_OPLOAD_DEFAULT }, { 0x5A, SPEED_OPLOAD_FN_DEFAULT }, { 0x5B, SPEED_PRLOAD_DEFAULT }, { 0x5C, SPEED_PRLOAD_FN_DEFAULT },
+	{ 0x5D, SPEED_ACCEL_PCT_DEFAULT }, { 0x5E, SPEED_ACCEL_TARGET_DEFAULT }, { 0x5F, SPEED_DECEL_PCT_DEFAULT }, { 0x60, SPEED_DECEL_THRESHOLD_DEFAULT },
+	{ 0x61, SPEED_ACCEL_ADJ_DEFAULT }, { 0x62, SPEED_DECEL_ADJ_DEFAULT },
+};
+#define RESET_MODEL_CHECK_N ((int)(sizeof resetModel_check / sizeof resetModel_check[0]))
+
+/* Every offset in [0x28, 0x62] is one of: a model field (above), a function
+ * slot (cst-functions.c owns it), or a documented freed hole. The three sets
+ * partition the range exactly (38 + 8 + 13 = 59), so any offset that fits none
+ * is a bug in this test's bookkeeping. */
+static int isFunctionSlot(uint8_t off)
+{
+	return off == 0x29 || off == 0x2A || off == 0x30 || off == 0x31
+	    || off == 0x32 || off == 0x33 || off == 0x49 || off == 0x52;
+}
+static int isFreedHole(uint8_t off)
+{
+	return off == 0x2C || off == 0x2D || off == 0x2F || off == 0x3B
+	    || (off >= 0x3D && off <= 0x40) || (off >= 0x44 && off <= 0x48);
+}
+static int inResetModelTable(uint8_t off)
+{
+	int k;
+	for (k = 0; k < RESET_MODEL_CHECK_N; k++)
+		if (resetModel_check[k].off == off)
+			return 1;
+	return 0;
+}
+
+/* 5. eepromResetProfileModel() overwrites every model offset with its factory
+ *    default (checked against a sentinel, so it catches an unwritten field even
+ *    where the default is 0xFF), and [0x28, 0x62] is fully accounted for
+ *    (model / function slot / freed hole partition the range exactly). This is
+ *    the forcing function: a new field added to cst-eeprom.c but not to
+ *    resetModel_check[] (or a hole reused without updating the partition) fails. */
+static int inv_reset_model_complete(void)
+{
+	uint16_t b = CONFIG_OFFSET(WORKING_CONFIG);
+	int k, ok = 1;
+	uint8_t o;
+
+	buildBlank();
+	fillSlotSentinels(b);
+	eepromResetProfileModel(b);
+
+	for (k = 0; k < RESET_MODEL_CHECK_N; k++)
+		if (g_eeprom[b + resetModel_check[k].off] != resetModel_check[k].val)
+			ok = 0;
+	for (o = 0x28; o <= 0x62; o++)
+	{
+		int model = inResetModelTable(o), fn = isFunctionSlot(o), hole = isFreedHole(o);
+		if (model + fn + hole != 1)                        /* sets must partition the range */
+			ok = 0;
+		if ((fn || hole) && g_eeprom[b + o] != slotSentinel(o))   /* reset must not touch these */
+			ok = 0;
+	}
+	return ok;
+}
+
+/* 6. eepromResetProfileModel() writes ONLY the model offsets - it must not
+ *    disturb the function bytes, loco address, notch table or padding that
+ *    resetConfig() writes separately, nor any byte of any other slot. */
+static int inv_reset_confined(void)
+{
+	static uint8_t before[4096];
+	uint16_t b = CONFIG_OFFSET(WORKING_CONFIG);
+	int o, ok = 1;
+
+	buildBlank();
+	fillSlotSentinels(b);
+	memcpy(before, g_eeprom, sizeof before);
+	eepromResetProfileModel(b);
+
+	for (o = 0; o < 4096; o++)
+	{
+		int shouldChange = 0;
+		if (o >= (int)b && o < (int)b + 0x80)
+			shouldChange = inResetModelTable((uint8_t)(o - b));
+		if (!shouldChange && g_eeprom[o] != before[o])
+			ok = 0;
+	}
+	return ok;
+}
+
+/* 7. The SPEED model-payload defaults (0x54-0x60) eepromResetProfileModel()
+ *    writes must equal what applyEepromMigrations()'s speedModelDefault[] seeds
+ *    on a pre-2 chip - the two default sources in cst-eeprom.c must not drift. */
+static int inv_reset_agrees_with_migration_defaults(void)
+{
+	uint16_t b = slotBase(MAX_CONFIGS);
+	uint8_t viaMigration[13];
+	int k, ok = 1;
+
+	buildBlank();
+	applyEepromMigrations(1);   /* < 2 -> the speedModelDefault[] branch seeds 0x54-0x60 */
+	for (k = 0; k < 13; k++)
+		viaMigration[k] = g_eeprom[b + 0x54 + k];
+
+	buildBlank();
+	eepromResetProfileModel(b);
+	for (k = 0; k < 13; k++)
+		if (g_eeprom[b + 0x54 + k] != viaMigration[k])
+			ok = 0;
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
-	int i1, i2, i3, i4;
+	int i1, i2, i3, i4, i5, i6, i7;
 
 	g_outdir = (argc > 1) ? argv[1] : "out";
 
@@ -319,6 +468,7 @@ int main(int argc, char **argv)
 	sc_from_layout2();
 	sc_from_layout3();
 	sc_from_layout4_noop();
+	sc_reset_model();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
 
@@ -326,9 +476,15 @@ int main(int argc, char **argv)
 	i2 = inv_idempotent();
 	i3 = inv_blank_to_valid();
 	i4 = inv_relocation_preserves();
-	printf("invariant  layout-4 image untouched (no-op):   %s\n", i1 ? "PASS" : "FAIL");
-	printf("invariant  migration is idempotent:            %s\n", i2 ? "PASS" : "FAIL");
-	printf("invariant  blank chip -> valid layout 4:       %s\n", i3 ? "PASS" : "FAIL");
-	printf("invariant  2->3 relocation preserves values:   %s\n", i4 ? "PASS" : "FAIL");
-	return (i1 && i2 && i3 && i4) ? 0 : 1;
+	i5 = inv_reset_model_complete();
+	i6 = inv_reset_confined();
+	i7 = inv_reset_agrees_with_migration_defaults();
+	printf("invariant  layout-4 image untouched (no-op):        %s\n", i1 ? "PASS" : "FAIL");
+	printf("invariant  migration is idempotent:                 %s\n", i2 ? "PASS" : "FAIL");
+	printf("invariant  blank chip -> valid layout 4:            %s\n", i3 ? "PASS" : "FAIL");
+	printf("invariant  2->3 relocation preserves values:        %s\n", i4 ? "PASS" : "FAIL");
+	printf("invariant  reset-model: every field at its default: %s\n", i5 ? "PASS" : "FAIL");
+	printf("invariant  reset-model: confined to [0x28,0x62]:     %s\n", i6 ? "PASS" : "FAIL");
+	printf("invariant  reset-model agrees with migration seed:  %s\n", i7 ? "PASS" : "FAIL");
+	return (i1 && i2 && i3 && i4 && i5 && i6 && i7) ? 0 : 1;
 }

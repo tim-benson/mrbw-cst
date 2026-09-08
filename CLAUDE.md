@@ -116,7 +116,9 @@ push a packet onto the MRBee transmit queue → sleep until the next tick. Suppo
 out specific subsystems (LCD driver, battery monitoring, EEPROM config decode + layout migrations,
 brake-pipe pressure simulation, tonnage/load sound, fast-clock time sync) but the orchestration logic all
 lives in `mrbw-cst.c`. `readConfig()` decodes the current EEPROM layout into RAM globals and calls
-`applyEepromMigrations()` (`cst-eeprom.c`) once per boot to rewrite an older layout forward.
+`applyEepromMigrations()` (`cst-eeprom.c`) once per boot to rewrite an older layout forward;
+`resetConfig()` (factory reset) delegates the per-profile SPEED/AIRBRAKE/STACK model defaults to
+`eepromResetProfileModel()` in the same file.
 
 **Function abstraction (`cst-functions.c`/`.h`)**: physical controls (brake lever, horn button, headlight
 switch, etc.) are decoupled from DCC output via a `Functions` enum (`BRAKE_FN`, `HORN_FN`, `BELL_FN`, ...).
@@ -157,6 +159,14 @@ synthetic layout-N images and diffs the 4096-byte result — the only coverage o
 newer firmware", since `slot_codec.py` does not model migrations. The migration *comments* (in
 `cst-eeprom.c`) and the per-version narrative in the SPEED and AIRBRAKE sections are the authoritative
 description of each transform.
+
+`cst-eeprom.c` also holds **`eepromResetProfileModel(uint16_t configBase)`** — the factory-default writer
+for the per-profile SPEED/AIRBRAKE/STACK "model" bytes (`0x28-0x62` minus the function slots), called by
+`resetConfig()` for the working config, which then `copyConfig()`s it to all 20 profiles. It is the part
+of a profile that grows as decoder families and sim parameters are added, so it is centralized here (one
+list) and `make eepromtest` asserts it covers every model offset (`sc_reset_model` + `inv_reset_*`). The
+non-model per-profile bytes (loco address, force-func, brake pulse, optionBits, notch table) and the
+function-assignment bytes stay in `resetConfig()` / `cst-functions.c`.
 
 **Brake logic**: see "Brake logic" below.
 
@@ -1227,7 +1237,10 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
 1. Add/change the field in `src/cst-eeprom.h` and wire up `readConfig()`/save-path code in `mrbw-cst.c`.
    If old EEPROMs need forward-migrating, add the migration block to `applyEepromMigrations()` in
    `src/cst-eeprom.c` (not `readConfig()`), plus a `sc_from_layoutN()` scenario and any invariant in
-   `src/cst-eeprom-test/test_eeprom.c`.
+   `src/cst-eeprom-test/test_eeprom.c`. If it is a per-profile SPEED/AIRBRAKE/STACK "model" field, add
+   its offset to `eepromResetProfileModel()` in `src/cst-eeprom.c` **and** to `resetModel_check[]` in
+   `test_eeprom.c` (`make eepromtest` fails if the two disagree, or if a freed hole was reused without
+   updating the range partition).
 2. Mirror the same offset/type/decode logic in `cst_eeprom_layout.py` and the
    `decode_slot()`/`decode_global()`/`encode_slot()`/`encode_global()` functions of `slot_codec.py`.
 3. Bump `EEPROM_LAYOUT_VERSION` in `cst-eeprom.h` — the Python tooling parses that `#define` at import

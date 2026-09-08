@@ -163,3 +163,65 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 		}
 	}
 }
+
+// Writes the SPEED / AIRBRAKE / STACK "model" bytes of one 128-byte profile slot (at configBase) to
+// their factory defaults - the portion of a profile that grows as decoder families and simulation
+// parameters are added. resetConfig() in mrbw-cst.c calls this for the working config, then copies
+// that slot to all 20 profiles. NOT here (resetConfig() writes them inline, defaults #define'd in
+// mrbw-cst.c): the loco address, force-func words, brake pulse width, optionBits and the notch table;
+// the 28 function-assignment bytes are owned by cst-functions.c (resetFunctionConfiguration() +
+// writeFunctionConfiguration(), which covers HORN2 / BK2 / BK3 / COMPRESSOR2 at 0x49 / 0x29 / 0x2A /
+// 0x52). Raw in-slot offsets + configBase, like the migrations above, so any slot base works and
+// cst-eeprom-test/ can drive it host-side. Covered by `make eepromtest` (sc_reset_model +
+// inv_reset_*). When adding a per-profile model field: add its in-slot offset here AND to
+// resetModel_check[] in test_eeprom.c - see CLAUDE.md's maintenance checklist.
+void eepromResetProfileModel(uint16_t configBase)
+{
+	wdt_reset();
+
+	// Type-agnostic momentum + MAXSPEED / UNIT / TYPE (scattered - see cst-eeprom.h).
+	eeprom_write_byte((uint8_t*)(configBase + 0x28), MOMENTUM_ACCEL_CV3_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x2B), MOMENTUM_BRAKE1_CV179_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x2E), MOMENTUM_DECEL_CV4_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x39), SPEED_MAX_MPH_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x3A), SPEED_UNIT_KMH_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x3C), SPEED_TYPE_DEFAULT);
+
+	// STACK band->combo maps (band 0 is fixed to "none", not stored). 5-STEP 0x34-0x38, 3-STEP 0x41-0x43.
+	eeprom_write_byte((uint8_t*)(configBase + 0x34), STACK_5STEP_DEFAULT_1);
+	eeprom_write_byte((uint8_t*)(configBase + 0x35), STACK_5STEP_DEFAULT_2);
+	eeprom_write_byte((uint8_t*)(configBase + 0x36), STACK_5STEP_DEFAULT_3);
+	eeprom_write_byte((uint8_t*)(configBase + 0x37), STACK_5STEP_DEFAULT_4);
+	eeprom_write_byte((uint8_t*)(configBase + 0x38), STACK_5STEP_DEFAULT_5);
+	eeprom_write_byte((uint8_t*)(configBase + 0x41), STACK_3STEP_DEFAULT_1);
+	eeprom_write_byte((uint8_t*)(configBase + 0x42), STACK_3STEP_DEFAULT_2);
+	eeprom_write_byte((uint8_t*)(configBase + 0x43), STACK_3STEP_DEFAULT_3);
+
+	// AIRBRAKE CFG 0x4A-0x53 (0x49 HORN2 / 0x52 COMPRESSOR2 are function slots - left to cst-functions.c).
+	eeprom_write_byte((uint8_t*)(configBase + 0x4A), AIRBRAKE_CHARGED_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x4B), AIRBRAKE_MR_CUTIN_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x4C), AIRBRAKE_MR_CUTOUT_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x4D), AIRBRAKE_CHARGE_RATE_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x4E), AIRBRAKE_LEAK_RATE_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x4F), AIRBRAKE_PUMP_RATE_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x50), AIRBRAKE_MR_LOAD_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x51), AIRBRAKE_COMP_MODE_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x53), AIRBRAKE_DISPLAY_DEFAULT);
+
+	// SPEED model payload 0x54-0x62 (EE_SPEED_MODEL_PAYLOAD; 0x63 reserved). Order matches the block.
+	eeprom_write_byte((uint8_t*)(configBase + 0x54), MOMENTUM_BRAKE2_CV180_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x55), MOMENTUM_BRAKE3_CV181_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x56), MOMENTUM_START_DELAY_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x57), SPEED_HOLD_WATCH_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x58), SPEED_STOP_WATCH_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x59), SPEED_OPLOAD_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5A), SPEED_OPLOAD_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5B), SPEED_PRLOAD_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5C), SPEED_PRLOAD_FN_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5D), SPEED_ACCEL_PCT_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5E), SPEED_ACCEL_TARGET_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x5F), SPEED_DECEL_PCT_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x60), SPEED_DECEL_THRESHOLD_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x61), SPEED_ACCEL_ADJ_DEFAULT);
+	eeprom_write_byte((uint8_t*)(configBase + 0x62), SPEED_DECEL_ADJ_DEFAULT);
+}
