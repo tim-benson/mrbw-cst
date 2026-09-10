@@ -13,8 +13,9 @@ This is a fork adding:
 - **Two-stage horn ("Horn2")** — a second, independently-calibrated horn function, additive or exclusive
   with the primary horn.
 - **Scale-speed simulation ("SPEED")** — replaces the main screen's fast clock with a locally-computed
-  scale mph/km-h readout modeling ESU LokSound/LokPilot V4/V5 momentum and brake deceleration, so the
-  display stays in visual sync with what the decoder is actually doing.
+  scale mph / km/h readout modeling ESU LokSound/LokPilot V4/V5 momentum and brake deceleration, so the
+  display stays in visual sync with what the decoder is actually doing. Covers the momentum CVs (CV3/CV4
+  and the CV23/CV24 adjust), the brake and load CVs, and start delay.
 - **Offline loco-config export/import (cfgtransfer)** — `cst_cfgtransfer.py`, a Python 3 stdlib-only
   tool to back up and hand-edit stored loco profiles as JSON over the ISP programmer, with the firmware
   not running.
@@ -37,8 +38,12 @@ Functions" menu whose transient Brake Test gauge AIRBRAKE replaces. A mixed flee
 fork-firmware throttles/receivers on the same layout is fully supported; see `CLAUDE.md`,
 "Compatibility," for exactly how each combination behaves.
 
-Upgrading a configured throttle across the AIRBRAKE change bumps `EEPROM_LAYOUT_VERSION` — export with
-`cst_cfgtransfer.py` first, flash, then re-import.
+The stored-config layout carries an `EEPROM_LAYOUT_VERSION` (currently 4) and the firmware migrates an
+older EEPROM forward on first boot. Migrations carry existing per-profile values across in place, with one
+exception: a throttle already running an early ProtoThrottle X build loses its SPEED and AIRBRAKE
+per-profile config to defaults when it crosses the AIRBRAKE layout change. Coming from stock ISE firmware
+nothing is lost. Either way, back up a configured throttle with `cst_cfgtransfer.py` before a firmware
+upgrade and re-import afterward if anything looks reset.
 
 ## Repo layout
 
@@ -57,6 +62,10 @@ make program # flash a connected board via an ISP programmer (fuse + flash in on
 
 Target: ATmega1284P @ 11.0592 MHz / 3.3V, `avr-gcc`. See `CLAUDE.md`, "Build / flash," for full detail
 including the macOS/Homebrew setup and programmer options.
+
+The SPEED and AIRBRAKE simulation models and the EEPROM layout migrations each have a host-compiled
+golden-master test — `make speedtest`, `make pressuretest`, `make eepromtest` (run automatically by a
+pre-commit hook) — that locks their behaviour against a set of reference traces.
 
 ## Documentation
 

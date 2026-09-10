@@ -58,6 +58,13 @@ Target: **ATmega1284P** @ 11.0592 MHz / 3.3V, compiled with `avr-gcc` (`-std=gnu
 git hash are baked into the build from `git describe` via `src/git-revision.sh` — the working tree must be
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
+The ATmega1284P (128 KB flash, 16 KB SRAM) has no pin-compatible successor with more memory, so this is a
+one-way door. `make size` currently shows ample headroom — roughly 42% flash, 20% static RAM (leaving
+~13 KB for the stack, against a deepest frame of a few hundred bytes) — and the fork has held near there
+across the whole feature set. Check it before adding a large non-`PROGMEM` table, a wide LCD/canvas
+buffer, or another large `switch(screenState)` branch. The `int64` scale-speed math is a latency concern
+(hence out of the ISR — see SPEED), not a footprint one.
+
 The automated firmware tests are `make speedtest`, `make pressuretest` and `make eepromtest` - host-compiled
 reference-trace harnesses for the scale-speed model (`src/cst-speed-test/`, see the SPEED section), the
 AIRBRAKE air-brake model (`src/cst-pressure-test/`, see the AIRBRAKE section) and the EEPROM layout

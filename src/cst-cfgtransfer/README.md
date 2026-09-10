@@ -276,6 +276,8 @@ the tool to refuse loudly against an out-of-sync device instead of silently misd
 tables (`FUNCTION_FIELDS`/`SPEED_FIELDS`/etc.) themselves still have to be updated by hand.
 
 `check_layout_change_bumps_version.py` in this directory + `.githooks/pre-commit` (wired up once
-`make setup` has run `git config core.hooksPath .githooks`) is a local safety net that flags a
-`cst-eeprom.h` layout change which forgot to bump `EEPROM_LAYOUT_VERSION` — not a substitute for the rest
-of the checklist. `git commit --no-verify` bypasses it, same as any git hook.
+`make setup` has run `git config core.hooksPath .githooks`) is a local safety net that flags a change to
+a layout-defining `#define` in `cst-eeprom.h` (the `EE_*` offsets, `CONFIG_*`, `MAX_CONFIGS` /
+`WORKING_CONFIG`) that forgot to bump `EEPROM_LAYOUT_VERSION` — not a substitute for the rest of the
+checklist, and it does not see a new field added under an unrecognised name or a repurposed byte whose
+offset did not move. `git commit --no-verify` bypasses it, same as any git hook.

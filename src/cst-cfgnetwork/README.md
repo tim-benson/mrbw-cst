@@ -106,7 +106,7 @@ python3 cst_cfgnetwork.py sniff --port /dev/tty.usbserial-XXXX --my-addr 0x48
   transfer step by step:
 
   ```
-  21:14:07  0x30->0xD0  PUSH BEGIN  N05  len=128 ver=1
+  21:14:07  0x30->0xD0  PUSH BEGIN  N05  len=128 ver=4
   21:14:07  0xD0->0x30  PUSH BEGIN-ACK  N05  OK
   21:14:07  0x30->0xD0  PUSH DATA  N05  off=0 len=10  8B 10 00 ...
   21:14:07  0xD0->0x30  PUSH DATA-ACK  N05  off=0  OK
@@ -114,6 +114,9 @@ python3 cst_cfgnetwork.py sniff --port /dev/tty.usbserial-XXXX --my-addr 0x48
   21:14:08  0x30->0xD0  PUSH COMMIT  N05  crc=0x4F2A
   21:14:08  0xD0->0x30  PUSH COMMIT-ACK  N05  OK
   ```
+
+  (`ver` is the `EEPROM_LAYOUT_VERSION` the pushing throttle carries, 4 as of this writing — see the
+  layout-version guard below.)
 
   Combines with `--status-only` / `--changes` (shows `'S'` plus CNF, nothing else).
 - `--seconds N` - stop automatically after `N` seconds instead of running until `Ctrl-C`.
