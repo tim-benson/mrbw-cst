@@ -45,6 +45,16 @@ per-profile config to defaults when it crosses the AIRBRAKE layout change. Comin
 nothing is lost. Either way, back up a configured throttle with `cst_cfgtransfer.py` before a firmware
 upgrade and re-import afterward if anything looks reset.
 
+## How this fork was developed
+
+This fork was implemented with substantial help from an AI coding assistant (Claude) — hence the
+`Co-Authored-By` trailers throughout the history. The assistant was used to turn designs into C, build
+the reference-trace test harnesses, and draft documentation. The design and engineering are my own: the
+feature set, the simulation models and their calibration against real decoders, the EEPROM layout and its
+forward-migration strategy, and the wire protocol for the shared configuration store. Every change that
+affects firmware behaviour was flashed to a physical ProtoThrottle and tested against real locomotives
+and decoders before being committed; the commit messages record the specifics.
+
 ## Repo layout
 
 `src/` is the only directory with code in the normal sense — the AVR firmware, plus the two Python PC
