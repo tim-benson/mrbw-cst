@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  firmware-build:
+    name: Firmware build (avr-gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history + tags so src/git-revision.sh can compute a real
+          # VERSION_STRING (it degrades to a harmless ".0+" without a tag).
+          fetch-depth: 0
+      - name: Install AVR toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-avr binutils-avr avr-libc
+      - name: Compile
+        working-directory: src
+        run: make hex
+      - name: Flash / RAM usage
+        working-directory: src
+        run: make size
+
+  model-tests:
+    name: Model reference-trace tests
+    runs-on: ubuntu-latest
+    # The golden-master harnesses host-compile the model .c files directly with
+    # stubs; they need neither the AVR toolchain nor the mrbus submodule.
+    steps:
+      - uses: actions/checkout@v4
+      - name: speedtest / pressuretest / eepromtest
+        working-directory: src
+        run: make speedtest pressuretest eepromtest
+
+  python-tests:
+    name: PC tooling tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: cst-cfgtransfer
+        working-directory: src/cst-cfgtransfer
+        run: python3 -m unittest discover tests
+      - name: cst-cfgnetwork
+        working-directory: src/cst-cfgnetwork
+        run: python3 -m unittest discover tests
