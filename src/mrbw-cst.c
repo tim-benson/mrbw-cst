@@ -1544,15 +1544,59 @@ static void displaySyncResult(SyncResult result, uint8_t isSave, uint8_t slot)
 	}
 }
 
+// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD): a persistent 3-way cycle (OFF -> OPLOAD -> PRLOAD ->
+// OFF) advanced one step on each momentary press, asserting whichever DCC function SPEED CFG's
+// OPLOADFN/PRLOADFN is currently configured to. One RAM-only state variable per button (file-scope,
+// not a main() local, since both main()'s button-handling switch and the separate
+// renderBaseScreen() need to read/write it) - resets to LOAD_MODE_OFF on power-up, not persisted to
+// EEPROM, like optionButtonState.
+static LoadMode loadModeUp = LOAD_MODE_OFF;
+static LoadMode loadModeDown = LOAD_MODE_OFF;
+static LoadMode loadModeMenu = LOAD_MODE_OFF;
+static LoadMode loadModeSel = LOAD_MODE_OFF;
+
+static LoadMode advanceLoadMode(LoadMode m)
+{
+	switch(m)
+	{
+		case LOAD_MODE_OFF:    return LOAD_MODE_OPLOAD;
+		case LOAD_MODE_OPLOAD: return LOAD_MODE_PRLOAD;
+		default:                return LOAD_MODE_OFF;
+	}
+}
+
+// Live LOAD eligibility: SPEED enabled and the profile's TYPE models the load CVs (V5DCC/V5MULT,
+// not V4). Checked at every runtime touch-point (not just CONFIG FUNC's value cycle) because
+// CONFIGBITS_MAIN_SCREEN_SPEED is edited live in RAM from PREFS with no save required - it can flip
+// on the very next render pass while a button still stores a stale FN_LOAD from before. Without
+// re-checking here, setupLoadChar() would overwrite the CGRAM slot setupLCD() just correctly
+// reloaded for the real PM glyph in that same pass, corrupting it persistently until some unrelated
+// mode transition happened to reload clock chars again. isFunctionLoad(fn) alone is only safe to use
+// at CONFIG FUNC's value-cycle gate (cst-functions.c), which is about *offering* LOAD as a choice,
+// not about whether a slot is safe to write to right now.
+static uint8_t loadEligible(void)
+{
+	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) && speedTypeHasLoad();
+}
+static uint8_t loadActive(Functions fn)
+{
+	return isFunctionLoad(fn) && loadEligible();
+}
+
 // The corner glyph for a configurable button (UP / DOWN / MENU / SEL): the "A" glyph
 // (AIRBRAKE_GLYPH_CHAR, loaded by baseScreenLcdMode()'s LCD_OPS / LCD_OPS_SPEED) if the button opens
 // the AIRBRAKE gauge - a screen jump, not a DCC function, so the softkey circle would be meaningless.
-// Otherwise the filled/hollow circle - filled while the function is asserting and configured, hollow
-// otherwise (shown even when the function is OFF, matching the stock UP/DOWN glyphs).
+// The LOAD glyph (LOAD_CHAR) if the button is LOAD and currently eligible - loadActive(), not the
+// bare isFunctionLoad(), so a now-ineligible stale LOAD assignment falls back to the ordinary circle
+// instead of pointing at a slot that may no longer hold a LOAD bitmap. Otherwise the filled/hollow
+// circle - filled while the function is asserting and configured, hollow otherwise (shown even when
+// the function is OFF, matching the stock UP/DOWN glyphs).
 static char buttonCornerGlyph(Functions fn, uint8_t asserting)
 {
 	if(isFunctionAirBrake(fn))
 		return AIRBRAKE_GLYPH_CHAR;
+	if(loadActive(fn))
+		return LOAD_CHAR;
 	return (asserting && !isFunctionOff(fn)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR;
 }
 
@@ -1645,6 +1689,16 @@ static void renderBaseScreen(uint8_t opsScreen, uint8_t backlight, uint8_t optio
 
 	printBattery(opsLayout ? 6 : 0);
 
+	// Rewrite LOAD_CHAR for whichever button is currently LOAD-active (at most one, firmware-enforced
+	// - see loadUsedElsewhere() in cst-functions.c) before drawing any corner. Gating on loadActive()
+	// rather than isFunctionLoad() is what actually keeps this safe: whenever eligibility drops (SPEED
+	// disabled or TYPE=V4), none of these fire, so the shared slot is left alone for setupLCD()'s
+	// ordinary clock-glyph reload to own without being overwritten in the same pass.
+	if(loadActive(UP_FN))        setupLoadChar(loadModeUp);
+	else if(loadActive(DOWN_FN)) setupLoadChar(loadModeDown);
+	else if(loadActive(MENU_FN)) setupLoadChar(loadModeMenu);
+	else if(loadActive(SEL_FN))  setupLoadChar(loadModeSel);
+
 	lcd_gotoxy(7,0);
 	lcd_putc(buttonCornerGlyph(UP_FN, optionButtonState & UP_OPTION_BUTTON));
 	lcd_gotoxy(7,1);
@@ -1652,8 +1706,16 @@ static void renderBaseScreen(uint8_t opsScreen, uint8_t backlight, uint8_t optio
 
 	if(opsLayout)
 	{
-		uint8_t menuOn = (optionButtonState & MENU_OPTION_BUTTON) && !isFunctionOff(MENU_FN);
-		uint8_t selOn  = (optionButtonState & SEL_OPTION_BUTTON)  && !isFunctionOff(SEL_FN);
+		// LOAD-configured MENU_FN/SEL_FN never sets optionButtonState's bit (its press-edge handler
+		// advances loadModeMenu/loadModeSel instead - see the press-edge sites), so the ordinary term
+		// below is always false for it regardless of whether OPLOAD/PRLOAD is actively asserting. Treat
+		// "currently OPLOAD or PRLOAD" as the LOAD analogue of "latched and on" - loadActive() already
+		// falls back to false once the button becomes ineligible (SPEED disabled or TYPE=V4), so a
+		// stale/inert LOAD assignment correctly shows nothing here either.
+		uint8_t menuOn = ((optionButtonState & MENU_OPTION_BUTTON) && !isFunctionOff(MENU_FN)) ||
+		                 (loadActive(MENU_FN) && (LOAD_MODE_OFF != loadModeMenu));
+		uint8_t selOn  = ((optionButtonState & SEL_OPTION_BUTTON)  && !isFunctionOff(SEL_FN)) ||
+		                 (loadActive(SEL_FN)  && (LOAD_MODE_OFF != loadModeSel));
 		lcd_gotoxy(0,0);
 		if(opsScreen)
 			lcd_putc(buttonCornerGlyph(MENU_FN, optionButtonState & MENU_OPTION_BUTTON));
@@ -2202,7 +2264,9 @@ int main(void)
 						case UP_BUTTON:
 							if(UP_BUTTON != previousButton)
 							{
-								if(isFunctionLatching(UP_FN))
+								if(loadActive(UP_FN))
+									loadModeUp = advanceLoadMode(loadModeUp);
+								else if(isFunctionLatching(UP_FN))
 									optionButtonState ^= UP_OPTION_BUTTON;  // Toggle
 								else
 									optionButtonState |= UP_OPTION_BUTTON;  // Momentary on
@@ -2211,7 +2275,9 @@ int main(void)
 						case DOWN_BUTTON:
 							if(DOWN_BUTTON != previousButton)
 							{
-								if(isFunctionLatching(DOWN_FN))
+								if(loadActive(DOWN_FN))
+									loadModeDown = advanceLoadMode(loadModeDown);
+								else if(isFunctionLatching(DOWN_FN))
 									optionButtonState ^= DOWN_OPTION_BUTTON;  // Toggle
 								else
 									optionButtonState |= DOWN_OPTION_BUTTON;  // Momentary on
@@ -2335,7 +2401,9 @@ int main(void)
 					case UP_BUTTON:
 						if(UP_BUTTON != previousButton)
 						{
-							if(isFunctionLatching(UP_FN))
+							if(loadActive(UP_FN))
+								loadModeUp = advanceLoadMode(loadModeUp);
+							else if(isFunctionLatching(UP_FN))
 								optionButtonState ^= UP_OPTION_BUTTON;
 							else
 								optionButtonState |= UP_OPTION_BUTTON;
@@ -2344,7 +2412,9 @@ int main(void)
 					case DOWN_BUTTON:
 						if(DOWN_BUTTON != previousButton)
 						{
-							if(isFunctionLatching(DOWN_FN))
+							if(loadActive(DOWN_FN))
+								loadModeDown = advanceLoadMode(loadModeDown);
+							else if(isFunctionLatching(DOWN_FN))
 								optionButtonState ^= DOWN_OPTION_BUTTON;
 							else
 								optionButtonState |= DOWN_OPTION_BUTTON;
@@ -2354,7 +2424,9 @@ int main(void)
 						// Purely a function button here - no power-down, no backlight toggle.
 						if(SELECT_BUTTON != previousButton)
 						{
-							if(isFunctionLatching(SEL_FN))
+							if(loadActive(SEL_FN))
+								loadModeSel = advanceLoadMode(loadModeSel);
+							else if(isFunctionLatching(SEL_FN))
 								optionButtonState ^= SEL_OPTION_BUTTON;
 							else
 								optionButtonState |= SEL_OPTION_BUTTON;
@@ -2369,9 +2441,15 @@ int main(void)
 								// AIRBRAKE is a screen, not a DCC function - opening it on the press
 								// edge would leave OPS MODE before the exit long-press below could ever
 								// run, trapping the operator. It is opened on release of a short tap
-								// instead (case NO_BUTTON). Latching / momentary MENU_FN keep their
-								// press-edge behaviour.
-								if(!isFunctionAirBrake(MENU_FN))
+								// instead (case NO_BUTTON). LOAD touches no screenState, so it is safe
+								// to advance right here on the press edge - the long-press-exit check
+								// just below still runs normally on a held MENU regardless. Latching /
+								// momentary MENU_FN keep their press-edge behaviour.
+								if(loadActive(MENU_FN))
+								{
+									loadModeMenu = advanceLoadMode(loadModeMenu);
+								}
+								else if(!isFunctionAirBrake(MENU_FN))
 								{
 									if(isFunctionLatching(MENU_FN))
 										optionButtonState ^= MENU_OPTION_BUTTON;
@@ -3424,14 +3502,14 @@ int main(void)
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								incrementCurrentFunctionValue();
+								incrementCurrentFunctionValue(loadEligible());
 								ticks_autoincrement = 0;
 							}
 							break;
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								decrementCurrentFunctionValue();
+								decrementCurrentFunctionValue(loadEligible());
 								ticks_autoincrement = 0;
 							}
 							break;
@@ -3743,6 +3821,11 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_THRESHOLD,  speedGet(SPEED_ITEM_DECEL_THRESHOLD));
 								eeprom_write_byte((uint8_t*)EE_SPEED_ACCEL_ADJ,       speedGet(SPEED_ITEM_ACCEL_ADJ));
 								eeprom_write_byte((uint8_t*)EE_SPEED_DECEL_ADJ,       speedGet(SPEED_ITEM_DECEL_ADJ));
+								// If the saved TYPE no longer models the load CVs (V4), clear any
+								// UP/DOWN/MENU/SEL BTN already set to LOAD - otherwise it would keep
+								// showing "LOAD" in CONFIG FUNC despite being unreachable there now.
+								if(!speedTypeHasLoad())
+									clearLoadFunctions();
 								readConfig();
 								lcd_clrscr();
 								lcd_gotoxy(1,0);
@@ -4653,6 +4736,13 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_ALERTER_TIMEOUT, newAlerterTimeout);
 								eeprom_write_byte((uint8_t*)EE_DEAD_RECKONING_TIME, getMaxDeadReckoningTime());
 								eeprom_write_byte((uint8_t*)EE_CONFIGBITS, configBits);
+								// If the saved DISPLAY setting no longer shows SPEED, clear any UP/DOWN/
+								// MENU/SEL BTN already set to LOAD - otherwise it would keep showing
+								// "LOAD" in CONFIG FUNC despite being unreachable there now (same
+								// reasoning as SPEED_CONFIG_SCREEN's TYPE-drops-to-V4 clearLoadFunctions()
+								// call).
+								if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
+									clearLoadFunctions();
 								readConfig();
 								// Resync the new* staging locals from the (readConfig()-restored) real
 								// values. Also done by the long-press-Menu cancel handler in the top-level
@@ -5709,6 +5799,19 @@ int main(void)
 			if(isFunctionEstop(SEL_FN))
 				estopStatus |= ESTOP_BUTTON;
 		}
+
+		// LOAD (UP/DOWN/MENU/SEL BTN): asserts whichever DCC function OPLOADFN/PRLOADFN is configured
+		// to in SPEED CFG, driven by the button's own persistent 3-way cycle state rather than by
+		// optionButtonState - LOAD has no functionMask bit of its own (getFunctionMask() returns 0 for
+		// it), so this asserts the target bit directly. Unconditional every pass, not gated on the
+		// button currently being held - matches the "continuous-hold-while-condition-is-true" idiom
+		// used elsewhere (e.g. NEUTRAL_FN) rather than a momentary/latching read. Runs before the
+		// STOPFN/OPLOADFN/PRLOADFN/HOLDFN scan below, so that scan picks up LOAD's contribution
+		// automatically, regardless of source, with no changes needed to it.
+		if(loadActive(UP_FN))   functionMask |= speedLoadFunctionMask(loadModeUp);
+		if(loadActive(DOWN_FN)) functionMask |= speedLoadFunctionMask(loadModeDown);
+		if(loadActive(MENU_FN)) functionMask |= speedLoadFunctionMask(loadModeMenu);
+		if(loadActive(SEL_FN))  functionMask |= speedLoadFunctionMask(loadModeSel);
 
 		if(controls & THR_UNLK_CONTROL)
 			functionMask |= getFunctionMask(THR_UNLOCK_FN);

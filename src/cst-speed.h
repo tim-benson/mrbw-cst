@@ -268,6 +268,18 @@ enum
 // it drops ACCELADJ/DECELADJ, BRK2/BRK3 and the load CVs.
 #define SPEED_TYPE_COUNT                 3
 
+// LOAD button function (cst-functions.h's FN_LOAD): the 3-way state a UP/DOWN/MENU/SEL BTN cycles
+// through on each press (OFF -> OPLOAD -> PRLOAD -> OFF), asserting the DCC function OPLOADFN/
+// PRLOADFN is currently configured to. A real type (not a bare uint8_t) since mrbw-cst.c declares
+// variables of it, matching Functions/LcdMode elsewhere - -fshort-enums is project-wide, so this
+// costs nothing over a raw byte.
+typedef enum
+{
+	LOAD_MODE_OFF = 0,
+	LOAD_MODE_OPLOAD,
+	LOAD_MODE_PRLOAD,
+} LoadMode;
+
 uint8_t speedType(void);
 
 // 8-char padded display label for a TYPE (fills the LCD row); clamps an out-of-range type to the
@@ -298,5 +310,17 @@ void printSpeed(void);
 
 uint8_t speedGet(uint8_t item);
 void    speedSet(uint8_t item, uint8_t value);
+
+// True when the current TYPE models the Optional/Primary Load CVs (CV103/CV104) - V5DCC and
+// V5MULT, not V4. Exposed for the LOAD button function's on-device availability gate (CONFIG
+// FUNC), which needs a plain boolean rather than reaching into cst-speed.c's private per-item
+// descriptor walk.
+uint8_t speedTypeHasLoad(void);
+
+// Maps a LOAD button's 3-way cycle state to the functionMask bit for the DCC function OPLOADFN/
+// PRLOADFN is currently configured to (0 for LOAD_MODE_OFF, or if the watched function is OFF/
+// unconfigured). Lets mrbw-cst.c assert the SPEED CFG-configured load function directly from a
+// button's persistent state without knowing SPEED_ITEM_* internals.
+uint32_t speedLoadFunctionMask(LoadMode loadMode);
 
 #endif

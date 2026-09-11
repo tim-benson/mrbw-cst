@@ -480,7 +480,8 @@ confirms CV24 scales with the family multiplier just like CV4.
 **Load simulation (`OPLOAD`/`PRLOAD`/`OPLOADFN`/`PRLOADFN`)**: mirrors decoder CV103 (Optional Load)/CV104
 (Primary Load) — each a 0-255 value (128 = neutral) that scales the base `ACCEL`/`DECEL` CV while its
 watched DCC function is active, `time = CV × loadValue/128`. Primary Load wins if both are active
-simultaneously, per the ESU manual.
+simultaneously, per the ESU manual. `OPLOADFN`/`PRLOADFN` can also be asserted directly by a button
+configured to the LOAD function — see "LOAD button function" below.
 
 **Brake-function detection**: the simulation reads whether Brake1/2/3 are active from the actual outgoing
 `functionMask`, not from the lever own state-machine bits — so any control mapped to the same DCC
@@ -1049,6 +1050,64 @@ vocabulary as `UP_BUTTON` / `DOWN_BUTTON`), `prefs.config_bits` gains `ops_mode`
 
 Sleep: `screenState` is not reset on wake, so a throttle that sleeps in OPS MODE wakes back into it —
 a base-screen variant is exactly where it should resume.
+
+## LOAD button function
+
+A fifth special value for the same four configurable buttons `AIRBRAKE` already occupies (`UP_FN` /
+`DOWN_FN` / `MENU_FN` / `SEL_FN`) — `FN_LOAD`, menu name "LOAD", spliced into the value cycle directly
+between `EMRG BRK` and `AIRBRAKE`. Each momentary press advances a 3-way state, OFF -> OPLOAD -> PRLOAD ->
+OFF, asserting whichever DCC function `OPLOADFN` / `PRLOADFN` (see "Load simulation" under SPEED above)
+is currently configured to — so one button can drive the ESU Optional/Primary Load simulation without
+separately wiring another control to the same function number. Offered as a CONFIG FUNC choice only while
+SPEED is enabled (`CONFIGBITS_MAIN_SCREEN_SPEED`) and the profile `TYPE` models the load CVs (`V5DCC` /
+`V5MULT`, not `V4` — `speedTypeHasLoad()`).
+
+**Restricted to one button at a time, enforced in firmware.** `loadUsedElsewhere()` (`cst-functions.c`)
+skips `FN_LOAD` in the CONFIG FUNC value cycle for any button while another of the four already holds it.
+This is a hardware constraint, not a style choice: the LCD has exactly 8 CGRAM slots (a genuine HD44780
+ceiling), all already committed on the base/OPS MODE screen, and the LOAD indicator needs its bitmap
+dynamically rewritten to match whichever button currently holds it — unlike the static hollow/filled
+circle, which uses two permanently loaded slots precisely so several corners can simultaneously show
+different states with no rewriting at all. A single dynamically-rewritten slot is only ever correct when
+exactly one corner references it; two simultaneous holders in different states would show whichever was
+written most recently at both corners, since CGRAM slot content is global, not per-cell.
+
+**CGRAM.** The indicator (`LOAD_CHAR`, `cst-lcd.c` / `cst-common.h`) reuses the `PM_CHAR` slot (4). Safe
+because LOAD can only ever be assigned while SPEED is enabled, exactly the condition that selects
+`LCD_OPS_SPEED` over `LCD_OPS` (AM/PM not shown — see "OPS MODE screen" CGRAM above) — except that
+`CONFIGBITS_MAIN_SCREEN_SPEED` is edited live in RAM from PREFS with no save required, so it can flip on
+the very next render pass while a button still stores a stale `FN_LOAD` from before. Every runtime use
+therefore goes through `loadActive(fn)` / `loadEligible()` (`mrbw-cst.c`) rather than the bare
+`isFunctionLoad(fn)` — the press-edge advance, the `functionMask` assembly, `buttonCornerGlyph()`, and the
+`renderBaseScreen()` rewrite of `LOAD_CHAR` itself. Without that live re-check, `setupLoadChar()` would
+overwrite the CGRAM slot `setupLCD()` had just correctly reloaded for the real PM glyph in the same pass,
+corrupting the AM/PM indicator until some unrelated mode transition happened to reload clock chars again.
+This borrowed-slot design is a consequence of `MAIN_SCREEN` and `OPS_MODE_SCREEN` sharing one CGRAM
+palette; a future split of that palette would let `LOAD_CHAR` become a plain, unconditionally-resident
+static glyph like `AIRBRAKE_GLYPH_CHAR`, removing the need for this live gate.
+
+**Base-screen "Fn active" reminder.** A LOAD-configured `MENU_FN` / `SEL_FN` never sets the
+`optionButtonState` bit (its press-edge handler advances the persistent `LoadMode` state directly instead
+of the ordinary momentary/latching path), so the plain base screen "Fn active" reminder glyph
+(`OPS_FN_ACTIVE_CHAR`, see "OPS MODE screen" above) — the only indication of MENU BTN / SEL BTN activity
+outside `OPS_MODE_SCREEN`, since their corner is not drawn there — separately treats "currently OPLOAD or
+PRLOAD" as the LOAD equivalent of "latched and on"; it does not fall out of the ordinary
+`optionButtonState`/`isFunctionOff()` check every other latching function relies on.
+
+**Stale-assignment cleanup.** `printCurrentFunctionValue()` (CONFIG FUNC) is unconditional, so a button
+already holding `FN_LOAD` would otherwise keep showing "LOAD" indefinitely once LOAD becomes unreachable
+— the value cycle only guards *selecting* `FN_LOAD`, not an existing stored value. `clearLoadFunctions()`
+(`cst-functions.c`) resets any of the four buttons holding `FN_LOAD` to `FN_OFF` and persists directly
+(not via `writeFunctionConfiguration()`, which would also re-persist every other slot at its current RAM
+value), called from two `SELECT`-save sites: SPEED CFG, whenever the saved `TYPE` no longer models the
+load CVs, and PREFS, whenever the saved `DISPLAY` no longer shows SPEED — the same reasoning either way,
+since both conditions drop `loadEligible()` to false.
+
+No `EEPROM_LAYOUT_VERSION` bump: `FN_LOAD` is a new value within the existing function-value byte range
+(same encoding as `FN_OFF` / `FN_EMRG` / `FN_AIRBRAKE`), not a new field or repurposed byte — same
+precedent as the `V4` split of `SPEED_TYPE_V5MULT`. **PC tooling**: `slot_codec.py` does not yet decode or
+encode a `"LOAD"` function-value string — export/import of a profile with a button configured to LOAD is
+not yet correctly round-tripped by `cst_cfgtransfer.py` / `cst_cfgnetwork.py`.
 
 ## On-device config-screen pattern
 

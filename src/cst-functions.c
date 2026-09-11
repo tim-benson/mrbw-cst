@@ -29,6 +29,7 @@ LICENSE:
 #define SOFTWARE_LATCH   0x01
 #define SPECIAL_FUNC     0x02
 #define MENU_FUNC        0x04
+#define LOAD_FUNC        0x08
 
 typedef struct
 {
@@ -63,10 +64,10 @@ static FunctionData functions[] = {
 	[REAR_DIM2_FN]           = {.name = "R.DIM #2", .eeAddr = EE_REAR_DIM2_FUNCTION},
 	[REAR_HEADLIGHT_FN]      = {.name = "R.HEAD",   .eeAddr = EE_REAR_HEADLIGHT_FUNCTION},
 	[REAR_DITCH_FN]          = {.name = "R.DITCH",  .eeAddr = EE_REAR_DITCH_FUNCTION},
-	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
-	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
-	[MENU_FN]                = {.name = "MENU BTN", .eeAddr = EE_MENU_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
-	[SEL_FN]                 = {.name = "SEL BTN",  .eeAddr = EE_SEL_BUTTON_FUNCTION,       .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
+	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
+	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
+	[MENU_FN]                = {.name = "MENU BTN", .eeAddr = EE_MENU_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
+	[SEL_FN]                 = {.name = "SEL BTN",  .eeAddr = EE_SEL_BUTTON_FUNCTION,       .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
 	[BK2_FN]                 = {.name = "BRAKE2",   .eeAddr = EE_BK2_FUNCTION},
 	[BK3_FN]                 = {.name = "BRAKE3",   .eeAddr = EE_BK3_FUNCTION},
 };
@@ -87,6 +88,9 @@ void printCurrentFunctionValue(void)
 			break;
 		case FN_EMRG:
 			lcd_puts("EMRG BRK");
+			break;
+		case FN_LOAD:
+			lcd_puts("LOAD    ");
 			break;
 		case FN_AIRBRAKE:
 			lcd_puts("AIRBRAKE");
@@ -153,21 +157,41 @@ void resetCurrentFunction(void)
 	currentFunction = 0;
 }
 
+// True if some OTHER UP/DOWN/MENU/SEL slot (not currentFunction, the one currently being edited)
+// already holds FN_LOAD. LOAD's corner glyph rewrites a single shared CGRAM slot live (see
+// cst-common.h / LOAD_CHAR) for whichever button holds it - a second simultaneous holder in a
+// different state would corrupt the display for whichever corner drew first, since CGRAM slot
+// content is global, not per-cell. This is what makes the single-slot design sound by construction
+// rather than by convention: incrementCurrentFunctionValue()/decrementCurrentFunctionValue() below
+// skip FN_LOAD as an option here, so it is never reachable on a second button while it is already
+// held elsewhere.
+static uint8_t loadUsedElsewhere(void)
+{
+	static const Functions loadSlots[] = { UP_FN, DOWN_FN, MENU_FN, SEL_FN };
+	uint8_t i;
+	for(i = 0; i < (sizeof(loadSlots)/sizeof(loadSlots[0])); i++)
+	{
+		if((loadSlots[i] != currentFunction) && (FN_LOAD == functions[loadSlots[i]].fn))
+			return 1;
+	}
+	return 0;
+}
+
 
 /*
 
-                                  +-------------------------------------->
+                                  +------------------------------------------------------->
                                   |-------------------------->
-   FN_OFF ---> F00_MOM ... F28_MOM --> F00_LAT ... F28_LAT --> FN_EMRG --> FN_AIRBRAKE
-   ^  ^ <-------------------------+                       |-------------->      |
-   |  |---------------------------------------------------+           |         |
-   |  +---------------------------------------------------------------+         |
-   +----------------------------------------------------------------------------+
+   FN_OFF ---> F00_MOM ... F28_MOM --> F00_LAT ... F28_LAT --> FN_EMRG --> FN_LOAD --> FN_AIRBRAKE
+   ^  ^ <-------------------------+                       |-------------->      |            |
+   |  |---------------------------------------------------+           |         |            |
+   |  +----------------------------------------------------------------------------+          |
+   +---------------------------------------------------------------------------------------+
 
 */
 
 
-void incrementCurrentFunctionValue(void)
+void incrementCurrentFunctionValue(uint8_t loadEnabled)
 {
 	switch(functions[currentFunction].fn)
 	{
@@ -207,7 +231,11 @@ void incrementCurrentFunctionValue(void)
 			}
 			break;
 		case FN_EMRG:
-			if(functions[currentFunction].attributes & MENU_FUNC)
+			if((functions[currentFunction].attributes & LOAD_FUNC) && loadEnabled && !loadUsedElsewhere())
+			{
+				functions[currentFunction].fn = FN_LOAD;
+			}
+			else if(functions[currentFunction].attributes & MENU_FUNC)
 			{
 				functions[currentFunction].fn = FN_AIRBRAKE;
 			}
@@ -215,6 +243,12 @@ void incrementCurrentFunctionValue(void)
 			{
 				functions[currentFunction].fn = FN_OFF;
 			}
+			break;
+		case FN_LOAD:
+			// Every slot that can ever reach FN_LOAD also carries MENU_FUNC (see functions[] above),
+			// so this always lands on FN_AIRBRAKE - no need to re-test attributes the way FN_EMRG's
+			// case above does.
+			functions[currentFunction].fn = FN_AIRBRAKE;
 			break;
 		case FN_AIRBRAKE:
 			functions[currentFunction].fn = FN_OFF;
@@ -252,11 +286,11 @@ void incrementCurrentFunctionValue(void)
 
 /*
 
-   FN_OFF <--- F00_MOM ... F28_MOM <--- F00_LAT ... F28_LAT <--- FN_EMRG <--- FN_AIRBRAKE
+   FN_OFF <--- F00_MOM ... F28_MOM <--- F00_LAT ... F28_LAT <--- FN_EMRG <--- FN_LOAD <--- FN_AIRBRAKE
 
 */
 
-void decrementCurrentFunctionValue(void)
+void decrementCurrentFunctionValue(uint8_t loadEnabled)
 {
 	switch(functions[currentFunction].fn)
 	{
@@ -276,8 +310,18 @@ void decrementCurrentFunctionValue(void)
 				functions[currentFunction].fn = F28_MOM;
 			}
 			break;
+		case FN_LOAD:
+			// Every slot that can ever reach FN_LOAD also carries SPECIAL_FUNC (see functions[]
+			// above), so this always lands on FN_EMRG - no need to re-test attributes the way
+			// FN_AIRBRAKE's case below does.
+			functions[currentFunction].fn = FN_EMRG;
+			break;
 		case FN_AIRBRAKE:
-			if(functions[currentFunction].attributes & SPECIAL_FUNC)
+			if((functions[currentFunction].attributes & LOAD_FUNC) && loadEnabled && !loadUsedElsewhere())
+			{
+				functions[currentFunction].fn = FN_LOAD;
+			}
+			else if(functions[currentFunction].attributes & SPECIAL_FUNC)
 			{
 				functions[currentFunction].fn = FN_EMRG;
 			}
@@ -378,6 +422,35 @@ uint8_t isFunctionAirBrake(Functions functionName)
 		return 1;
 	else
 		return 0;
+}
+
+uint8_t isFunctionLoad(Functions functionName)
+{
+	if(FN_LOAD == functions[functionName].fn)
+		return 1;
+	else
+		return 0;
+}
+
+// Clears any UP/DOWN/MENU/SEL BTN currently set to FN_LOAD back to FN_OFF, updating both RAM and
+// EEPROM directly (not via writeFunctionConfiguration(), which would also re-persist every other
+// slot's current RAM value - unnecessary here and a needlessly wide write). Called from mrbw-cst.c's
+// SPEED CFG save whenever the saved TYPE no longer models the load CVs (V4): without this, a button
+// already configured to LOAD would keep showing "LOAD" in CONFIG FUNC (printCurrentFunctionValue()
+// is unconditional) even though it has become unreachable via the UP/DOWN value cycle - that cycle's
+// loadEnabled gate only guards *selecting* LOAD, not an existing stale assignment.
+void clearLoadFunctions(void)
+{
+	static const Functions loadSlots[] = { UP_FN, DOWN_FN, MENU_FN, SEL_FN };
+	uint8_t i;
+	for(i = 0; i < (sizeof(loadSlots)/sizeof(loadSlots[0])); i++)
+	{
+		if(FN_LOAD == functions[loadSlots[i]].fn)
+		{
+			functions[loadSlots[i]].fn = FN_OFF;
+			eeprom_write_byte((uint8_t*)(functions[loadSlots[i]].eeAddr), FN_OFF);
+		}
+	}
 }
 
 uint8_t isFunctionLatching(Functions functionName)

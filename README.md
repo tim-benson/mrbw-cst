@@ -29,6 +29,9 @@ This is a fork adding:
 - **OPS MODE** — an opt-in base-screen variant (long-press Menu to enter and leave) that frees the Menu
   and Select buttons to drive two more assignable DCC functions (`MENU BTN` / `SEL BTN`, same options
   as `UP BTN` / `DOWN BTN`) while running.
+- **LOAD button function** — a fifth option for `UP BTN` / `DOWN BTN` / `MENU BTN` / `SEL BTN` that
+  cycles OFF -> Optional Load -> Primary Load -> OFF on each press, driving SPEED's `OPLOADFN`/`PRLOADFN`
+  without wiring a separate control to the same DCC function.
 - **AIRBRAKE train-brake simulation** — models a locomotive automatic (train) brake — brake pipe, main
   reservoir, compressor governor — driving the ESU air sound functions from the simulated pressures,
   with a read-only gauge screen (two-pressure or analogue-dial style). Opt-in via a PREFS toggle;

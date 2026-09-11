@@ -1,6 +1,8 @@
 #ifndef _CST_LCD_H_
 #define _CST_LCD_H_
 
+#include "cst-speed.h"    // LoadMode, for setupLoadChar()'s parameter
+
 typedef enum
 {
 	LCD_RESET = 0,
@@ -19,6 +21,10 @@ void initLCD(void);
 // Redraws the AIRBRAKE ALT gauge's needle - call every render pass while that view is on screen
 // (not gated by setupLCD()'s currentMode, since the needle moves live). See cst-lcd.c.
 void setupGaugeChars(uint8_t psi, uint8_t maxPsi);
+// Rewrites the LOAD_CHAR slot (cst-common.h) for the given 3-way state - call every render pass
+// while a button is LOAD-active (not gated by setupLCD()'s currentMode, since the bitmap must
+// track the button's live state). See cst-lcd.c.
+void setupLoadChar(LoadMode loadMode);
 
 #endif
 

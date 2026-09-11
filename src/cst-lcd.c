@@ -221,6 +221,57 @@ void setupSpeedHChar(void)
 	lcd_setup_custom(SPEED_H_CHAR, SpeedNarrowH);
 }
 
+// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD) OFF/OPLOAD/PRLOAD glyphs. Occupies the PM_CHAR slot
+// under LCD_OPS_SPEED - see cst-common.h's LOAD_CHAR definition for why this is safe.
+const uint8_t LoadOff[8] =
+{
+	0b00000000,
+	0b00000000,
+	0b00000000,
+	0b00000010,
+	0b00000010,
+	0b00000010,
+	0b00000011,
+	0b00000000
+};
+
+const uint8_t LoadOpLoad[8] =
+{
+	0b00001000,
+	0b00010100,
+	0b00010100,
+	0b00001010,
+	0b00000010,
+	0b00000010,
+	0b00000011,
+	0b00000000
+};
+
+const uint8_t LoadPrLoad[8] =
+{
+	0b00011000,
+	0b00010100,
+	0b00011000,
+	0b00010010,
+	0b00000010,
+	0b00000010,
+	0b00000011,
+	0b00000000
+};
+
+// Rewrites the LOAD_CHAR slot for the button's current 3-way state - called every render pass while
+// a button is LOAD-active (mrbw-cst.c's renderBaseScreen()), not gated by setupLCD()'s currentMode,
+// since the bitmap must track live state even while currentMode stays LCD_OPS_SPEED across passes.
+void setupLoadChar(LoadMode loadMode)
+{
+	switch(loadMode)
+	{
+		case LOAD_MODE_OPLOAD: lcd_setup_custom(LOAD_CHAR, LoadOpLoad); break;
+		case LOAD_MODE_PRLOAD: lcd_setup_custom(LOAD_CHAR, LoadPrLoad); break;
+		default:                lcd_setup_custom(LOAD_CHAR, LoadOff);   break;
+	}
+}
+
 // --- AIRBRAKE ALT: the original ISE analogue pressure gauge, revived from the last commit before
 // BRAKESIM replaced it (git 3cde842:src/cst-pressure.c) and rewired to the new sim's BP value. The
 // dial artwork, canvas geometry, and Bresenham needle plotter are unchanged from the original -

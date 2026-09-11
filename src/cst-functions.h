@@ -64,6 +64,8 @@ typedef enum
 	F09_LAT = 0x49, F19_LAT = 0x53,
 	FN_OFF  = 0x80,
 	FN_EMRG = 0x81,
+	FN_LOAD = 0x82,       // UP/DOWN/MENU/SEL BTN value: cycles OFF -> OPLOAD -> PRLOAD on each press,
+	                      // asserting SPEED CFG's OPLOADFN/PRLOADFN directly - see cst-speed.h
 	FN_AIRBRAKE = 0xC0,   // UP/DOWN BTN value: opens the AIRBRAKE screen (was FN_AIRGAUGE / FN_BRKTEST / "BRK TEST")
 } FunctionValues;
 
@@ -71,13 +73,15 @@ void printCurrentFunctionName(void);
 void printCurrentFunctionValue(void);
 void advanceCurrentFunction(uint8_t airbrakeEnabled);
 void resetCurrentFunction(void);
-void incrementCurrentFunctionValue(void);
-void decrementCurrentFunctionValue(void);
+void incrementCurrentFunctionValue(uint8_t loadEnabled);
+void decrementCurrentFunctionValue(uint8_t loadEnabled);
 void readFunctionConfiguration(void);
 void writeFunctionConfiguration(void);
 uint8_t isFunctionOff(Functions functionName);
 uint8_t isFunctionEstop(Functions functionName);
 uint8_t isFunctionAirBrake(Functions functionName);
+uint8_t isFunctionLoad(Functions functionName);
+void clearLoadFunctions(void);
 uint8_t isFunctionLatching(Functions functionName);
 uint32_t getFunctionMask(Functions functionName);
 void resetFunctionConfiguration(void);
