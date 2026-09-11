@@ -65,6 +65,8 @@ static FunctionData functions[] = {
 	[REAR_DITCH_FN]          = {.name = "R.DITCH",  .eeAddr = EE_REAR_DITCH_FUNCTION},
 	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
 	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
+	[MENU_FN]                = {.name = "MENU BTN", .eeAddr = EE_MENU_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
+	[SEL_FN]                 = {.name = "SEL BTN",  .eeAddr = EE_SEL_BUTTON_FUNCTION,       .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC},
 	[BK2_FN]                 = {.name = "BRAKE2",   .eeAddr = EE_BK2_FUNCTION},
 	[BK3_FN]                 = {.name = "BRAKE3",   .eeAddr = EE_BK3_FUNCTION},
 };
@@ -432,6 +434,8 @@ void resetFunctionConfiguration(void)
 	functions[ENGINE_OFF_FN].fn = FN_OFF;
 	functions[UP_FN].fn = F05_MOM;
 	functions[DOWN_FN].fn = F06_MOM;
+	functions[MENU_FN].fn = FN_OFF;
+	functions[SEL_FN].fn = FN_OFF;
 	functions[THR_UNLOCK_FN].fn = FN_OFF;
 	functions[REV_SWAP_FN].fn = FN_OFF;
 	functions[NEUTRAL_FN].fn = FN_OFF;

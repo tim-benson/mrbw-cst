@@ -156,7 +156,7 @@ fields are read through `readByteOrDefault()`, which detects that sentinel and s
 default rather than trusting a plainly-invalid raw byte.
 
 **EEPROM layout migrations (`cst-eeprom.c`)**: one bespoke per-slot byte-remapping transform per
-`EEPROM_LAYOUT_VERSION` bump (currently 4), factored out of `readConfig()` into
+`EEPROM_LAYOUT_VERSION` bump (currently 5), factored out of `readConfig()` into
 `applyEepromMigrations(uint8_t oldLayoutVersion)` — the highest-risk, least-verifiable firmware code (a
 wrong offset silently corrupts every stored profile on upgrade). It touches only the EEPROM (no globals,
 no LCD, no radio) via the byte-at-a-time `eeprom_*` API and is self-limiting: `readConfig()` calls it once
@@ -413,9 +413,10 @@ no-op (identical parameter sets). The `SELECT`-save still writes all 21 `SPEED_I
 regardless of family, so a `V4` profile persists inert zeros in the dropped slots.
 
 `printSpeed()` converts the configured `MAXSPEED` into km/h once before computing the displayed value
-(rather than converting an already-rounded mph figure) to avoid compounding rounding error, and decides its
-field width (2-digit-padded vs. 3-digit-unpadded) from that *configured* max rather than the live
-instantaneous value, so the layout never jumps mid-session.
+(rather than converting an already-rounded mph figure) to avoid compounding rounding error. The
+readout is one fixed 6-character field at every `MAXSPEED` — a right-justified 3-digit number
+(space-padded below 100), then `MP` / `KM`, then the narrow-H unit glyph (`SPEED_H_CHAR`, see "OPS
+MODE screen") — so the layout never shifts as the max or the live value crosses 100.
 
 **Main-screen display toggle, "DISPLAY" in PREFS**: `CONFIGBITS_MAIN_SCREEN_SPEED` toggles the main screen
 between `printTime()` and `printSpeed()`. The clock is the default — the bit is clear on a fresh chip
@@ -437,6 +438,9 @@ is sufficient by construction for "resume based on current state once released."
 asserted, the loco-address line of the main screen is also replaced with a literal `"HOLD"` on-screen cue
 — the same priority slot the throttle existing reverser-mismatch indicator already uses, checked in order:
 alerter-timeout backlight blink → reverser mismatch → `"HOLD"` → normal loco address/speed display.
+When the `AUX` function is assigned to the same DCC function number `HOLDFN` watches, the `AUX`
+indicator glyph is suppressed while `AUX` is active (the `HOLD` text beside it is already the cue) —
+see `auxIndicatorChar()` under "OPS MODE screen".
 `STOPFN` has no on-screen text of its own — its effect is only visible through the speed readout itself
 snapping to 0mph.
 
@@ -625,12 +629,20 @@ The decoder-type-specific model parameters live in one contiguous block, `EE_SPE
   resetting them: a layout-2 throttle keeps every tuned value (each byte copied from its old offset
   across all 20 profiles plus the working config), a stock or pre-guard chip gets model defaults, a
   blank chip self-heals. No backup or re-import needed.
-- **3 → 4** — the one migration gated `!= EEPROM_LAYOUT_VERSION` rather than `< N`, so it **also runs
-  on a blank/wiped chip**. Five SPEED bytes now leave `readByteOrDefault()` and are read raw so a
-  stored `0xFF` is a real value — `ACCEL`/`DECEL` (`0x28`/`0x2E`, `0xFF` = 255), `HOLDFN` (`0x57`,
-  `0xFF` = OFF), `ACCELADJ`/`DECELADJ` (`0x61`/`0x62`, `0xFF` = −127). The migration seeds
-  `0x28`/`0x2E`/`0x57` where currently `0xFF` (a real 0-254 value is preserved) and inits `0x61`/`0x62`
-  to 0. Non-destructive — no config byte is overwritten, only version stamp + `0xFF → default`.
+- **3 → 4** — five SPEED bytes now leave `readByteOrDefault()` and are read raw so a stored `0xFF` is
+  a real value — `ACCEL`/`DECEL` (`0x28`/`0x2E`, `0xFF` = 255), `HOLDFN` (`0x57`, `0xFF` = OFF),
+  `ACCELADJ`/`DECELADJ` (`0x61`/`0x62`, `0xFF` = −127). The migration seeds `0x28`/`0x2E`/`0x57` where
+  currently `0xFF` (a real 0-254 value is preserved) and inits `0x61`/`0x62` to 0. Non-destructive —
+  no config byte is overwritten, only version stamp + `0xFF → default`. Gated `(oldLayoutVersion < 4)
+  || (0xFF == oldLayoutVersion)` so it runs on a pre-4 chip **and** a blank/wiped chip but not a
+  layout-4 chip crossing to 5 (whose `0x61`/`0x62` already hold real values that must not be reset).
+- **4 → 5** — `0x2C`/`0x2D` become `EE_MENU_BUTTON_FUNCTION` / `EE_SEL_BUTTON_FUNCTION` (the OPS MODE
+  function buttons — see "OPS MODE screen"). The migration seeds both to `FN_OFF` across all 20
+  profiles plus the working config. Function bytes are read raw, so this seed is the only thing
+  between an upgraded throttle and a garbage `MENU BTN` / `SEL BTN` assignment. Gated
+  `!= EEPROM_LAYOUT_VERSION` so it also runs on a blank/wiped chip; non-destructive, since `0x2C`/
+  `0x2D` carry nothing meaningful on any pre-5 layout (on a layout-2 chip the 2 → 3 block already
+  relocated the real `BRK2`/`BRK3` values out of them earlier in the same call).
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
@@ -672,9 +684,9 @@ the lever as the automatic brake — the one brake whose pipe-and-reservoir phys
 or brake mode; the AIRBRAKE screen (below) is a read-only viewport onto this model, not a separate
 mode.
 
-**Enable**: `CONFIGBITS_AIRBRAKE` (global `configBits` bit 2), a boolean in the `PREFS` menu right
-after the main-screen `DISPLAY` (clock/speed) toggle, default off — an explicit opt-in, the same way
-that toggle is. When off, the sound functions are simply not emitted and `AIRBRAKE`/`AIRBRAKE CFG`
+**Enable**: `CONFIGBITS_AIRBRAKE` (global `configBits` bit 2), a boolean in the `PREFS` menu after the
+main-screen `DISPLAY` (clock/speed) toggle and the `OPS MODE` toggle, default off — an explicit
+opt-in, the same way that toggle is. When off, the sound functions are simply not emitted and `AIRBRAKE`/`AIRBRAKE CFG`
 are skipped in the top-level menu cycle (still reachable via an `AIRBRAKE`-bound button or
 `AIRBRAKE DIAGS`, since the model itself always ticks).
 
@@ -819,7 +831,9 @@ renders straight away, so the top-level MENU handler keeps cycling the menu past
 nothing here; the rendering is set by the `DISPLAY` item in `AIRBRAKE CFG` (`DUAL` default /
 `SINGLE`), read fresh on every render pass:
 - **`DISPLAY = DUAL`** (default): row 0 `BP:` + 3-digit brake-pipe PSI + a 2-cell hand-drawn "PSI"
-  glyph (`PSI_CHAR_L`/`R`, CGRAM slots 6-7 under `LCD_DEFAULT`); row 1 `MR:` + 3-digit reservoir PSI +
+  glyph (`PSI_CHAR_L`/`R`, CGRAM slots 6-7 under `LCD_DEFAULT`; the base and OPS MODE screens borrow
+  those two slots for the "A" and "Fn active" glyphs, so this screen reloads `LCD_DEFAULT` on entry);
+  row 1 `MR:` + 3-digit reservoir PSI +
   the same glyph. Both readouts (`airBrakePipePsi()`/`airMainResPsi()`) round to the nearest whole PSI
   rather than truncating, so `MR HIGH`/`MR LOW` visibly dwell at the top/bottom of each idle
   compressor cycle instead of flashing past — the model never overshoots a governor setpoint by more
@@ -833,6 +847,14 @@ nothing here; the rendering is set by the `DISPLAY` item in `AIRBRAKE CFG` (`DUA
   live). Whichever style the config selects, `setupLCD()` is called with the matching CGRAM mode
   (`LCD_AIRBRAKE_ALT` / `LCD_DEFAULT`) on every render pass — its `currentMode` guard makes the repeat
   calls free, and changing `DISPLAY` and returning restores the right glyphs automatically.
+
+How this screen is dismissed depends on how it was entered (see "OPS MODE screen" for the two
+`airbrakeReturn*` flags): from the menu cycle, `SELECT` exits to the main screen and `MENU` advances
+to the next menu screen; from a base-screen `UP` / `DOWN` button set to `AIRBRAKE`, any of the four
+buttons dismisses to the main screen; from an OPS MODE button set to `AIRBRAKE`, any of the four
+returns to the OPS MODE screen. Reached from either running-screen path the screen honours the
+`backlight` toggle rather than forcing the panel on (see "Menu backlight hold"); the menu-cycle entry
+stays always-lit.
 
 The full text/diagnostic readout (lever %, per-function letters) lives on **AIRBRAKE DIAGS**, a
 `DIAG_SCREEN` subscreen (page 14) shown only while `AIRBRAKE` is on — reached via `DIAGS` → `SELECT`
@@ -909,19 +931,24 @@ interfere there; the blocking radio calls of the shared network CNF sync pause t
 
 ## Menu backlight hold
 
-Every non-`MAIN_SCREEN` case in the `switch(screenState)` calls `enableLCDBacklight()` unconditionally each
-pass, so the backlight is lit for as long as you sit on any menu screen. The main screen is the only one
-that honours the `backlight` toggle set by the user (flipped by SELECT), and with the toggle off it called
-`disableLCDBacklight()` immediately, every pass — so the instant a menu cycle wrapped back through the main
-screen the light went dark, strobing off mid-navigation when starting another lap.
+Most non-`MAIN_SCREEN` cases in the `switch(screenState)` call `enableLCDBacklight()` unconditionally each
+pass, so the backlight is lit for as long as you sit on a menu screen. The running screens honour the
+`backlight` toggle set by the user (flipped by SELECT) instead: the main screen, `OPS_MODE_SCREEN` (a
+base-screen variant where every button is a function tap — see "OPS MODE screen"), and the `AIRBRAKE`
+gauge when it was reached from either of those (its menu-cycle entry stays always-lit). With the toggle
+off the main screen called `disableLCDBacklight()` immediately, every pass — so the instant a menu cycle
+wrapped back through the main screen the light went dark, strobing off mid-navigation when starting
+another lap.
 
 `backlightTimeout_decisecs` is a hold countdown (`BACKLIGHT_HOLD_DECISECS`, ~3s) decremented in the 10Hz
 block of `TIMER0_COMPA_vect`, next to `sleepTimeout_decisecs`/`alerterTimeout_decisecs` — a `uint8_t`,
 so reads/writes are atomic on the AVR with no `ATOMIC_BLOCK`. It is re-armed once per main-loop pass
-(beside the sleep/alerter timer resets) whenever the current button is `MENU` *or* the screen is not the
-main screen: menu navigation and MENU presses keep it full, so the light survives the wrap back through the
-main screen for the hold period. The main screen two backlight branches (normal and `holdFunctionActive`)
-gate on `backlight || backlightTimeout_decisecs`; `EMRG`/`ALERTER`-blink/`REV!` are unchanged. UP/DOWN
+(beside the sleep/alerter timer resets) whenever the current button is `MENU` *or* the screen is not a
+running screen: menu navigation and MENU presses keep it full, so the light survives the wrap back
+through the main screen for the hold period. `OPS_MODE_SCREEN` and the running-entry `AIRBRAKE` gauge are
+excluded from the re-arm the same way the main screen is (the hold armed while entering covers the
+transition). The main screen two backlight branches (normal and `holdFunctionActive`) gate on
+`backlight || backlightTimeout_decisecs`; `EMRG`/`ALERTER`-blink/`REV!` are unchanged. UP/DOWN
 function taps on the main screen deliberately do *not* re-arm it (night-operation friendly), and an explicit
 SELECT toggle-to-off also zeroes the countdown so the light drops at once.
 
@@ -931,6 +958,97 @@ as a side effect. The toggle now happens when SELECT is released below the long-
 `selectShortPressArmed` flag set only on a genuine main-screen press edge — which also keeps a
 wake-from-sleep SELECT (where `previousButton` is force-synced, so no edge is seen) from spuriously
 toggling.
+
+## OPS MODE screen
+
+**OPS MODE** is an opt-in variant of the base screen that rebinds `MENU` and `SELECT` from menu
+navigation to two more assignable DCC functions while running. It is entered by a long-press of `MENU`
+from the base screen and left the same way; it is never part of the menu cycle, and it only exits back
+to the base screen. Opt-in via the `PREFS` item **OPS MODE** (`CONFIGBITS_OPS_MODE`, bit 3), ordered
+right after `DISPLAY`, default off — a stock or upgrading throttle has the bit clear and sees no change
+on the base screen. `OPS_MODE_SCREEN` is a `Screens` value with no subscreens; `DIAG_SCREEN` cycling
+skips straight past it to `LAST_SCREEN`.
+
+**`MENU BTN` / `SEL BTN` functions** (`MENU_FN` / `SEL_FN` in the `Functions` enum, right after
+`DOWN_FN`) carry the same `SOFTWARE_LATCH | SPECIAL_FUNC | MENU_FUNC` attributes as `UP BTN` /
+`DOWN BTN`, so `CONFIG FUNC` walks them right after `DOWN BTN` and offers F00..F28 momentary/latching,
+`EMRG BRK` and `AIRBRAKE`. They are driven through the same `optionButtonState` mechanism
+(`MENU_OPTION_BUTTON` / `SEL_OPTION_BUTTON`) and folded into `functionMask` every pass regardless of
+`screenState`, so a latched `MENU BTN` / `SEL BTN` keeps asserting after OPS MODE is left. Their bits
+are only ever *set* while `screenState == OPS_MODE_SCREEN`; turning the pref off does not clear a
+latched bit. `MENU_FN` / `SEL_FN` are not in `idleFnMask`, so they count as crew activity for the
+sleep and alerter timers like `UP_FN` / `DOWN_FN`.
+
+**Base-screen layout.** Grids below are 0-indexed `(col,row)` on the 8x2 LCD. With
+`CONFIGBITS_OPS_MODE` **clear** the base screen is byte-identical to the pre-OPS-MODE firmware:
+battery `(0,0)`, loco / `EMRG` / `ALRT` / `REV!` / `HOLD` `(2,0)`, `printSpeed()` / `printTime()`
+`(1,1)`, `UP` glyph `(7,0)`, `DOWN` glyph `(7,1)`, `AUX` glyph or blank `(0,1)`. With the bit **set**,
+the base screen and the OPS MODE screen share one aligned layout: battery moves to `(6,0)`, `AUX` to
+`(1,0)`, and column 0 of both rows becomes a status-glyph cell — the `MENU` / `SEL` circle (hollow or
+filled, exactly like the `UP` / `DOWN` glyphs) on the OPS MODE screen, or the "Fn active" reminder
+glyph (blank unless that function is still latched) on the plain base screen. Loco, speed/clock and the
+`UP` / `DOWN` glyphs do not move; a 3-digit speed still fits.
+
+**Shared renderer.** `renderBaseScreen(opsScreen, ...)` in `mrbw-cst.c` draws the status area for both
+`MAIN_SCREEN` and `OPS_MODE_SCREEN` so the two cannot drift; only the three cells above depend on the
+pref and on which screen is showing. `printBattery()` takes an `x`-column parameter for this. Button
+handling stays in each `case` (it is what actually differs). Two small helpers:
+
+- **`buttonCornerGlyph(fn, asserting)`** — returns `AIRBRAKE_GLYPH_CHAR` (a bold custom "A") when the
+  button function is `AIRBRAKE`, since that is a screen jump rather than a DCC function and the softkey
+  circle would be meaningless; otherwise the filled circle while the function is asserting and
+  configured, the hollow circle otherwise (shown even when the function is `FN_OFF`). Used for all
+  four button corners on the base and OPS MODE screens — `UP` / `DOWN` at `(7,*)` on every base/OPS
+  screen, `MENU` / `SEL` at `(0,*)` on the OPS MODE screen only.
+- **`auxIndicatorChar()`** — the `AUX` indicator glyph, or a blank. Suppressed when `AUX` drives the
+  very DCC function `HOLDFN` watches for ESU Drive Hold: activating `AUX` then already replaces the
+  loco address with `HOLD`, so the glyph would be noise. A static config comparison
+  (`getFunctionMask(AUX_FN)` against `1 << HOLDFN`), not a runtime `holdFunctionActive` check —
+  whenever `AUX` is both active and mapped to the `HOLDFN` number, Drive Hold is asserted by
+  construction. The `DIAG` screen `AUX` indicator is unchanged.
+
+**Entry and exit timing.** While `CONFIGBITS_OPS_MODE` is set the base-screen menu advance
+(`screenState++`) is deferred to `MENU` release through a `menuAdvancePending` one-shot: a `MENU` tap
+advances the menu on release, a `MENU` hold jumps straight to `OPS_MODE_SCREEN` with no intervening
+screen shown. `opsMenuIgnoreUntilRelease` keeps the still-held `MENU` that entered OPS MODE from
+immediately tripping the exit long-press. A `MENU BTN` set to `AIRBRAKE` opens the gauge on the
+trailing edge of a short tap, so a long `MENU` hold still exits OPS MODE first. Every other screen, and
+the whole OPS-disabled build, keep the stock press-edge advance.
+
+**AIRBRAKE from OPS MODE / the base screen.** Two parallel `main()` flags distinguish the three ways
+the `AIRBRAKE` gauge is reached and how it is dismissed — see the "AIRBRAKE screen" list under
+AIRBRAKE. `airbrakeReturnToOps` (a `MENU` / `SEL` / `UP` / `DOWN` button set to `AIRBRAKE`, pressed in
+OPS MODE) returns to `OPS_MODE_SCREEN` on any of the four buttons; `airbrakeReturnToMain` (a `UP` /
+`DOWN` button set to `AIRBRAKE`, pressed on the base screen) dismisses to the main screen on any of the
+four; the menu-cycle entry keeps its stock behaviour. The triggering button momentary bit is cleared
+at every open site so a still-held button cannot re-open the gauge on return, and while either flag is
+set the top-level `MENU` handler is bypassed.
+
+**CGRAM.** `LCD_OPS` / `LCD_OPS_SPEED` (`LcdMode`) are used by the base screen regardless of the pref,
+selected by `baseScreenLcdMode()` off `CONFIGBITS_MAIN_SCREEN_SPEED`. They are `LCD_DEFAULT` with slot
+6 (`PSI_CHAR_L`, rendered only on the `AIRBRAKE` DUAL screen) reused as `AIRBRAKE_GLYPH_CHAR`, slot 7
+(`PSI_CHAR_R`) reused as `OPS_FN_ACTIVE_CHAR`, and — under `LCD_OPS_SPEED` only — slot 3 (`AM_CHAR`)
+reused as `SPEED_H_CHAR`, the narrow "H" of `MPH` / `KMH` in the running speed readout. The
+`AM_CHAR` / `SPEED_H_CHAR` reuse is safe because the SPEED readout and the AM/PM clock indicator are
+mutually exclusive (`CONFIGBITS_MAIN_SCREEN_SPEED` picks one), and `baseScreenLcdMode()` and
+`renderBaseScreen()` read that bit in the same pass. Every transition to a menu or `AIRBRAKE` screen
+forces `LCD_DEFAULT`, whose `currentMode` guard reloads the displaced `PSI` / `AM` / `PM` glyphs;
+changing the `DISPLAY` pref always round-trips through `LCD_DEFAULT`. The battery `FULL` / `HALF` /
+`EMPTY` glyphs are narrow 3-pixel bitmaps.
+
+**EEPROM layout 4 → 5.** `EE_MENU_BUTTON_FUNCTION` / `EE_SEL_BUTTON_FUNCTION` occupy the freed
+per-profile holes `0x2C` / `0x2D` (former SPEED `BRK2` / `BRK3` scatter slots). The migration seeds
+both to `FN_OFF`; see "EEPROM layout and the reference-trace test" under SPEED for the migration
+detail and the paired `3 → 4` gate change. `0x2C` / `0x2D` are function bytes owned by
+`cst-functions.c`, not model bytes, so `eepromResetProfileModel()` is unchanged.
+
+**PC tooling.** `functions` gains `MENU_BUTTON` / `SEL_BUTTON` (EEPROM `0x2C` / `0x2D`, same value
+vocabulary as `UP_BUTTON` / `DOWN_BUTTON`), `prefs.config_bits` gains `ops_mode`, and
+`SLOT_SCHEMA_VERSION` moves 5 → 6. A pre-6 backup missing the two function keys needs `--import-old`
+(they default to `RAW:0xFF`, like any never-written function slot).
+
+Sleep: `screenState` is not reset on wake, so a throttle that sleeps in OPS MODE wakes back into it —
+a base-screen variant is exactly where it should resume.
 
 ## On-device config-screen pattern
 
@@ -1122,11 +1240,13 @@ encoder writes inert values to the slots a `V4` drops so the image byte-matches 
 sign-magnitude), so the codec decodes `0xFF` to that rather than `"UNSET"`, accepts `ACCEL`/`DECEL`
 `0-255` and `ACCELADJ`/`DECELADJ` `-127..127`, and maps a bare `"UNSET"` for one of these to its
 default value; `SPEED_FULL_RANGE_FIELDS` / `SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
-`SLOT_SCHEMA_VERSION` is 5. `encode_slot` / `encode_global` also accept the older pre-schema shapes on
-import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`, and — via
-`--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is `V4`, or a pre-5 `speed` object
-missing `ACCELADJ`/`DECELADJ`). `MenuOrderTests` in `test_slot_codec.py` locks the ordering so a
-`slot_codec.py` change is deliberate.
+`SLOT_SCHEMA_VERSION` is 6 (`functions` gained `MENU_BUTTON` / `SEL_BUTTON`, `prefs.config_bits`
+gained `ops_mode` — see "OPS MODE screen"). `encode_slot` / `encode_global` also accept the older
+pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`,
+and — via `--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is `V4`, a pre-5 `speed`
+object missing `ACCELADJ`/`DECELADJ`, or a pre-6 backup missing the `MENU_BUTTON` / `SEL_BUTTON`
+function keys). `MenuOrderTests` in `test_slot_codec.py` locks the ordering so a `slot_codec.py`
+change is deliberate.
 
 **CNF format version guard**: since the codec is a hand-maintained mirror, a stale copy of this tool run
 against a newer/older device could silently misdecode. `EEPROM_LAYOUT_VERSION` on the chip is compared
@@ -1259,7 +1379,8 @@ New field, moved offset, or repurposed byte in `cst-eeprom.h`:
    (this is the JSON schema version, independent of `EEPROM_LAYOUT_VERSION` — a change can move one
    without the other: the `V5MULT`/`V4` split bumped the schema with no layout change; the SPEED
    payload relocation bumped the layout with no schema change; the `ACCELADJ`/`DECELADJ` +
-   genuine-0-255 `ACCEL`/`DECEL` work bumped both).
+   genuine-0-255 `ACCEL`/`DECEL` work and the OPS MODE `MENU BTN` / `SEL BTN` addition each bumped
+   both).
 6. If the change touches `cst-speed.c`, `cst-pressure.c` or `cst-eeprom.c`, regenerate the reference
    traces with `make speedtest-accept` / `make pressuretest-accept` / `make eepromtest-accept` and
    review the `git diff` — that diff is the human-readable statement of how the model output (or the

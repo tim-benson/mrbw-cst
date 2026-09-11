@@ -13,7 +13,7 @@ void setupBatteryChar(void);
 uint8_t getBatteryVoltage(void);
 BatteryState getBatteryState(void);
 void setBatteryVoltage(uint8_t voltage);
-void printBattery(void);
+void printBattery(uint8_t x);
 void setBatteryLevels(uint8_t centivoltsOkay, uint8_t centivoltsWarn, uint8_t centivoltsCritical);
 
 uint8_t getBatteryOkay(void);

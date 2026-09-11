@@ -13,7 +13,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          4
+#define EEPROM_LAYOUT_VERSION          5
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -98,10 +98,10 @@
 //                                            now reuses EE_BRAKE_FUNCTION instead)
 #define EE_BK2_FUNCTION               (0x29 + CONFIG_OFFSET(WORKING_CONFIG))
 #define EE_BK3_FUNCTION               (0x2A + CONFIG_OFFSET(WORKING_CONFIG))
-//                                     0x2B
-//                                     0x2C
-//                                     0x2D
-//                                     0x2E
+//                                     0x2B  EE_MOMENTUM_BRAKE1_CV179 (SPEED, defined below)
+#define EE_MENU_BUTTON_FUNCTION       (0x2C + CONFIG_OFFSET(WORKING_CONFIG))  // "MENU BTN" - OPS MODE function button (was a freed SPEED BRK2 scatter slot)
+#define EE_SEL_BUTTON_FUNCTION        (0x2D + CONFIG_OFFSET(WORKING_CONFIG))  // "SEL BTN"  - OPS MODE function button (was a freed SPEED BRK3 scatter slot)
+//                                     0x2E  EE_MOMENTUM_DECEL_CV4 (SPEED, defined below)
 //                                     0x2F
 
 #define EE_COMPRESSOR_FUNCTION        (0x30 + CONFIG_OFFSET(WORKING_CONFIG))
@@ -157,7 +157,8 @@
 #define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126, agnostic
 #define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH, agnostic
 #define EE_SPEED_TYPE                 (0x3C + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_TYPE_* - tags the decoder family
-//                                     0x2C 0x2D 0x2F  freed (were BRK2/BRK3/DELAY - see EE_SPEED_MODEL_PAYLOAD)
+//                                     0x2C 0x2D  reused by EE_MENU_BUTTON_FUNCTION / EE_SEL_BUTTON_FUNCTION (were BRK2/BRK3 - see EE_SPEED_MODEL_PAYLOAD)
+//                                     0x2F       freed (was DELAY - see EE_SPEED_MODEL_PAYLOAD)
 //                                     0x3B 0x3D-0x40  freed (were STOPFN/OPLOAD/PRLOAD/OPLOADFN/PRLOADFN)
 
 // STACK brake mode's 3-STEP band->combo mapping, one byte per band 1-3 (band 0 is fixed to "none" and
@@ -215,8 +216,9 @@
 //      reserved                      0x63
 
 // 0x63-0x7F: per-slot space not yet in use - 0x63 reserved for a future SPEED model param, the rest
-// padding. The old SPEED holes at 0x2C/0x2D/0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the
-// layout 2->3 model-parameter move) are also free to reuse.
+// padding. The old SPEED holes at 0x2F, 0x3B, 0x3D-0x40 and 0x44-0x48 (vacated by the layout 2->3
+// model-parameter move) are also free to reuse (0x2C/0x2D of that set are now the MENU/SEL button
+// function slots).
 
 // One-shot EEPROM layout migrations (cst-eeprom.c) - rewrites the EEPROM when newer firmware boots
 // over an older EEPROM_LAYOUT_VERSION. Called once from readConfig() with the pre-stamp

@@ -156,15 +156,14 @@ static void dumpImage(const char *name, const char *startNote)
 /* ---- scenarios ---------------------------------------------------------- */
 
 /* Blank chip (EE_LAYOUT_VERSION reads 0xFF) boots current firmware: the version
- * stamp writes 4, the 1->2 and 2->3 blocks are skipped (0xFF is not < 2), and
- * the -> 4 raw-seed block runs (it is the one migration gated != VERSION, not
- * < N, so it also covers a blank chip) - seeding 0x28/0x2E/0x57 defaults and
- * 0x61/0x62 = 0. Everything else self-heals later via readByteOrDefault(), so
- * nothing else is written here.
+ * stamp writes 5, the 1->2 and 2->3 blocks are skipped (0xFF is not < 2), the
+ * -> 4 raw-seed block runs (its gate covers pre-4 AND a blank chip) - seeding
+ * 0x28/0x2E/0x57 defaults and 0x61/0x62 = 0 - and the -> 5 block seeds the
+ * MENU BTN / SEL BTN function slots 0x2C/0x2D to FN_OFF. Everything else
+ * self-heals later via readByteOrDefault(), so nothing else is written here.
  *
- * The trace shows every profile slot + the working config with the five bytes
- * seeded (0x28/0x2E/0x57 = defaults, 0x61/0x62 = 0), the version byte at 0x26,
- * and nothing else touched. */
+ * The trace shows every profile slot + the working config with the seven bytes
+ * seeded, the version byte at 0x26, and nothing else touched. */
 static void sc_from_blank(void)
 {
 	buildBlank();
@@ -172,12 +171,12 @@ static void sc_from_blank(void)
 	dumpImage("from_blank", "all 0xFF (EE_LAYOUT_VERSION 0xFF)");
 }
 
-/* A stock/pre-guard chip (layout 1): version stamp -> 4; the 1->2 block
+/* A stock/pre-guard chip (layout 1): version stamp -> 5; the 1->2 block
  * force-resets 0x3C-0x53 to repackDefault[] in all 21 slots; the "else if
  * (oldLayoutVersion < 2)" arm defaults the 13 SPEED model bytes 0x54-0x60; the
  * -> 4 block preserves the (non-0xFF sentinel) 0x28/0x2E/0x57 and writes
- * 0x61/0x62 = 0. Sentinels survive everywhere outside 0x3C-0x62, showing the
- * migration is confined to that range. */
+ * 0x61/0x62 = 0; the -> 5 block writes 0x2C/0x2D = FN_OFF. Sentinels survive
+ * everywhere outside 0x2C/0x2D and 0x3C-0x62, showing the migration is confined. */
 static void sc_from_layout1(void)
 {
 	buildLayout(1);
@@ -185,12 +184,13 @@ static void sc_from_layout1(void)
 	dumpImage("from_layout1", "layout 1, every slot byte = 0x40 + offset");
 }
 
-/* Layout 2 -> current: the interesting one. Version stamp -> 4; the 1->2 block
+/* Layout 2 -> current: the interesting one. Version stamp -> 5; the 1->2 block
  * is skipped; the "2 == oldLayoutVersion" block RELOCATES 13 scattered SPEED
  * model bytes into 0x54-0x60, so 0x54+k ends up holding the sentinel from old
  * offset v3ModelSrc[k] (= 0x40 + v3ModelSrc[k]) - a layout-2 throttle keeps
  * every tuned value; the -> 4 block preserves 0x28/0x2E/0x57 and writes
- * 0x61/0x62 = 0. */
+ * 0x61/0x62 = 0; the -> 5 block writes 0x2C/0x2D = FN_OFF (the relocation read
+ * their old BRK2/BRK3 values first, so nothing is lost). */
 static void sc_from_layout2(void)
 {
 	buildLayout(2);
@@ -198,9 +198,9 @@ static void sc_from_layout2(void)
 	dumpImage("from_layout2", "layout 2, every slot byte = 0x40 + offset");
 }
 
-/* Layout 3 -> 4: version stamp -> 4; both the 1->2 and 2->3 blocks are skipped;
- * only the -> 4 raw-seed block runs - 0x28/0x2E/0x57 sentinels preserved,
- * 0x61/0x62 = 0. The minimal migration. */
+/* Layout 3 -> current: version stamp -> 5; both the 1->2 and 2->3 blocks are
+ * skipped; the -> 4 raw-seed block runs (0x28/0x2E/0x57 sentinels preserved,
+ * 0x61/0x62 = 0) and the -> 5 block writes 0x2C/0x2D = FN_OFF. */
 static void sc_from_layout3(void)
 {
 	buildLayout(3);
@@ -208,14 +208,25 @@ static void sc_from_layout3(void)
 	dumpImage("from_layout3", "layout 3, every slot byte = 0x40 + offset");
 }
 
-/* Already on the current layout: applyEepromMigrations(4) must be a complete
- * no-op - not even the version stamp is rewritten. The trace is byte-identical
- * to the (sentinel-filled) input; invariant 1 also checks this by memcmp. */
-static void sc_from_layout4_noop(void)
+/* Layout 4 -> current: version stamp -> 5; the 1->2, 2->3 and -> 4 blocks are
+ * ALL skipped (0x61/0x62 already hold real ADJ values on a layout-4 chip and
+ * must not be reset); only the -> 5 block runs, writing 0x2C/0x2D = FN_OFF in
+ * every slot + the working config. Everything else keeps its sentinel. */
+static void sc_from_layout4(void)
 {
 	buildLayout(4);
 	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
-	dumpImage("from_layout4_noop", "layout 4 (current), every slot byte = 0x40 + offset");
+	dumpImage("from_layout4", "layout 4, every slot byte = 0x40 + offset");
+}
+
+/* Already on the current layout: applyEepromMigrations(5) must be a complete
+ * no-op - not even the version stamp is rewritten. The trace is byte-identical
+ * to the (sentinel-filled) input; invariant 1 also checks this by memcmp. */
+static void sc_from_layout5_noop(void)
+{
+	buildLayout(5);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	dumpImage("from_layout5_noop", "layout 5 (current), every slot byte = 0x40 + offset");
 }
 
 /* Fill one 128-byte slot with the 0x40 + offset sentinel (only that slot, so
@@ -265,14 +276,14 @@ static uint16_t slotBase(int idx)
 	return CONFIG_OFFSET(cfg);
 }
 
-/* 1. A current-layout image is left completely untouched - applyEepromMigrations(4)
- *    writes zero bytes. */
-static int inv_layout4_untouched(void)
+/* 1. A current-layout image is left completely untouched - applyEepromMigrations()
+ *    with the current EEPROM_LAYOUT_VERSION writes zero bytes. */
+static int inv_currentLayout_untouched(void)
 {
 	static uint8_t before[4096];
-	buildLayout(4);
+	buildLayout(EEPROM_LAYOUT_VERSION);
 	memcpy(before, g_eeprom, sizeof before);
-	applyEepromMigrations(4);
+	applyEepromMigrations(EEPROM_LAYOUT_VERSION);
 	return 0 == memcmp(before, g_eeprom, sizeof before);
 }
 
@@ -295,13 +306,16 @@ static int seededDefaults(uint16_t b)
 	    && g_eeprom[b + 0x2E] == MOMENTUM_DECEL_CV4_DEFAULT
 	    && g_eeprom[b + 0x57] == SPEED_HOLD_WATCH_FN_DEFAULT
 	    && g_eeprom[b + 0x61] == SPEED_ACCEL_ADJ_DEFAULT
-	    && g_eeprom[b + 0x62] == SPEED_DECEL_ADJ_DEFAULT;
+	    && g_eeprom[b + 0x62] == SPEED_DECEL_ADJ_DEFAULT
+	    && g_eeprom[b + 0x2C] == FN_OFF            /* -> 5: MENU BTN function slot */
+	    && g_eeprom[b + 0x2D] == FN_OFF;           /* -> 5: SEL BTN function slot */
 }
 
-/* 3. Blank chip -> layout 4: the version byte is stamped, and the -> 4 raw-seed
+/* 3. Blank chip -> current layout: the version byte is stamped, the -> 4 raw-seed
  *    loop populates the five raw-read SPEED bytes (0x28/0x2E/0x57/0x61/0x62 -
- *    readByteOrDefault() no longer covers them) with their real defaults, in
- *    every one of the 20 profile slots AND the working config. */
+ *    readByteOrDefault() no longer covers them) with their real defaults, and the
+ *    -> 5 block seeds the MENU BTN / SEL BTN function slots (0x2C/0x2D) to FN_OFF -
+ *    in every one of the 20 profile slots AND the working config. */
 static int inv_blank_to_valid(void)
 {
 	int idx, ok = 1;
@@ -359,16 +373,18 @@ static const struct { uint8_t off; uint8_t val; } resetModel_check[] = {
 
 /* Every offset in [0x28, 0x62] is one of: a model field (above), a function
  * slot (cst-functions.c owns it), or a documented freed hole. The three sets
- * partition the range exactly (38 + 8 + 13 = 59), so any offset that fits none
- * is a bug in this test's bookkeeping. */
+ * partition the range exactly (38 + 10 + 11 = 59), so any offset that fits none
+ * is a bug in this test's bookkeeping. 0x2C/0x2D moved hole -> function slot
+ * with the layout-5 MENU BTN / SEL BTN addition. */
 static int isFunctionSlot(uint8_t off)
 {
-	return off == 0x29 || off == 0x2A || off == 0x30 || off == 0x31
-	    || off == 0x32 || off == 0x33 || off == 0x49 || off == 0x52;
+	return off == 0x29 || off == 0x2A || off == 0x2C || off == 0x2D
+	    || off == 0x30 || off == 0x31 || off == 0x32 || off == 0x33
+	    || off == 0x49 || off == 0x52;
 }
 static int isFreedHole(uint8_t off)
 {
-	return off == 0x2C || off == 0x2D || off == 0x2F || off == 0x3B
+	return off == 0x2F || off == 0x3B
 	    || (off >= 0x3D && off <= 0x40) || (off >= 0x44 && off <= 0x48);
 }
 static int inResetModelTable(uint8_t off)
@@ -467,21 +483,22 @@ int main(int argc, char **argv)
 	sc_from_layout1();
 	sc_from_layout2();
 	sc_from_layout3();
-	sc_from_layout4_noop();
+	sc_from_layout4();
+	sc_from_layout5_noop();
 	sc_reset_model();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
 
-	i1 = inv_layout4_untouched();
+	i1 = inv_currentLayout_untouched();
 	i2 = inv_idempotent();
 	i3 = inv_blank_to_valid();
 	i4 = inv_relocation_preserves();
 	i5 = inv_reset_model_complete();
 	i6 = inv_reset_confined();
 	i7 = inv_reset_agrees_with_migration_defaults();
-	printf("invariant  layout-4 image untouched (no-op):        %s\n", i1 ? "PASS" : "FAIL");
+	printf("invariant  current-layout image untouched (no-op):   %s\n", i1 ? "PASS" : "FAIL");
 	printf("invariant  migration is idempotent:                 %s\n", i2 ? "PASS" : "FAIL");
-	printf("invariant  blank chip -> valid layout 4:            %s\n", i3 ? "PASS" : "FAIL");
+	printf("invariant  blank chip -> valid current layout:      %s\n", i3 ? "PASS" : "FAIL");
 	printf("invariant  2->3 relocation preserves values:        %s\n", i4 ? "PASS" : "FAIL");
 	printf("invariant  reset-model: every field at its default: %s\n", i5 ? "PASS" : "FAIL");
 	printf("invariant  reset-model: confined to [0x28,0x62]:     %s\n", i6 ? "PASS" : "FAIL");

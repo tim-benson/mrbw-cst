@@ -12,7 +12,7 @@ bespoke per-slot byte-remapping transform per `EEPROM_LAYOUT_VERSION` bump, run
 once on a throttle that boots newer firmware over an older EEPROM. A wrong offset
 in the 2->3 relocation map silently corrupts every one of 20 stored loco
 profiles on upgrade, and there is otherwise no way to exercise "a layout-2 chip
-boots layout-4 firmware" without a physical throttle holding a specific EEPROM
+boots current firmware" without a physical throttle holding a specific EEPROM
 image. `slot_codec.py` (the PC-tooling mirror) does not model migrations at all.
 
 ## What it does
@@ -29,23 +29,23 @@ blobs):
   byte each migrated byte came from.
 
 For each starting version (`from_blank`, `from_layout1`, `from_layout2`,
-`from_layout3`, `from_layout4_noop`) it dumps the post-migration 4096-byte image
-(16 bytes/row, all-`0xFF` rows elided) to a plain-text **trace**, one file per
-scenario, compared byte-for-byte against the checked-in copies under
-`reference/`. A sixth scenario, `reset_model`, does the same for
+`from_layout3`, `from_layout4`, `from_layout5_noop`) it dumps the post-migration
+4096-byte image (16 bytes/row, all-`0xFF` rows elided) to a plain-text **trace**,
+one file per scenario, compared byte-for-byte against the checked-in copies under
+`reference/`. A further scenario, `reset_model`, does the same for
 `eepromResetProfileModel()` (the factory-default writer `resetConfig()` uses)
 run over a sentinel-filled working-config slot.
 
 `main()` also asserts seven invariants it prints as `PASS`/`FAIL` lines, exiting
 non-zero if any fails:
 
-1. a current-layout (`4`) image is left **completely untouched** - zero bytes
-   written;
-2. the migration is **idempotent** - re-running after a real `2 -> 4` migration
-   changes nothing more;
-3. a **blank chip becomes a valid layout 4** - the version byte is stamped and
+1. a current-layout image is left **completely untouched** - zero bytes written;
+2. the migration is **idempotent** - re-running after a real `2 -> current`
+   migration changes nothing more;
+3. a **blank chip becomes a valid current layout** - the version byte is stamped,
    the five raw-read SPEED bytes (`0x28`/`0x2E`/`0x57`/`0x61`/`0x62`) are seeded
-   to their defaults;
+   to their defaults, and the MENU BTN / SEL BTN function slots (`0x2C`/`0x2D`)
+   are seeded to `FN_OFF`;
 4. the **`2 -> 3` relocation preserves every value** - a sentinel at each old
    scattered offset lands at its new `EE_SPEED_MODEL_PAYLOAD` slot;
 5. **`eepromResetProfileModel()` covers every model offset** - each of `0x28-0x62`

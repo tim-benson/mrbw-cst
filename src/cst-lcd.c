@@ -158,6 +158,69 @@ void setupPsiChars(void)
 	lcd_setup_custom(PSI_CHAR_R, PsiCharR);
 }
 
+// OPS MODE "Fn active" reminder glyph - a stylised "Fn". Shown on the base screen (OPS MODE enabled
+// but exited) at column 0 while a MENU BTN / SEL BTN function is still latched on. Occupies the
+// PSI_CHAR_R slot under LCD_OPS - the AIRBRAKE screen (the only other PSI_CHAR_R user) forces
+// LCD_DEFAULT, which reloads PSI_CHAR_R.
+const uint8_t OpsFnActive[8] =
+{
+	0b00011100,
+	0b00010000,
+	0b00011000,
+	0b00010010,
+	0b00010101,
+	0b00010101,
+	0b00010101,
+	0b00000000
+};
+
+void setupOpsChars(void)
+{
+	lcd_setup_custom(OPS_FN_ACTIVE_CHAR, OpsFnActive);
+}
+
+// Bold "A" glyph shown on an AIRBRAKE-bound button corner (UP/DOWN/MENU/SEL BTN = AIRBRAKE), in
+// place of the softkey circle - the button jumps to the AIRBRAKE gauge rather than driving a DCC
+// function. Occupies the PSI_CHAR_L slot under LCD_OPS / LCD_OPS_SPEED; the AIRBRAKE DUAL screen
+// reloads PSI_CHAR_L on its own LCD_DEFAULT mode change.
+const uint8_t AirbrakeGlyph[8] =
+{
+	0b00000000,
+	0b00001110,
+	0b00010001,
+	0b00010001,
+	0b00011111,
+	0b00010001,
+	0b00010001,
+	0b00000000
+};
+
+void setupAirbrakeGlyphChar(void)
+{
+	lcd_setup_custom(AIRBRAKE_GLYPH_CHAR, AirbrakeGlyph);
+}
+
+// Narrow "H" for the MPH/KMH unit in the running SPEED readout (printSpeed()), tighter than the
+// font-ROM 'H' so the 6-char readout field reads less cramped. Occupies the AM_CHAR slot under
+// LCD_OPS_SPEED - only loaded when the DISPLAY pref shows SPEED, so it never collides with the
+// AM/PM clock indicator.
+const uint8_t SpeedNarrowH[8] =
+{
+	0b00010010,
+	0b00010010,
+	0b00010010,
+	0b00011110,
+	0b00010010,
+	0b00010010,
+	0b00010010,
+	0b00000000
+};
+
+void setupSpeedHChar(void)
+{
+	lcd_setup_custom(SPEED_H_CHAR, SpeedNarrowH);
+}
+
 // --- AIRBRAKE ALT: the original ISE analogue pressure gauge, revived from the last commit before
 // BRAKESIM replaced it (git 3cde842:src/cst-pressure.c) and rewired to the new sim's BP value. The
 // dial artwork, canvas geometry, and Bresenham needle plotter are unchanged from the original -
@@ -629,6 +692,23 @@ void setupLCD(LcdMode mode)
 				// entered from a LCD_DEFAULT context so the other 7 slots are already loaded; the
 				// menu-exit setupLCD(LCD_DEFAULT) restores AUX because currentMode changed here.
 				setupPlusMinusChar();
+				break;
+			case LCD_OPS:
+			case LCD_OPS_SPEED:
+				// The base screen + OPS MODE screen CGRAM set (used regardless of the OPS MODE pref).
+				// PSI_CHAR_L -> the AIRBRAKE "A" button-corner glyph, PSI_CHAR_R -> the OPS "Fn active"
+				// glyph - both reloaded to the PSI glyphs by the AIRBRAKE DUAL screen / a menu, which
+				// force LCD_DEFAULT. LCD_OPS_SPEED additionally reuses the AM_CHAR slot for the narrow
+				// "H" (DISPLAY = SPEED); LCD_OPS keeps AM/PM (DISPLAY = CLOCK).
+				setupBatteryChar();
+				setupSoftkeyChars();
+				setupAuxChars();
+				setupAirbrakeGlyphChar();
+				setupOpsChars();
+				if(LCD_OPS_SPEED == mode)
+					setupSpeedHChar();
+				else
+					setupClockChars();
 				break;
 		}
 		currentMode = mode;

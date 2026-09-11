@@ -103,6 +103,7 @@ TX_HOLDOFF_MAX = 254   # one below the 0xFF erased-byte sentinel (firmware heals
 CONFIGBITS_LED_BLINK = 0
 CONFIGBITS_MAIN_SCREEN_SPEED = 1  # bit clear = clock (default), set = scale speed
 CONFIGBITS_AIRBRAKE = 2  # bit clear = AIRBRAKE off (default); set = drives air sound functions
+CONFIGBITS_OPS_MODE = 3  # bit clear = OPS MODE off (default); set = long-press MENU on the base screen enters the OPS MODE screen
 CONFIGBITS_REVERSER_LOCK = 4
 CONFIGBITS_STRICT_SLEEP = 5
 
@@ -157,6 +158,8 @@ FUNCTION_FIELDS = [
     ("REAR_DIM2",        0x0D, 0),
     ("UP_BUTTON",        0x10, FUNC_SPECIAL | FUNC_MENU),
     ("DOWN_BUTTON",      0x11, FUNC_SPECIAL | FUNC_MENU),
+    ("MENU_BUTTON",      0x2C, FUNC_SPECIAL | FUNC_MENU),  # OPS MODE - was a freed SPEED BRK2 scatter slot
+    ("SEL_BUTTON",       0x2D, FUNC_SPECIAL | FUNC_MENU),  # OPS MODE - was a freed SPEED BRK3 scatter slot
 ]
 
 EE_BRAKE_PULSE_WIDTH = 0x16

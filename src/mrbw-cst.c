@@ -198,6 +198,10 @@ uint8_t brakePulseWidth = BRAKE_PULSE_WIDTH_DEFAULT;
 // Bit clear = AIRBRAKE off (default - the air-brake model still ticks but drives nothing, AIRBRAKE CFG
 // is hidden); set = AIRBRAKE drives BRAKE_REL_FN / BRK SET / COMPRESSOR_FN. See CLAUDE.md "AIRBRAKE".
 #define CONFIGBITS_AIRBRAKE          2
+// Bit clear = OPS MODE off (default - MENU/SELECT are navigation keys, base screen is stock, the
+// OPS MODE screen and MENU BTN / SEL BTN functions are inert); set = a long-press of MENU on the
+// base screen enters the OPS MODE screen, where MENU/SELECT drive MENU BTN / SEL BTN. See CLAUDE.md.
+#define CONFIGBITS_OPS_MODE          3
 #define CONFIGBITS_REVERSER_LOCK     4
 #define CONFIGBITS_STRICT_SLEEP      5
 
@@ -323,6 +327,7 @@ typedef enum
 	PREFS_SCREEN,
 	THRESHOLD_CAL_SCREEN,
 	DIAG_SCREEN,
+	OPS_MODE_SCREEN,  // OPS MODE base-screen variant - not in the MENU cycle; entered/left only by a long-press of MENU
 	LAST_SCREEN  // Must be the last screen
 } Screens;
 
@@ -336,6 +341,7 @@ typedef enum
 enum
 {
 	PREFS_ITEM_DISPLAY = 0,   // configBits: CLOCK / SPEED main-screen readout
+	PREFS_ITEM_OPS_MODE,     // configBits: OPS MODE base-screen variant on/off
 	PREFS_ITEM_AIRBRAKE,      // configBits: AIRBRAKE sound model on/off
 	PREFS_ITEM_SLEEP,         // staged: newSleepTimeout (minutes)
 	PREFS_ITEM_ALERTER,       // staged: newAlerterTimeout (x15 s, 0 = OFF)
@@ -424,6 +430,8 @@ uint32_t functionForceOff = 0;
 
 #define UP_OPTION_BUTTON   0x01
 #define DOWN_OPTION_BUTTON 0x02
+#define MENU_OPTION_BUTTON 0x04   // OPS MODE only - the MENU button driving MENU_FN
+#define SEL_OPTION_BUTTON  0x08   // OPS MODE only - the SELECT button driving SEL_FN
 
 uint16_t controls = 0;
 
@@ -530,6 +538,7 @@ static uint8_t prefsItemBit(uint8_t item)
 {
 	switch(item)
 	{
+		case PREFS_ITEM_OPS_MODE:     return CONFIGBITS_OPS_MODE;
 		case PREFS_ITEM_AIRBRAKE:     return CONFIGBITS_AIRBRAKE;
 		case PREFS_ITEM_LED_BLINK:    return CONFIGBITS_LED_BLINK;
 		case PREFS_ITEM_REV_LOCK:     return CONFIGBITS_REVERSER_LOCK;
@@ -1535,6 +1544,136 @@ static void displaySyncResult(SyncResult result, uint8_t isSave, uint8_t slot)
 	}
 }
 
+// The corner glyph for a configurable button (UP / DOWN / MENU / SEL): the "A" glyph
+// (AIRBRAKE_GLYPH_CHAR, loaded by baseScreenLcdMode()'s LCD_OPS / LCD_OPS_SPEED) if the button opens
+// the AIRBRAKE gauge - a screen jump, not a DCC function, so the softkey circle would be meaningless.
+// Otherwise the filled/hollow circle - filled while the function is asserting and configured, hollow
+// otherwise (shown even when the function is OFF, matching the stock UP/DOWN glyphs).
+static char buttonCornerGlyph(Functions fn, uint8_t asserting)
+{
+	if(isFunctionAirBrake(fn))
+		return AIRBRAKE_GLYPH_CHAR;
+	return (asserting && !isFunctionOff(fn)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR;
+}
+
+// The base screen and the OPS MODE screen use this CGRAM set regardless of the OPS MODE pref. The
+// only difference between the two variants is the AM_CHAR slot: the SPEED readout needs the narrow-H
+// unit glyph there, the CLOCK readout needs AM/PM - and the two readouts are mutually exclusive
+// (DISPLAY pref). renderBaseScreen() picks printSpeed()/printTime() off the same bit in the same
+// pass, so the loaded CGRAM always matches what is drawn.
+static LcdMode baseScreenLcdMode(void)
+{
+	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? LCD_OPS_SPEED : LCD_OPS;
+}
+
+// The AUX indicator glyph, or a blank. Suppressed when the AUX button drives the very DCC function
+// HOLDFN watches for ESU Drive Hold: activating AUX then already replaces the loco address with
+// "HOLD" (the holdFunctionActive branch in renderBaseScreen()), so the adjacent glyph is redundant.
+// A static config comparison, not a runtime holdFunctionActive check - whenever AUX is both active
+// and mapped to the HOLDFN number, Drive Hold is by construction asserted too.
+static char auxIndicatorChar(void)
+{
+	if(!(controls & AUX_CONTROL))
+		return ' ';
+	uint8_t holdFn = speedGet(SPEED_ITEM_HOLD_FN);   // 0-28 = F##, > 28 = OFF
+	if((holdFn <= 28) && (getFunctionMask(AUX_FN) == ((uint32_t)1 << holdFn)))
+		return ' ';
+	return AUX_CHAR;
+}
+
+// Draws the base-screen status area, shared by MAIN_SCREEN and OPS_MODE_SCREEN. The two differ only
+// in three places, all gated by CONFIGBITS_OPS_MODE (opsLayout) and, for the column-0 glyphs, by
+// which screen is showing (opsScreen):
+//   - CONFIGBITS_OPS_MODE clear: stock layout - battery at column 0, AUX/blank at (0,1), nothing at
+//     (0,0)/(1,0). Byte-identical to the pre-OPS-MODE firmware.
+//   - CONFIGBITS_OPS_MODE set: battery at column 6, AUX/blank relocated to (1,0), and column 0 of
+//     both rows carries a status glyph - the MENU/SEL "circle" (hollow/filled, like the UP/DOWN
+//     glyphs) on the OPS MODE screen, or the "Fn active" reminder glyph (blank unless the function
+//     is still latched) on the plain base screen.
+// Button handling stays in each screen's own case (it is what actually differs).
+static void renderBaseScreen(uint8_t opsScreen, uint8_t backlight, uint8_t optionButtonState,
+                             ReverserPosition activeReverserSetting, ReverserPosition reverserPosition_tmp)
+{
+	uint8_t opsLayout = (configBits & _BV(CONFIGBITS_OPS_MODE)) ? 1 : 0;
+
+	lcd_gotoxy(2,0);
+	if(throttleStatus & THROTTLE_STATUS_EMERGENCY)
+	{
+		lcd_puts("EMRG");
+		enableLCDBacklight();
+	}
+	else if(throttleStatus & THROTTLE_STATUS_ALERTER)
+	{
+		uint16_t alerter_tmp;
+		lcd_puts("ALRT");
+		ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
+		{
+			alerter_tmp = alerterTimeout_decisecs;
+		}
+		if((alerter_tmp/1) % 2)
+			disableLCDBacklight();
+		else
+			enableLCDBacklight();
+	}
+	else if(activeReverserSetting != reverserPosition_tmp)
+	{
+		lcd_puts("REV!");
+		enableLCDBacklight();
+	}
+	else if(holdFunctionActive)
+	{
+		lcd_puts("HOLD");
+		if(backlight || backlightTimeout_decisecs)
+			enableLCDBacklight();
+		else
+			disableLCDBacklight();
+	}
+	else
+	{
+		printLocomotiveAddress(locoAddress);
+		if(backlight || backlightTimeout_decisecs)
+			enableLCDBacklight();
+		else
+			disableLCDBacklight();
+	}
+
+	lcd_gotoxy(1,1);
+	if(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED))
+		printSpeed();
+	else
+		printTime();
+
+	printBattery(opsLayout ? 6 : 0);
+
+	lcd_gotoxy(7,0);
+	lcd_putc(buttonCornerGlyph(UP_FN, optionButtonState & UP_OPTION_BUTTON));
+	lcd_gotoxy(7,1);
+	lcd_putc(buttonCornerGlyph(DOWN_FN, optionButtonState & DOWN_OPTION_BUTTON));
+
+	if(opsLayout)
+	{
+		uint8_t menuOn = (optionButtonState & MENU_OPTION_BUTTON) && !isFunctionOff(MENU_FN);
+		uint8_t selOn  = (optionButtonState & SEL_OPTION_BUTTON)  && !isFunctionOff(SEL_FN);
+		lcd_gotoxy(0,0);
+		if(opsScreen)
+			lcd_putc(buttonCornerGlyph(MENU_FN, optionButtonState & MENU_OPTION_BUTTON));
+		else
+			lcd_putc(menuOn ? OPS_FN_ACTIVE_CHAR : ' ');
+		lcd_gotoxy(0,1);
+		if(opsScreen)
+			lcd_putc(buttonCornerGlyph(SEL_FN, optionButtonState & SEL_OPTION_BUTTON));
+		else
+			lcd_putc(selOn ? OPS_FN_ACTIVE_CHAR : ' ');
+		lcd_gotoxy(1,0);
+		lcd_putc(auxIndicatorChar());
+	}
+	else
+	{
+		lcd_gotoxy(0,1);
+		lcd_putc(auxIndicatorChar());
+	}
+}
+
 int main(void)
 {
 	uint16_t decisecs_tmp;
@@ -1564,6 +1703,20 @@ int main(void)
 	uint8_t subscreenState = 0;
 	uint8_t subscreenCount = 0;
 	uint8_t systemBitsSnapshot = SYSTEMBITS_DEFAULT;  // Snapshot for reverting SYSTEM_SCREEN's systemBits on menu-cancel
+
+	// OPS MODE. menuAdvancePending: a one-shot armed on a fresh MENU press that begins on the base
+	// screen with OPS MODE enabled - it resolves into OPS MODE (the press became a long-press) or
+	// into a normal menu advance on release (a short tap), so the base screen never flashes ENGINE
+	// on the way into OPS MODE. opsMenuIgnoreUntilRelease: set on entry so the still-held MENU
+	// doesn't immediately trip the exit long-press; cleared on release. airbrakeReturnToOps: AIRBRAKE
+	// was opened from OPS MODE (via a MENU/SEL/UP/DOWN button set to AIRBRAKE) - any of those four
+	// returns there instead of the main screen / menu. airbrakeReturnToMain: AIRBRAKE was opened from
+	// the base screen via a UP/DOWN button set to AIRBRAKE (NOT via the menu cycle, NOT from OPS
+	// MODE) - any of the four buttons dismisses it straight back to the main screen.
+	uint8_t menuAdvancePending = 0;
+	uint8_t opsMenuIgnoreUntilRelease = 0;
+	uint8_t airbrakeReturnToOps = 0;
+	uint8_t airbrakeReturnToMain = 0;
 
 	BrakeStates brakeState = BRAKE_LOW_BEGIN;
 
@@ -2038,63 +2191,12 @@ int main(void)
 			case MAIN_SCREEN:
 				if(!subscreenState)
 				{
-					lcd_gotoxy(2,0);
-					if(throttleStatus & THROTTLE_STATUS_EMERGENCY)
-					{
-						lcd_puts("EMRG");
-						enableLCDBacklight();
-					}
-					else if(throttleStatus & THROTTLE_STATUS_ALERTER)
-					{
-						lcd_puts("ALRT");
-						ATOMIC_BLOCK(ATOMIC_RESTORESTATE)
-						{
-							decisecs_tmp = alerterTimeout_decisecs;
-						}
-						if((decisecs_tmp/1) % 2)
-							disableLCDBacklight();
-						else
-							enableLCDBacklight();
-					}
-					else if(activeReverserSetting != reverserPosition_tmp)
-					{
-						lcd_puts("REV!");
-						enableLCDBacklight();
-					}
-					else if(holdFunctionActive)
-					{
-						lcd_puts("HOLD");
-						if(backlight || backlightTimeout_decisecs)
-							enableLCDBacklight();
-						else
-							disableLCDBacklight();
-					}
-					else
-					{
-						printLocomotiveAddress(locoAddress);
-						if(backlight || backlightTimeout_decisecs)
-							enableLCDBacklight();
-						else
-							disableLCDBacklight();
-					}
-
-					lcd_gotoxy(1,1);
-					if(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED))
-						printSpeed();
-					else
-						printTime();
-					printBattery();
-				
-					lcd_gotoxy(7,0);
-					lcd_putc((optionButtonState & UP_OPTION_BUTTON) && !(isFunctionOff(UP_FN)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR);
-					lcd_gotoxy(7,1);
-					lcd_putc((optionButtonState & DOWN_OPTION_BUTTON) && !(isFunctionOff(DOWN_FN)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR);
-
-					lcd_gotoxy(0,1);
-					if(controls & AUX_CONTROL)
-						lcd_putc(AUX_CHAR);
-					else
-						lcd_putc(' ');
+					// The base screen uses the LCD_OPS / LCD_OPS_SPEED CGRAM set (narrow battery, the
+					// AIRBRAKE "A" glyph, the narrow-H unit glyph or AM/PM); the OPS MODE pref only
+					// shifts the layout (renderBaseScreen). setupLCD()'s currentMode guard makes the
+					// repeat call free.
+					setupLCD(baseScreenLcdMode());
+					renderBaseScreen(0, backlight, optionButtonState, activeReverserSetting, reverserPosition_tmp);
 					switch(button)
 					{
 						case UP_BUTTON:
@@ -2159,6 +2261,8 @@ int main(void)
 						{
 							screenState = AIRBRAKE_SCREEN;
 							subscreenState = 0;
+							airbrakeReturnToMain = 1;   // dismissed back to the main screen on any button
+							optionButtonState &= ~UP_OPTION_BUTTON;   // so a still-held UP does not re-open it on return
 							lcd_clrscr();
 						}
 					}
@@ -2168,6 +2272,8 @@ int main(void)
 						{
 							screenState = AIRBRAKE_SCREEN;
 							subscreenState = 0;
+							airbrakeReturnToMain = 1;   // dismissed back to the main screen on any button
+							optionButtonState &= ~DOWN_OPTION_BUTTON;   // so a still-held DOWN does not re-open it on return
 							lcd_clrscr();
 						}
 					}
@@ -2209,6 +2315,138 @@ int main(void)
 							break;
 					}
 				}
+				break;
+
+			case OPS_MODE_SCREEN:
+				// OPS MODE - the base screen with MENU/SELECT freed to drive MENU BTN / SEL BTN
+				// (same momentary/latching options as UP BTN / DOWN BTN). Entered by a long-press of
+				// MENU from the base screen, left by a long-press of MENU here. UP/DOWN behave exactly
+				// as on the main screen. Same CGRAM set as the base screen (see baseScreenLcdMode()).
+				setupLCD(baseScreenLcdMode());
+				renderBaseScreen(1, backlight, optionButtonState, activeReverserSetting, reverserPosition_tmp);
+
+				// opsMenuIgnoreUntilRelease (set on entry, so the still-held MENU cannot immediately
+				// trip the exit long-press) is cleared at the END of this case, after the switch - so
+				// case NO_BUTTON below can still see its pre-release value to tell "released the entry
+				// hold" from "released a genuine short MENU tap".
+
+				switch(button)
+				{
+					case UP_BUTTON:
+						if(UP_BUTTON != previousButton)
+						{
+							if(isFunctionLatching(UP_FN))
+								optionButtonState ^= UP_OPTION_BUTTON;
+							else
+								optionButtonState |= UP_OPTION_BUTTON;
+						}
+						break;
+					case DOWN_BUTTON:
+						if(DOWN_BUTTON != previousButton)
+						{
+							if(isFunctionLatching(DOWN_FN))
+								optionButtonState ^= DOWN_OPTION_BUTTON;
+							else
+								optionButtonState |= DOWN_OPTION_BUTTON;
+						}
+						break;
+					case SELECT_BUTTON:
+						// Purely a function button here - no power-down, no backlight toggle.
+						if(SELECT_BUTTON != previousButton)
+						{
+							if(isFunctionLatching(SEL_FN))
+								optionButtonState ^= SEL_OPTION_BUTTON;
+							else
+								optionButtonState |= SEL_OPTION_BUTTON;
+						}
+						break;
+					case MENU_BUTTON:
+						if(!opsMenuIgnoreUntilRelease)
+						{
+							if(MENU_BUTTON != previousButton)
+							{
+								ticks_autoincrement = 0;  // so the exit long-press can be timed
+								// AIRBRAKE is a screen, not a DCC function - opening it on the press
+								// edge would leave OPS MODE before the exit long-press below could ever
+								// run, trapping the operator. It is opened on release of a short tap
+								// instead (case NO_BUTTON). Latching / momentary MENU_FN keep their
+								// press-edge behaviour.
+								if(!isFunctionAirBrake(MENU_FN))
+								{
+									if(isFunctionLatching(MENU_FN))
+										optionButtonState ^= MENU_OPTION_BUTTON;
+									else
+										optionButtonState |= MENU_OPTION_BUTTON;
+								}
+							}
+							if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
+							{
+								// Long-press MENU -> leave OPS MODE for the base screen. A long-press
+								// is "exit", not "toggle": undo this same press's latch toggle so a
+								// still-latched MENU function is preserved and a not-latched one is not
+								// spuriously turned on; drop every momentary bit on the way out.
+								if(isFunctionLatching(MENU_FN))
+									optionButtonState ^= MENU_OPTION_BUTTON;
+								else
+									optionButtonState &= ~MENU_OPTION_BUTTON;
+								if(!isFunctionLatching(SEL_FN))  optionButtonState &= ~SEL_OPTION_BUTTON;
+								if(!isFunctionLatching(UP_FN))   optionButtonState &= ~UP_OPTION_BUTTON;
+								if(!isFunctionLatching(DOWN_FN)) optionButtonState &= ~DOWN_OPTION_BUTTON;
+								opsMenuIgnoreUntilRelease = 0;
+								menuAdvancePending = 0;
+								screenState = LAST_SCREEN;
+								lcd_clrscr();
+							}
+						}
+						break;
+					case NO_BUTTON:
+						// Trailing edge of a MENU BTN press. If MENU BTN is AIRBRAKE and this was a
+						// short tap (a long hold would already have exited OPS MODE, changing
+						// screenState) that is not the still-held entry press (opsMenuIgnoreUntilRelease,
+						// read here before the end-of-case clear), open the AIRBRAKE screen now.
+						if((MENU_BUTTON == previousButton) && !opsMenuIgnoreUntilRelease && isFunctionAirBrake(MENU_FN))
+						{
+							screenState = AIRBRAKE_SCREEN;
+							subscreenState = 0;
+							airbrakeReturnToOps = 1;
+							lcd_clrscr();
+						}
+						break;
+				}
+
+				// Release any momentary bit whose button is not currently held (the buttons are
+				// mutually exclusive, so "not held" == "not the current button").
+				if((UP_BUTTON != button)     && !isFunctionLatching(UP_FN))   optionButtonState &= ~UP_OPTION_BUTTON;
+				if((DOWN_BUTTON != button)   && !isFunctionLatching(DOWN_FN)) optionButtonState &= ~DOWN_OPTION_BUTTON;
+				if((MENU_BUTTON != button)   && !isFunctionLatching(MENU_FN)) optionButtonState &= ~MENU_OPTION_BUTTON;
+				if((SELECT_BUTTON != button) && !isFunctionLatching(SEL_FN))  optionButtonState &= ~SEL_OPTION_BUTTON;
+
+				// UP / DOWN / SEL set to AIRBRAKE open the screen on the press edge (they have no
+				// long-press meaning here, and MAIN-screen UP/DOWN -> AIRBRAKE is press-edge too).
+				// MENU is handled on release (case NO_BUTTON above) so its exit long-press still
+				// works. Any of the four returns to OPS MODE via airbrakeReturnToOps. The triggering
+				// button's (momentary) option bit is cleared here so that, on returning, a still-held
+				// button does not immediately re-open AIRBRAKE.
+				if(OPS_MODE_SCREEN == screenState)
+				{
+					uint8_t openAirbrake = 0;
+					if((optionButtonState & UP_OPTION_BUTTON)   && isFunctionAirBrake(UP_FN))   { openAirbrake = 1; optionButtonState &= ~UP_OPTION_BUTTON; }
+					if((optionButtonState & DOWN_OPTION_BUTTON) && isFunctionAirBrake(DOWN_FN)) { openAirbrake = 1; optionButtonState &= ~DOWN_OPTION_BUTTON; }
+					if((optionButtonState & SEL_OPTION_BUTTON)  && isFunctionAirBrake(SEL_FN))  { openAirbrake = 1; optionButtonState &= ~SEL_OPTION_BUTTON; }
+					if(openAirbrake)
+					{
+						screenState = AIRBRAKE_SCREEN;
+						subscreenState = 0;
+						airbrakeReturnToOps = 1;
+						lcd_clrscr();
+					}
+				}
+
+				// Clear the entry-hold ignore now that the switch is done (case NO_BUTTON above has
+				// read its pre-release value): any button other than a still-held MENU means the
+				// MENU press that entered OPS MODE has been released.
+				if(MENU_BUTTON != button)
+					opsMenuIgnoreUntilRelease = 0;
 				break;
 
 			case ENGINE_SCREEN:
@@ -2306,7 +2544,22 @@ int main(void)
 				//     BP readout + literal " PSI" text (cols 4-7) - the original's own layout.
 				// UP/DOWN do nothing here. The full text/diagnostic readout (lever %, BRK REL /
 				// BRK SET / COMPRESSOR / emergency letters) is the AIRBRAKE DIAGS page under DIAGS.
-				enableLCDBacklight();
+				if(airbrakeReturnToOps || airbrakeReturnToMain)
+				{
+					// Opened from a running screen (OPS MODE, or the base screen via an AIRBRAKE
+					// button) rather than the menu cycle - honour the backlight toggle / hold like the
+					// main screen and OPS MODE do, instead of the "menu screen = always lit" default.
+					// EMRG (brake lever at max) still forces it on. The line-5883 hold re-arm also
+					// skips this case so the light does not stick on after returning.
+					if((throttleStatus & THROTTLE_STATUS_EMERGENCY) || backlight || backlightTimeout_decisecs)
+						enableLCDBacklight();
+					else
+						disableLCDBacklight();
+				}
+				else
+				{
+					enableLCDBacklight();
+				}
 				if(AIRBRAKE_DISPLAY_SINGLE == airbrakeGet(AIRBRAKE_DISPLAY))
 				{
 					setupLCD(LCD_AIRBRAKE_ALT);   // no-op after the first call - currentMode bookkeeping only
@@ -2338,6 +2591,42 @@ int main(void)
 					printDec3Dig(airMainResPsi());
 					lcd_putc(PSI_CHAR_L);
 					lcd_putc(PSI_CHAR_R);
+				}
+				if(airbrakeReturnToOps)
+				{
+					// AIRBRAKE was opened from OPS MODE (via a MENU/SEL/UP/DOWN button set to
+					// AIRBRAKE). Any fresh press of those four returns to OPS MODE - not the main
+					// screen, not the menu. The button that opened this screen is still held on the
+					// next pass (button == previousButton), so it cannot bounce straight back.
+					if((NO_BUTTON != button) && (button != previousButton))
+					{
+						airbrakeReturnToOps = 0;
+						// If MENU was the button used to return, ignore it in OPS MODE until released
+						// so a still-held MENU cannot immediately trip the OPS MODE exit long-press.
+						opsMenuIgnoreUntilRelease = (MENU_BUTTON == button);
+						setupLCD(baseScreenLcdMode());
+						screenState = OPS_MODE_SCREEN;
+						lcd_clrscr();
+					}
+					break;
+				}
+				if(airbrakeReturnToMain)
+				{
+					// AIRBRAKE was opened from the base screen via a UP/DOWN button set to AIRBRAKE
+					// (not the menu cycle, not OPS MODE). Any of the four buttons dismisses it
+					// straight back to the main screen - matching the OPS MODE dismiss. previousButton
+					// is synced so the still-held dismiss button does not re-fire there (same idiom as
+					// the wake-from-sleep "Prevent extraneous menu advances" line); the
+					// button != previousButton guard keeps the still-held entry button from bouncing
+					// straight back.
+					if((NO_BUTTON != button) && (button != previousButton))
+					{
+						airbrakeReturnToMain = 0;
+						screenState = LAST_SCREEN;   // case LAST_SCREEN restores CGRAM + drops to MAIN_SCREEN
+						previousButton = button;
+						lcd_clrscr();
+					}
+					break;
 				}
 				switch(button)
 				{
@@ -4240,6 +4529,7 @@ int main(void)
 					switch(prefsItem)
 					{
 						case PREFS_ITEM_DISPLAY:      lcd_puts("DISPLAY"); break;
+						case PREFS_ITEM_OPS_MODE:     lcd_puts("OPS MODE"); break;
 						case PREFS_ITEM_AIRBRAKE:     lcd_puts("AIRBRAKE"); break;
 						case PREFS_ITEM_SLEEP:        lcd_puts("SLEEP"); break;
 						case PREFS_ITEM_ALERTER:      lcd_puts("ALERTER"); break;
@@ -4291,6 +4581,7 @@ int main(void)
 							lcd_gotoxy(4,1);
 							lcd_puts((configBits & _BV(CONFIGBITS_STRICT_SLEEP)) ? " ON " : " OFF");
 							break;
+						case PREFS_ITEM_OPS_MODE:
 						case PREFS_ITEM_AIRBRAKE:
 						case PREFS_ITEM_LED_BLINK:
 						case PREFS_ITEM_REV_LOCK:
@@ -5044,102 +5335,160 @@ int main(void)
 				screenState = 0;
 				break;
 		}
-		// Process Menu button, but only if not in a subscreen
-		// Do this after main screen loop so screens can also do cleanup when menu is pressed
+		// Process Menu button, but only if not in a subscreen.
+		// Do this after main screen loop so screens can also do cleanup when menu is pressed.
+		// OPS_MODE_SCREEN (and the AIRBRAKE screen reached from it or from a base-screen AIRBRAKE
+		// button) own MENU entirely - MENU is a function button in OPS MODE and a screen-dismiss on
+		// those AIRBRAKE sessions, not a menu-cycle key - so this whole block is bypassed for them.
+		if((OPS_MODE_SCREEN != screenState) && !airbrakeReturnToOps && !airbrakeReturnToMain)
+		{
 		if(!subscreenState)
 		{
+			uint8_t doAdvance = 0;
+
 			if(MENU_BUTTON == button)
 			{
 				if(MENU_BUTTON != previousButton)
 				{
-					// Menu pressed, advance menu
-					lcd_clrscr();
-					// Restore the default CGRAM. AIRBRAKE_SCREEN's DISPLAY=SINGLE view leaves
-					// LCD_AIRBRAKE_ALT active (all 8 slots = gauge artwork); advancing from it via MENU
-					// would otherwise land on AIRBRAKE_CONFIG_SCREEN with slots 6/7 still holding gauge
-					// fragments instead of the PSI glyph. currentMode guard makes this free on every
-					// other menu advance (same backstop as case LAST_SCREEN).
-					setupLCD(LCD_DEFAULT);
-					screenState++;  // No range checking needed since LAST_SCREEN will reset the counter
 					ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
-
-					// Check for conditional menus
-					if(!(systemBits & _BV(SYSTEMBITS_ADV_FUNC)))
+					// A fresh MENU press from the base screen with OPS MODE enabled is deferred - it
+					// may become the long-press that enters OPS MODE, and advancing to ENGINE first
+					// would flash that screen. menuAdvancePending is a one-shot: it resolves either
+					// into OPS MODE (long-press) or into a normal advance on release (short tap).
+					// Every other screen, and the entire OPS-disabled build, advances immediately on
+					// the press edge exactly as before.
+					if((MAIN_SCREEN == screenState) && (configBits & _BV(CONFIGBITS_OPS_MODE)))
 					{
-						// Advanced functions NOT active
-						if(THRESHOLD_CAL_SCREEN == screenState)
-						{
-							// Horn2's threshold is deliberately NOT in this gate - its calibration is
-							// optional (hornThreshold2 == 0xFF just means Horn2 is disabled), so an
-							// upgraded throttle isn't forced back through THRESHOLD CAL for it.
-							if(	(0xFF != hornThreshold) &&
-								(0xFF != brakeThreshold) &&
-								(0xFF != brakeLowThreshold) &&
-								(0xFF != brakeHighThreshold)
-								)
-							{
-								// Skip threshold menu, but only if already calilbrated
-								screenState++;
-							}
-						}
+						menuAdvancePending = 1;
 					}
-
-					// Skip SPEED CFG screen when the main screen is showing the clock, not speed -
-					// tuning these settings is meaningless if the throttle isn't displaying speed at all.
-					if(SPEED_CONFIG_SCREEN == screenState)
+					else
 					{
-						if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
-						{
-							screenState++;
-						}
-					}
-
-					// Skip AIRBRAKE / AIRBRAKE CFG when AIRBRAKE is off - the model still ticks but
-					// drives nothing. (AIRBRAKE is still reachable via an AIRBRAKE-bound button.)
-					if(AIRBRAKE_SCREEN == screenState)
-					{
-						if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
-						{
-							screenState++;
-						}
-					}
-					if(AIRBRAKE_CONFIG_SCREEN == screenState)
-					{
-						if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
-						{
-							screenState++;
-						}
-					}
-
-					if(systemBits & _BV(SYSTEMBITS_MENU_LOCK))
-					{
-						// Menu lock active
-						while( 	(ENGINE_SCREEN != screenState) &&
-								(AIRBRAKE_SCREEN != screenState) &&
-								(LOAD_CONFIG_SCREEN != screenState) &&
-								(LOCO_SCREEN != screenState) &&
-								(FORCE_FUNC_SCREEN != screenState) &&
-								(SYSTEM_SCREEN != screenState) &&
-								(LAST_SCREEN != screenState)
-							)
-						{
-							// Skip menu(s)
-							screenState++;
-						}
-					}
-					if(SYSTEM_SCREEN == screenState)
-					{
-						// systemBits isn't stored in EEPROM, so it needs its own snapshot for the
-						// menu-cancel handler (below) to revert it. Captured here, after every skip
-						// path above (conditional-menu skips, menu-lock skip), so an indirect entry
-						// to SYSTEM_SCREEN can't miss it.
-						systemBitsSnapshot = systemBits;
+						menuAdvancePending = 0;
+						doAdvance = 1;
 					}
 				}
 				if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
 				{
-					// Reset menu on long press
-					screenState = LAST_SCREEN;
+					if(menuAdvancePending)
+					{
+						// Long-press MENU from the base screen -> enter OPS MODE directly, without
+						// ever advancing (no ENGINE flash). opsMenuIgnoreUntilRelease keeps this same
+						// still-held MENU from immediately tripping OPS MODE's own exit long-press.
+						menuAdvancePending = 0;
+						screenState = OPS_MODE_SCREEN;
+						opsMenuIgnoreUntilRelease = 1;
+						lcd_clrscr();
+					}
+					// (MAIN_SCREEN != screenState): once a long-press has already landed back on the
+					// main screen, stop re-firing every pass while MENU stays held - otherwise the
+					// screen bounces main -> LAST_SCREEN -> main (a visible CGRAM reload flicker,
+					// since the base screen uses LCD_OPS / LCD_OPS_SPEED).
+					else if(MAIN_SCREEN != screenState)
+					{
+						// Reset menu on long press
+						screenState = LAST_SCREEN;
+					}
+				}
+			}
+			else if((NO_BUTTON == button) && (MENU_BUTTON == previousButton) && menuAdvancePending)
+			{
+				// Trailing edge of a short MENU tap on the base screen - advance the menu now.
+				menuAdvancePending = 0;
+				doAdvance = 1;
+			}
+
+			if(doAdvance)
+			{
+				// Menu pressed, advance menu
+				lcd_clrscr();
+				// Restore the default CGRAM. AIRBRAKE_SCREEN's DISPLAY=SINGLE view leaves
+				// LCD_AIRBRAKE_ALT active (all 8 slots = gauge artwork); advancing from it via MENU
+				// would otherwise land on AIRBRAKE_CONFIG_SCREEN with slots 6/7 still holding gauge
+				// fragments instead of the PSI glyph. currentMode guard makes this free on every
+				// other menu advance (same backstop as case LAST_SCREEN).
+				setupLCD(LCD_DEFAULT);
+				screenState++;  // No range checking needed since LAST_SCREEN will reset the counter
+				ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
+
+				// Check for conditional menus
+				if(!(systemBits & _BV(SYSTEMBITS_ADV_FUNC)))
+				{
+					// Advanced functions NOT active
+					if(THRESHOLD_CAL_SCREEN == screenState)
+					{
+						// Horn2's threshold is deliberately NOT in this gate - its calibration is
+						// optional (hornThreshold2 == 0xFF just means Horn2 is disabled), so an
+						// upgraded throttle isn't forced back through THRESHOLD CAL for it.
+						if(	(0xFF != hornThreshold) &&
+							(0xFF != brakeThreshold) &&
+							(0xFF != brakeLowThreshold) &&
+							(0xFF != brakeHighThreshold)
+							)
+						{
+							// Skip threshold menu, but only if already calilbrated
+							screenState++;
+						}
+					}
+				}
+
+				// Skip SPEED CFG screen when the main screen is showing the clock, not speed -
+				// tuning these settings is meaningless if the throttle isn't displaying speed at all.
+				if(SPEED_CONFIG_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
+					{
+						screenState++;
+					}
+				}
+
+				// Skip AIRBRAKE / AIRBRAKE CFG when AIRBRAKE is off - the model still ticks but
+				// drives nothing. (AIRBRAKE is still reachable via an AIRBRAKE-bound button.)
+				if(AIRBRAKE_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+					{
+						screenState++;
+					}
+				}
+				if(AIRBRAKE_CONFIG_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+					{
+						screenState++;
+					}
+				}
+
+				// OPS_MODE_SCREEN is never a MENU-cycle target - it is only reached by a
+				// long-press of MENU from the base screen (handled above). Cycling from
+				// DIAG_SCREEN skips straight past it to LAST_SCREEN (-> main screen).
+				if(OPS_MODE_SCREEN == screenState)
+				{
+					screenState++;
+				}
+
+				if(systemBits & _BV(SYSTEMBITS_MENU_LOCK))
+				{
+					// Menu lock active
+					while( 	(ENGINE_SCREEN != screenState) &&
+							(AIRBRAKE_SCREEN != screenState) &&
+							(LOAD_CONFIG_SCREEN != screenState) &&
+							(LOCO_SCREEN != screenState) &&
+							(FORCE_FUNC_SCREEN != screenState) &&
+							(SYSTEM_SCREEN != screenState) &&
+							(LAST_SCREEN != screenState)
+						)
+					{
+						// Skip menu(s)
+						screenState++;
+					}
+				}
+				if(SYSTEM_SCREEN == screenState)
+				{
+					// systemBits isn't stored in EEPROM, so it needs its own snapshot for the
+					// menu-cancel handler (below) to revert it. Captured here, after every skip
+					// path above (conditional-menu skips, menu-lock skip), so an indirect entry
+					// to SYSTEM_SCREEN can't miss it.
+					systemBitsSnapshot = systemBits;
 				}
 			}
 		}
@@ -5179,6 +5528,7 @@ int main(void)
 				lcd_clrscr();
 			}
 		}
+		}  // end: OPS_MODE_SCREEN / airbrakeReturnToOps / airbrakeReturnToMain bypass of the top-level MENU handling
 
 		previousButton = button;
 
@@ -5342,6 +5692,21 @@ int main(void)
 		{
 			functionMask |= getFunctionMask(DOWN_FN);
 			if(isFunctionEstop(DOWN_FN))
+				estopStatus |= ESTOP_BUTTON;
+		}
+		// MENU BTN / SEL BTN (OPS MODE). Their optionButtonState bits are only ever set on the
+		// OPS MODE screen, but a latched bit keeps asserting after OPS MODE is left - that persistence
+		// is what the base screen's "Fn active" glyph reports.
+		if(optionButtonState & MENU_OPTION_BUTTON)
+		{
+			functionMask |= getFunctionMask(MENU_FN);
+			if(isFunctionEstop(MENU_FN))
+				estopStatus |= ESTOP_BUTTON;
+		}
+		if(optionButtonState & SEL_OPTION_BUTTON)
+		{
+			functionMask |= getFunctionMask(SEL_FN);
+			if(isFunctionEstop(SEL_FN))
 				estopStatus |= ESTOP_BUTTON;
 		}
 
@@ -5527,8 +5892,15 @@ int main(void)
 		// returning to the main screen, so cycling back through for another pass doesn't strobe the
 		// light off in between. Only MENU arms the hold from the main screen (UP/DOWN function taps
 		// with the backlight off stay dark); every non-main screen keeps it armed continuously.
-		if((MENU_BUTTON == button) || (MAIN_SCREEN != screenState))
-			backlightTimeout_decisecs = BACKLIGHT_HOLD_DECISECS;
+		// OPS_MODE_SCREEN is a base-screen variant where every button is a function tap, so it honours
+		// the backlight toggle exactly like the main screen (the hold armed while entering covers the
+		// transition). The AIRBRAKE screen reached from a running screen (OPS MODE / an AIRBRAKE
+		// button) is the same running-screen character, so it is excluded here too.
+		{
+			uint8_t airbrakeFromRunning = (AIRBRAKE_SCREEN == screenState) && (airbrakeReturnToOps || airbrakeReturnToMain);
+			if(((MENU_BUTTON == button) || (MAIN_SCREEN != screenState)) && (OPS_MODE_SCREEN != screenState) && !airbrakeFromRunning)
+				backlightTimeout_decisecs = BACKLIGHT_HOLD_DECISECS;
+		}
 
 		wdt_reset();
 

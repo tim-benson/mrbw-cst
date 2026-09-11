@@ -26,6 +26,9 @@ This is a fork adding:
 - **Menu-button refinements** — long-press Menu to cancel an in-progress config edit, a brief backlight
   hold so the light does not strobe between menu laps, and the SELECT backlight toggle moved to button
   release.
+- **OPS MODE** — an opt-in base-screen variant (long-press Menu to enter and leave) that frees the Menu
+  and Select buttons to drive two more assignable DCC functions (`MENU BTN` / `SEL BTN`, same options
+  as `UP BTN` / `DOWN BTN`) while running.
 - **AIRBRAKE train-brake simulation** — models a locomotive automatic (train) brake — brake pipe, main
   reservoir, compressor governor — driving the ESU air sound functions from the simulated pressures,
   with a read-only gauge screen (two-pressure or analogue-dial style). Opt-in via a PREFS toggle;
@@ -38,7 +41,7 @@ Functions" menu whose transient Brake Test gauge AIRBRAKE replaces. A mixed flee
 fork-firmware throttles/receivers on the same layout is fully supported; see `CLAUDE.md`,
 "Compatibility," for exactly how each combination behaves.
 
-The stored-config layout carries an `EEPROM_LAYOUT_VERSION` (currently 4) and the firmware migrates an
+The stored-config layout carries an `EEPROM_LAYOUT_VERSION` (currently 5) and the firmware migrates an
 older EEPROM forward on first boot. Migrations carry existing per-profile values across in place, with one
 exception: a throttle already running an early ProtoThrottle X build loses its SPEED and AIRBRAKE
 per-profile config to defaults when it crosses the AIRBRAKE layout change. Coming from stock ISE firmware

@@ -40,38 +40,41 @@ LICENSE:
 #define VBATT_CRITICAL_DEFAULT  18
 #define VBATT_CRITICAL_MIN       0
 
+// Narrow (3-px-wide) battery glyphs - a 1-px terminal nub over a 3-px body. FULL = solid body,
+// HALF = hollow upper half, EMPTY = outline + base line only. CRITICAL reuses BatteryEmpty (see
+// setupBatteryChar()).
 const uint8_t BatteryFull[8] =
 {
+	0b00000100,
 	0b00001110,
-	0b00011111,
-	0b00011111,
-	0b00011111,
-	0b00011111,
-	0b00011111,
-	0b00011111,
+	0b00001110,
+	0b00001110,
+	0b00001110,
+	0b00001110,
+	0b00001110,
 	0b00000000
 };
 
 const uint8_t BatteryHalf[8] =
 {
+	0b00000100,
 	0b00001110,
-	0b00011011,
-	0b00010001,
-	0b00010001,
-	0b00011111,
-	0b00011111,
-	0b00011111,
+	0b00001010,
+	0b00001010,
+	0b00001110,
+	0b00001110,
+	0b00001110,
 	0b00000000
 };
 const uint8_t BatteryEmpty[8] =
 {
+	0b00000100,
+	0b00001010,
+	0b00001010,
+	0b00001010,
+	0b00001010,
+	0b00001010,
 	0b00001110,
-	0b00011011,
-	0b00010001,
-	0b00010001,
-	0b00010001,
-	0b00010001,
-	0b00011111,
 	0b00000000
 };
 
@@ -136,7 +139,7 @@ void setBatteryVoltage(uint8_t voltage)
 		batteryState = CRITICAL;
 }
 
-void printBattery(void)
+void printBattery(uint8_t x)
 {
 	if(batteryState != lastBatteryState)
 	{
@@ -144,7 +147,7 @@ void printBattery(void)
 		lastBatteryState = batteryState;
 	}
 
-	lcd_gotoxy(0,0);
+	lcd_gotoxy(x,0);
 	lcd_putc(BATTERY_CHAR);
 }
 

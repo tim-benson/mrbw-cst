@@ -38,7 +38,11 @@ UNSET = "UNSET"
 # or -127 sign-magnitude), so a raw 0xFF decodes to that, never "UNSET", and a bare "UNSET" on import
 # maps to the default value, not the 0xFF sentinel. Every other plain-numeric SPEED field stays
 # 0-254 + "UNSET". (device: tx_holdoff_centisecs now validates 10-254, not 10-255 - firmware heals 0xFF.)
-SLOT_SCHEMA_VERSION = 5
+# 6: OPS MODE. functions gains MENU_BUTTON / SEL_BUTTON (EEPROM 0x2C / 0x2D, same options as
+# UP_BUTTON / DOWN_BUTTON); prefs.config_bits gains ops_mode (bit 3). EEPROM_LAYOUT_VERSION -> 5 (the
+# firmware seeds 0x2C/0x2D to FN_OFF on upgrade). A pre-6 backup missing the two function keys needs
+# --import-old (they default to RAW:0xFF, same as any never-written function slot).
+SLOT_SCHEMA_VERSION = 6
 
 
 class SlotValidationError(ValueError):
@@ -92,10 +96,10 @@ def _encode_functions(d, errors, allow_missing=False):
         value = _encode_function_value(d[key], errors, "functions.%s" % key)
         if value == layout.FN_EMRG and not (attrs & layout.FUNC_SPECIAL):
             errors.append("functions.%s: EMRG is not valid here (only AUX, ALERTER, UP_BUTTON, "
-                           "DOWN_BUTTON support it)" % key)
+                           "DOWN_BUTTON, MENU_BUTTON, SEL_BUTTON support it)" % key)
         if value == layout.FN_AIRBRAKE and not (attrs & layout.FUNC_MENU):
-            errors.append("functions.%s: AIRBRAKE is not valid here (only UP_BUTTON, DOWN_BUTTON "
-                           "support it)" % key)
+            errors.append("functions.%s: AIRBRAKE is not valid here (only UP_BUTTON, DOWN_BUTTON, "
+                           "MENU_BUTTON, SEL_BUTTON support it)" % key)
         out[offset] = value
     unknown = set(d.keys()) - keys_seen
     for key in unknown:
@@ -775,11 +779,13 @@ def _flatten_global(d):
     return flat
 
 
-# Order = on-device PREFS menu order (DISPLAY, then LED BLNK / REV LOCK / STRICT SLP; the SLEEP /
-# ALERTER / TIMEOUT items in between are device-level, not config bits). Both decode and encode
-# iterate this dict; encode keys off the explicit bit number, so the order only sets how the JSON reads.
+# Order = on-device PREFS menu order (DISPLAY, OPS MODE, AIRBRAKE, then LED BLNK / REV LOCK /
+# STRICT SLP; the SLEEP / ALERTER / TIMEOUT items in between are device-level, not config bits).
+# Both decode and encode iterate this dict; encode keys off the explicit bit number, so the order
+# only sets how the JSON reads.
 CONFIGBITS_NAMED = {
     "main_screen_speed": layout.CONFIGBITS_MAIN_SCREEN_SPEED,
+    "ops_mode": layout.CONFIGBITS_OPS_MODE,
     "airbrake": layout.CONFIGBITS_AIRBRAKE,
     "led_blink": layout.CONFIGBITS_LED_BLINK,
     "reverser_lock": layout.CONFIGBITS_REVERSER_LOCK,

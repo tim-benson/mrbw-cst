@@ -19,6 +19,7 @@ LICENSE:
 *************************************************************************/
 
 #include "lcd.h"
+#include "cst-common.h"   // SPEED_H_CHAR (the narrow-H unit glyph printSpeed() writes)
 #include "cst-speed.h"
 
 // 8.8 fixed-point simulated speed step, 0 .. (126<<8). Written by updateSpeed10Hz() and read by
@@ -806,21 +807,13 @@ void printSpeed(void)
 
 	uint32_t speedVal = ((uint32_t)speedQ8 * targetMax + ((126UL << 8) / 2)) / (126UL << 8);
 
-	// MAIN_SCREEN's field is a fixed 6 characters (mrbw-cst.c:1623-1628), immediately followed by the
-	// UP/DOWN function glyph in the next column. speedVal can never exceed targetMax (speedQ8 tops out
-	// exactly at 126<<8), so branching the field width on the *configured* max - not the live value -
-	// guarantees a correct, non-truncating width that stays stable as the throttle accelerates, rather
-	// than flipping padded/unpadded mid-session.
-	if(targetMax > 99)
-	{
-		printDec3Dig((uint16_t)speedVal);
-		lcd_puts((SPEED_UNIT_KMH == speedCfg[SPEED_ITEM_UNIT]) ? "KMH" : "MPH");
-	}
-	else
-	{
-		printDec2Dig((uint16_t)speedVal);
-		lcd_puts((SPEED_UNIT_KMH == speedCfg[SPEED_ITEM_UNIT]) ? "KMH " : "MPH ");
-	}
+	// One fixed 6-char field on the base / OPS MODE screen (renderBaseScreen(), lcd_gotoxy(1,1)),
+	// flanked by the function-button glyph cells at columns 0 and 7: a right-justified 3-digit number
+	// (space-padded below 100), then "MP" / "KM", then the narrow-H unit glyph. Same layout at every
+	// MAXSPEED - no format switch as the configured max or the live value crosses 100.
+	printDec3Dig((uint16_t)speedVal);
+	lcd_puts((SPEED_UNIT_KMH == speedCfg[SPEED_ITEM_UNIT]) ? "KM" : "MP");
+	lcd_putc(SPEED_H_CHAR);
 }
 
 uint8_t speedGet(uint8_t item)

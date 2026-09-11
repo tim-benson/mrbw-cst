@@ -56,6 +56,10 @@ LICENSE:
 #include <stdlib.h>
 #include <string.h>
 
+#include "../cst-common.h"   /* SPEED_H_CHAR - the narrow-H CGRAM glyph printSpeed() now writes for
+                              * the MPH/KMH unit; the lcd_putc shim below renders it back as 'H' so
+                              * the reference traces stay readable and unchanged. */
+
 /* ---- LCD capture shims -------------------------------------------------------
  * printSpeed() is the only part of cst-speed.c that calls out of the file. It uses
  * lcd_puts() plus printDec2Dig()/printDec3Dig(); those two in turn call lcd_putc().
@@ -70,6 +74,8 @@ static void lcdReset(void) { lcdLen = 0; lcdBuf[0] = '\0'; }
 
 void lcd_putc(char c)
 {
+	if ((unsigned char)c == SPEED_H_CHAR)
+		c = 'H';   /* narrow-H CGRAM glyph -> 'H' on the real LCD's MPH/KMH unit label */
 	if (lcdLen < sizeof(lcdBuf) - 1)
 	{
 		lcdBuf[lcdLen++] = c;

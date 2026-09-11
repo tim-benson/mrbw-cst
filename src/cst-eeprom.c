@@ -138,12 +138,12 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 	// EEPROM_LAYOUT_VERSION -> 4. Five SPEED bytes leave readByteOrDefault() and are read RAW below, so
 	// a stored 0xFF now means a real value (ACCEL/DECEL 0x28/0x2E = 255; HOLDFN 0x57 = OFF;
 	// ACCELADJ/DECELADJ 0x61/0x62 = -127). readByteOrDefault()'s heal-on-0xFF no longer covers a
-	// never-written byte, so seed the defaults here. Gated on != EEPROM_LAYOUT_VERSION (not < 4) so it
-	// ALSO runs on a blank/wiped chip (oldLayoutVersion 0xFF) - the one migration that does. Runs once
-	// (the version stamp at the top). 0x28/0x2E/0x57 are only rewritten if currently 0xFF (a real value
-	// is preserved); 0x61/0x62 are written to 0 unconditionally - no layout-4 chip triggers this block,
-	// so there can be no real ADJ value to lose, and B1 left them as arbitrary reserved bytes.
-	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
+	// never-written byte, so seed the defaults here. Runs for a pre-4 chip OR a blank/wiped chip
+	// (oldLayoutVersion 0xFF); NOT for a layout-4 chip (which already has real 0x61/0x62 ADJ values,
+	// written when it first upgraded to 4 - those must not be reset now that the version has moved on
+	// to 5). 0x28/0x2E/0x57 are only rewritten if currently 0xFF (a real value is preserved); 0x61/0x62
+	// are forced to 0 (a pre-4 chip never held an ADJ value there - B1 left them as reserved bytes).
+	if((oldLayoutVersion < 4) || (0xFF == oldLayoutVersion))
 	{
 		static const uint8_t rawSeedOffset[3]  = { 0x28, 0x2E, 0x57 };
 		static const uint8_t rawSeedDefault[3] = { MOMENTUM_ACCEL_CV3_DEFAULT, MOMENTUM_DECEL_CV4_DEFAULT, SPEED_HOLD_WATCH_FN_DEFAULT };
@@ -160,6 +160,28 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 					eeprom_write_byte((uint8_t*)(base + rawSeedOffset[k]), rawSeedDefault[k]);
 			eeprom_write_byte((uint8_t*)(base + 0x61), SPEED_ACCEL_ADJ_DEFAULT);
 			eeprom_write_byte((uint8_t*)(base + 0x62), SPEED_DECEL_ADJ_DEFAULT);
+		}
+	}
+
+	// EEPROM_LAYOUT_VERSION -> 5. 0x2C / 0x2D become EE_MENU_BUTTON_FUNCTION / EE_SEL_BUTTON_FUNCTION
+	// (the OPS MODE function buttons). On a v2 chip the 2->3 block above already relocated the real
+	// BRK2/BRK3 values out of 0x2C/0x2D; on any other pre-5 chip those bytes hold stale scatter data,
+	// and on a blank/wiped chip 0xFF - none of which is a valid Functions value. Seed both to FN_OFF
+	// unconditionally in every profile slot + the working config. readFunctionConfiguration() reads
+	// function bytes raw (no readByteOrDefault self-heal), so this seed is the only thing standing
+	// between an upgraded throttle and a garbage MENU BTN / SEL BTN assignment. Gated != (not <) so it
+	// also runs on a blank/wiped chip (oldLayoutVersion 0xFF), like the -> 4 block. Non-destructive:
+	// no layout-5 chip triggers this, and 0x2C/0x2D carry nothing meaningful on any pre-5 layout.
+	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
+	{
+		uint8_t s;
+		for(s = 1; s <= MAX_CONFIGS + 1; s++)
+		{
+			uint8_t cfgNum = (s <= MAX_CONFIGS) ? s : WORKING_CONFIG;
+			uint16_t base = CONFIG_OFFSET(cfgNum);
+			wdt_reset();
+			eeprom_write_byte((uint8_t*)(base + 0x2C), FN_OFF);
+			eeprom_write_byte((uint8_t*)(base + 0x2D), FN_OFF);
 		}
 	}
 }

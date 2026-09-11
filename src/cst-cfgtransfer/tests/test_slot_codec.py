@@ -108,8 +108,8 @@ def _valid_global_dict():
             "tx_holdoff_centisecs": 15,
         },
         "prefs": {
-            "config_bits": {"main_screen_speed": False, "airbrake": False, "led_blink": True,
-                             "reverser_lock": True, "strict_sleep": True},
+            "config_bits": {"main_screen_speed": False, "ops_mode": False, "airbrake": False,
+                             "led_blink": True, "reverser_lock": True, "strict_sleep": True},
             "sleep_timeout_minutes": 5,
             "alerter_timeout_minutes": 0,
             "dead_reckoning_time": 10,
@@ -146,8 +146,11 @@ class LayoutVersionRegressionTests(unittest.TestCase):
     """
 
     def test_function_fields_includes_horn2(self):
-        self.assertEqual(len(layout.FUNCTION_FIELDS), 28)
+        self.assertEqual(len(layout.FUNCTION_FIELDS), 30)
         self.assertIn(("HORN2", 0x49, 0), layout.FUNCTION_FIELDS)
+        # OPS MODE (schema 6): MENU_BUTTON / SEL_BUTTON, same attributes as UP/DOWN_BUTTON.
+        self.assertIn(("MENU_BUTTON", 0x2C, layout.FUNC_SPECIAL | layout.FUNC_MENU), layout.FUNCTION_FIELDS)
+        self.assertIn(("SEL_BUTTON", 0x2D, layout.FUNC_SPECIAL | layout.FUNC_MENU), layout.FUNCTION_FIELDS)
 
     def test_horn_threshold2_is_mirrored(self):
         self.assertEqual(layout.EE_HORN_THRESHOLD2, 0x27)
@@ -185,7 +188,7 @@ class MenuOrderTests(unittest.TestCase):
                     "COMPRESSOR", "COMPRESSOR2", "BRAKE_SET", "BRAKE_REL", "ALERTER",
                     "EMERGENCY", "FRONT_HEADLIGHT", "FRONT_DITCH", "FRONT_DIM1",
                     "FRONT_DIM2", "REAR_HEADLIGHT", "REAR_DITCH", "REAR_DIM1", "REAR_DIM2",
-                    "UP_BUTTON", "DOWN_BUTTON"]
+                    "UP_BUTTON", "DOWN_BUTTON", "MENU_BUTTON", "SEL_BUTTON"]
         self.assertEqual([k for k, _off, _a in layout.FUNCTION_FIELDS], expected)
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["functions"]), expected)
 
@@ -220,7 +223,8 @@ class MenuOrderTests(unittest.TestCase):
 
     def test_config_bits_match_prefs_menu_order(self):
         self.assertEqual(list(slot_codec.CONFIGBITS_NAMED),
-                         ["main_screen_speed", "airbrake", "led_blink", "reverser_lock", "strict_sleep"])
+                         ["main_screen_speed", "ops_mode", "airbrake", "led_blink", "reverser_lock",
+                          "strict_sleep"])
 
     def test_slot_top_level_sections_in_menu_order(self):
         # One object per menu: LOCO -> FORCE FUNC -> CONFIG FUNC -> NOTCH -> SPEED CFG -> AIRBRAKE CFG

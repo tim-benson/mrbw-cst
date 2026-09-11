@@ -33,6 +33,8 @@ typedef enum
 	REAR_DIM2_FN,
 	UP_FN,
 	DOWN_FN,
+	MENU_FN,            // "MENU BTN" - OPS MODE function button (same options as UP_FN/DOWN_FN)
+	SEL_FN,             // "SEL BTN"  - OPS MODE function button (same options as UP_FN/DOWN_FN)
 	LAST_FN,
 } Functions;
 

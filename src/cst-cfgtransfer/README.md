@@ -184,16 +184,19 @@ the objects follow the top-level menu cycle
 - **`force_functions`** (the `FORCE FUNC` menu — separate from `CONFIG FUNC`): `{"on": [...], "off":
   [...]}`, each a list of DCC function numbers (0-28) always forced on / off, independent of any
   physical control.
-- **`functions`**: 28 keys, in `CONFIG FUNC` menu order — `HORN`, `HORN2`, `BELL`, `BRAKE`, `BRAKE2`,
+- **`functions`**: 30 keys, in `CONFIG FUNC` menu order — `HORN`, `HORN2`, `BELL`, `BRAKE`, `BRAKE2`,
   `BRAKE3`, `AUX`, `ENGINE_ON`, `ENGINE_OFF`, `THR_UNLOCK`, `REV_SWAP`, `NEUTRAL`, `COMPRESSOR`,
   `COMPRESSOR2`, `BRAKE_SET`, `BRAKE_REL`, `ALERTER`, `EMERGENCY`, `FRONT_HEADLIGHT`, `FRONT_DITCH`,
   `FRONT_DIM1`, `FRONT_DIM2`, `REAR_HEADLIGHT`, `REAR_DITCH`, `REAR_DIM1`, `REAR_DIM2`, `UP_BUTTON`,
-  `DOWN_BUTTON` — each a string: `"OFF"`, `"F00_MOM"`..`"F28_MOM"` (momentary DCC function 0-28),
-  `"F00_LAT"`..`"F28_LAT"` (latching), `"EMRG"` (emergency stop — only valid on `AUX`, `ALERTER`,
-  `UP_BUTTON`, `DOWN_BUTTON`), or `"AIRBRAKE"` (opens the AIRBRAKE gauge screen — only valid on
-  `UP_BUTTON`/`DOWN_BUTTON`). `COMPRESSOR2` only appears as a selectable value on-device when
-  `airbrake.COMP_MODE` is `"CONSIST"` and the `airbrake` PREFS bit is on, but is always present in the
-  JSON regardless.
+  `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON` — each a string: `"OFF"`, `"F00_MOM"`..`"F28_MOM"`
+  (momentary DCC function 0-28), `"F00_LAT"`..`"F28_LAT"` (latching), `"EMRG"` (emergency stop — only
+  valid on `AUX`, `ALERTER`, `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`), or `"AIRBRAKE"`
+  (opens the AIRBRAKE gauge screen — only valid on `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`,
+  `SEL_BUTTON`). `MENU_BUTTON` / `SEL_BUTTON` are the OPS MODE function buttons — only driven while the
+  OPS MODE screen is active (a long-press of MENU from the base screen with the `ops_mode` PREFS bit
+  set), but always present in the JSON. `COMPRESSOR2` only appears as a selectable value on-device
+  when `airbrake.COMP_MODE` is `"CONSIST"` and the `airbrake` PREFS bit is on, but is always present
+  in the JSON regardless.
 - **`notch_speedstep`**: 8 entries, 1-126, the reverser-notch-to-DCC-speed-step table.
 - **`speed`**: decoder-family-shaped, under the exact `SPEED CFG` on-device menu names. Five fields are
   always first — `TYPE` (`"V5DCC"` / `"V5MULT"` / `"V4"`), `MAXSPEED`, `UNIT` (`"MPH"` / `"KMH"`),
@@ -253,10 +256,11 @@ Grouped one object per config menu, in top-level-menu-cycle order (`SYSTEM` → 
 - **`comm`**: `mrbus_device_address`, `mrbus_base_address`, `time_source_address`,
   `mrbus_update_interval_decisecs`, `tx_holdoff_centisecs` (`10`-`254` — the firmware heals a stored
   `0xFF` to the default).
-- **`prefs`**: `config_bits` (the five booleans `main_screen_speed`, `airbrake`, `led_blink`,
-  `reverser_lock`, `strict_sleep`, in `PREFS` order — `main_screen_speed` false = main screen shows the
-  clock, the default; `airbrake` false = AIRBRAKE off, the default), then `sleep_timeout_minutes`,
-  `alerter_timeout_minutes`, `dead_reckoning_time`.
+- **`prefs`**: `config_bits` (the six booleans `main_screen_speed`, `ops_mode`, `airbrake`,
+  `led_blink`, `reverser_lock`, `strict_sleep`, in `PREFS` order — `main_screen_speed` false = main
+  screen shows the clock, the default; `ops_mode` false = OPS MODE off, the default; `airbrake` false
+  = AIRBRAKE off, the default), then `sleep_timeout_minutes`, `alerter_timeout_minutes`,
+  `dead_reckoning_time`.
 - **`calibration`**: `horn_threshold`, `horn_threshold2`, `brake_threshold`, `brake_low_threshold`,
   `brake_high_threshold` (the `THRESHOLD CAL` lever-position captures).
 
