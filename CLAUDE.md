@@ -1025,17 +1025,30 @@ four; the menu-cycle entry keeps its stock behaviour. The triggering button mome
 at every open site so a still-held button cannot re-open the gauge on return, and while either flag is
 set the top-level `MENU` handler is bypassed.
 
-**CGRAM.** `LCD_OPS` / `LCD_OPS_SPEED` (`LcdMode`) are used by the base screen regardless of the pref,
-selected by `baseScreenLcdMode()` off `CONFIGBITS_MAIN_SCREEN_SPEED`. They are `LCD_DEFAULT` with slot
-6 (`PSI_CHAR_L`, rendered only on the `AIRBRAKE` DUAL screen) reused as `AIRBRAKE_GLYPH_CHAR`, slot 7
-(`PSI_CHAR_R`) reused as `OPS_FN_ACTIVE_CHAR`, and — under `LCD_OPS_SPEED` only — slot 3 (`AM_CHAR`)
-reused as `SPEED_H_CHAR`, the narrow "H" of `MPH` / `KMH` in the running speed readout. The
-`AM_CHAR` / `SPEED_H_CHAR` reuse is safe because the SPEED readout and the AM/PM clock indicator are
-mutually exclusive (`CONFIGBITS_MAIN_SCREEN_SPEED` picks one), and `baseScreenLcdMode()` and
-`renderBaseScreen()` read that bit in the same pass. Every transition to a menu or `AIRBRAKE` screen
-forces `LCD_DEFAULT`, whose `currentMode` guard reloads the displaced `PSI` / `AM` / `PM` glyphs;
-changing the `DISPLAY` pref always round-trips through `LCD_DEFAULT`. The battery `FULL` / `HALF` /
-`EMPTY` glyphs are narrow 3-pixel bitmaps.
+**CGRAM.** `MAIN_SCREEN` and `OPS_MODE_SCREEN` each use their own `LcdMode` palette — `LCD_MAIN` /
+`LCD_MAIN_SPEED` and `LCD_OPS` / `LCD_OPS_SPEED` respectively, selected by `baseScreenLcdMode(opsScreen)`
+off `CONFIGBITS_MAIN_SCREEN_SPEED`. Both palettes are `LCD_DEFAULT`-shaped with slot 6 (`PSI_CHAR_L`,
+rendered only on the `AIRBRAKE` DUAL screen) reused as `AIRBRAKE_GLYPH_CHAR`, and — under the `_SPEED`
+variants only — slot 3 reused as `SPEED_H_CHAR`, the narrow "H" of `MPH` / `KMH` in the running speed
+readout; the non-speed variants hold `AMPM_CHAR` (the clock indicator, see below) in that same slot
+instead. `LCD_MAIN`(`_SPEED`) additionally loads slot 7 (`PSI_CHAR_R`) as `OPS_FN_ACTIVE_CHAR`;
+`LCD_OPS`(`_SPEED`) does not — `OPS_MODE_SCREEN` never draws that glyph, only the plain base screen
+"still latched" reminder needs it — leaving that slot genuinely free on `OPS_MODE_SCREEN`: one slot of
+headroom for future glyph work there. Slot 4 (`LOAD_CHAR`) is permanently reserved on all four palette
+variants — see "LOAD button function" below. Every transition to a menu or `AIRBRAKE` screen forces
+`LCD_DEFAULT`, whose `currentMode` guard reloads the displaced `PSI` glyphs; changing the `DISPLAY` pref
+always round-trips through `LCD_DEFAULT`. The battery `FULL` / `HALF` / `EMPTY` glyphs are narrow 3-pixel
+bitmaps.
+
+**AM/PM clock indicator (`AMPM_CHAR`).** One dynamically-rewritten slot rather than the two static ones
+(`AM_CHAR`/`PM_CHAR`) this replaced, since the clock is drawn at exactly one screen position and changes
+at most twice a day. `invalidateAmPmChar()` (`cst-time.h`) is the only thing `setupLCD()` calls on
+entering `LCD_MAIN` or `LCD_OPS` (the non-speed variants) — it resets a tracked sentinel rather than
+writing a bitmap, since there is no live "current AM/PM" value available outside a render pass for
+`cst-lcd.c` to write from. The guaranteed same-pass call to `printTime()` from `renderBaseScreen()` then
+performs the actual write, inside `displayTime()` (`cst-time.c`), only when the AM/PM state differs from
+what is already drawn — mirroring the change-detection in `printBattery()` (`cst-battery.c`), and the same
+"runtime-only, never written by `setupLCD()`" contract `LOAD_CHAR` already uses.
 
 **EEPROM layout 4 → 5.** `EE_MENU_BUTTON_FUNCTION` / `EE_SEL_BUTTON_FUNCTION` occupy the freed
 per-profile holes `0x2C` / `0x2D` (former SPEED `BRK2` / `BRK3` scatter slots). The migration seeds
@@ -1072,19 +1085,16 @@ different states with no rewriting at all. A single dynamically-rewritten slot i
 exactly one corner references it; two simultaneous holders in different states would show whichever was
 written most recently at both corners, since CGRAM slot content is global, not per-cell.
 
-**CGRAM.** The indicator (`LOAD_CHAR`, `cst-lcd.c` / `cst-common.h`) reuses the `PM_CHAR` slot (4). Safe
-because LOAD can only ever be assigned while SPEED is enabled, exactly the condition that selects
-`LCD_OPS_SPEED` over `LCD_OPS` (AM/PM not shown — see "OPS MODE screen" CGRAM above) — except that
-`CONFIGBITS_MAIN_SCREEN_SPEED` is edited live in RAM from PREFS with no save required, so it can flip on
-the very next render pass while a button still stores a stale `FN_LOAD` from before. Every runtime use
-therefore goes through `loadActive(fn)` / `loadEligible()` (`mrbw-cst.c`) rather than the bare
-`isFunctionLoad(fn)` — the press-edge advance, the `functionMask` assembly, `buttonCornerGlyph()`, and the
-`renderBaseScreen()` rewrite of `LOAD_CHAR` itself. Without that live re-check, `setupLoadChar()` would
-overwrite the CGRAM slot `setupLCD()` had just correctly reloaded for the real PM glyph in the same pass,
-corrupting the AM/PM indicator until some unrelated mode transition happened to reload clock chars again.
-This borrowed-slot design is a consequence of `MAIN_SCREEN` and `OPS_MODE_SCREEN` sharing one CGRAM
-palette; a future split of that palette would let `LOAD_CHAR` become a plain, unconditionally-resident
-static glyph like `AIRBRAKE_GLYPH_CHAR`, removing the need for this live gate.
+**CGRAM.** The indicator (`LOAD_CHAR`, `cst-lcd.c` / `cst-common.h`) is a permanently-reserved slot (4) on
+both `LCD_MAIN`(`_SPEED`) and `LCD_OPS`(`_SPEED`) — see "OPS MODE screen" CGRAM above for the palette
+split that freed this slot unconditionally (no longer dependent on `DISPLAY`, unlike when it borrowed the
+old `PM_CHAR` slot). `setupLCD()` never writes this slot in any mode — it stays exclusively managed by the
+runtime `setupLoadChar()` call from `renderBaseScreen()`, tracking whichever of the four buttons currently
+holds LOAD. `loadActive(fn)` / `loadEligible()` (`mrbw-cst.c`) still gate every runtime use of LOAD — the
+press-edge advance, the `functionMask` assembly, `buttonCornerGlyph()`, and the `setupLoadChar()` call
+itself — but this is now a product-behavior choice rather than a CGRAM-safety requirement: an
+already-assigned LOAD button is deliberately left going fully inert the moment `DISPLAY` drops back to
+`CLOCK`, matching the behavior from before the palette split.
 
 **Base-screen "Fn active" reminder.** A LOAD-configured `MENU_FN` / `SEL_FN` never sets the
 `optionButtonState` bit (its press-edge handler advances the persistent `LoadMode` state directly instead

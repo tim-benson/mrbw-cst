@@ -10,8 +10,10 @@ typedef enum
 	LCD_DIAGS,
 	LCD_AIRBRAKE_ALT,
 	LCD_SPEED_ADJ,     // = LCD_DEFAULT with the AUX CGRAM slot reused for the "+/-" glyph (SPEED CFG ACCEL/DECEL adjust items)
-	LCD_OPS,           // base screen + OPS MODE screen CGRAM (used regardless of the OPS MODE pref): PSI_CHAR_L -> AIRBRAKE "A" glyph, PSI_CHAR_R -> OPS "Fn active" glyph
-	LCD_OPS_SPEED      // = LCD_OPS with the AM_CHAR slot reused for the narrow "H" of MPH/KMH - selected when the DISPLAY pref shows SPEED (never both AM/PM and the SPEED readout)
+	LCD_MAIN,          // MAIN_SCREEN CGRAM: PSI_CHAR_L -> AIRBRAKE "A" glyph, PSI_CHAR_R -> OPS "Fn active" glyph, AMPM_CHAR shown
+	LCD_MAIN_SPEED,    // = LCD_MAIN with the AMPM_CHAR slot reused for the narrow "H" of MPH/KMH - selected when the DISPLAY pref shows SPEED (never both AM/PM and the SPEED readout)
+	LCD_OPS,           // OPS_MODE_SCREEN CGRAM: same as LCD_MAIN minus OPS_FN_ACTIVE_CHAR (OPS_MODE_SCREEN never draws its own "Fn active" reminder - that glyph exists only for the base screen), leaving one slot genuinely free
+	LCD_OPS_SPEED      // = LCD_OPS with the AMPM_CHAR slot reused for the narrow "H" of MPH/KMH, same as LCD_MAIN_SPEED
 } LcdMode;
 
 void displaySplashScreen(void);

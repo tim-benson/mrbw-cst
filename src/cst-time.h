@@ -20,7 +20,12 @@ typedef struct
 	uint16_t year;
 } TimeData;
 
-void setupClockChars(void);
+// Resets the AM/PM change-detection sentinel so the next displayTime() call is guaranteed to
+// (re)write AMPM_CHAR's bitmap, regardless of whether the tracked AM/PM value happens to already
+// match - call once whenever setupLCD() enters LCD_MAIN or LCD_OPS (the non-speed variants), since
+// slot 3 may have been clobbered by an intervening mode (e.g. SPEED_H_CHAR, or nothing at all).
+// Deliberately does not write a bitmap itself - see cst-time.c.
+void invalidateAmPmChar(void);
 void incrementTime(TimeData* t, uint8_t incSeconds);
 void displayTime(TimeData* time, uint8_t ampm);
 void printTime(void);

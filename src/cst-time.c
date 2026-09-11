@@ -40,6 +40,10 @@ static volatile uint8_t scaleTenthsAccum = 0;
 static uint8_t maxDeadReckoningTime = 150;
 static uint16_t deadReckoningTime = 0;
 
+// AMPM_CHAR change-detection - see displayTime() and invalidateAmPmChar(). 0xFF is not a valid
+// boolean, so it forces the first real check after any invalidation to always write.
+static uint8_t lastAmPm = 0xFF;
+
 const uint8_t ClockAM[8] =
 {
 	0b00001000,
@@ -64,10 +68,16 @@ const uint8_t ClockPM[8] =
 	0b00000000
 };
 
-void setupClockChars(void)
+// Resets the change-detection sentinel so the next displayTime() call is guaranteed to write
+// AMPM_CHAR's bitmap - see cst-time.h. Deliberately does not write a bitmap itself: unlike
+// cst-battery.c's batteryState (a live, globally-maintained value with no "guessing" involved),
+// isPm only exists transiently inside displayTime() below, so there is no correct value to write
+// from here. renderBaseScreen() always calls printTime() in the same pass, immediately after
+// setupLCD(), so deferring to that guaranteed same-pass call is correct by construction - the same
+// "runtime-only, never written by setupLCD()" contract LOAD_CHAR already uses (cst-common.h).
+void invalidateAmPmChar(void)
 {
-	lcd_setup_custom(AM_CHAR, ClockAM);
-	lcd_setup_custom(PM_CHAR, ClockPM);
+	lastAmPm = 0xFF;
 }
 
 void incrementTime(TimeData* t, uint8_t incSeconds)
@@ -119,11 +129,17 @@ void displayTime(TimeData* time, uint8_t ampm)
 			displayCharacters[1] = '0' + (hrs % 10);
 		}
 
-		if (time->hours >= 12)
-			displayCharacters[5] = PM_CHAR;
-		else	
-			displayCharacters[5] = AM_CHAR;
-
+		// Change-detected rewrite (mirrors cst-battery.c's printBattery()): only touches CGRAM when
+		// the AM/PM state actually differs from what is currently drawn, so this costs a real write
+		// at most twice a day in steady state, plus once whenever invalidateAmPmChar() forces it
+		// after a mode transition that may have clobbered slot 3 (see cst-time.h).
+		uint8_t isPm = (time->hours >= 12);
+		if(isPm != lastAmPm)
+		{
+			lcd_setup_custom(AMPM_CHAR, isPm ? ClockPM : ClockAM);
+			lastAmPm = isPm;
+		}
+		displayCharacters[5] = AMPM_CHAR;
 	}
 	else
 	{

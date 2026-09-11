@@ -160,8 +160,9 @@ void setupPsiChars(void)
 
 // OPS MODE "Fn active" reminder glyph - a stylised "Fn". Shown on the base screen (OPS MODE enabled
 // but exited) at column 0 while a MENU BTN / SEL BTN function is still latched on. Occupies the
-// PSI_CHAR_R slot under LCD_OPS - the AIRBRAKE screen (the only other PSI_CHAR_R user) forces
-// LCD_DEFAULT, which reloads PSI_CHAR_R.
+// PSI_CHAR_R slot, loaded only under LCD_MAIN / LCD_MAIN_SPEED - OPS_MODE_SCREEN's own LCD_OPS /
+// LCD_OPS_SPEED never draws this glyph, so it is left unloaded there (the genuinely free slot). The
+// AIRBRAKE screen (the only other PSI_CHAR_R user) forces LCD_DEFAULT, which reloads PSI_CHAR_R.
 const uint8_t OpsFnActive[8] =
 {
 	0b00011100,
@@ -181,8 +182,9 @@ void setupOpsChars(void)
 
 // Bold "A" glyph shown on an AIRBRAKE-bound button corner (UP/DOWN/MENU/SEL BTN = AIRBRAKE), in
 // place of the softkey circle - the button jumps to the AIRBRAKE gauge rather than driving a DCC
-// function. Occupies the PSI_CHAR_L slot under LCD_OPS / LCD_OPS_SPEED; the AIRBRAKE DUAL screen
-// reloads PSI_CHAR_L on its own LCD_DEFAULT mode change.
+// function. Occupies the PSI_CHAR_L slot, loaded on all four base-screen modes (LCD_MAIN /
+// LCD_MAIN_SPEED / LCD_OPS / LCD_OPS_SPEED - both screens' corners can be AIRBRAKE-bound); the
+// AIRBRAKE DUAL screen reloads PSI_CHAR_L on its own LCD_DEFAULT mode change.
 const uint8_t AirbrakeGlyph[8] =
 {
 	0b00000000,
@@ -201,9 +203,9 @@ void setupAirbrakeGlyphChar(void)
 }
 
 // Narrow "H" for the MPH/KMH unit in the running SPEED readout (printSpeed()), tighter than the
-// font-ROM 'H' so the 6-char readout field reads less cramped. Occupies the AM_CHAR slot under
-// LCD_OPS_SPEED - only loaded when the DISPLAY pref shows SPEED, so it never collides with the
-// AM/PM clock indicator.
+// font-ROM 'H' so the 6-char readout field reads less cramped. Occupies the AMPM_CHAR slot under
+// LCD_MAIN_SPEED / LCD_OPS_SPEED - only loaded when the DISPLAY pref shows SPEED, so it never
+// collides with the AM/PM clock indicator.
 const uint8_t SpeedNarrowH[8] =
 {
 	0b00010010,
@@ -221,8 +223,8 @@ void setupSpeedHChar(void)
 	lcd_setup_custom(SPEED_H_CHAR, SpeedNarrowH);
 }
 
-// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD) OFF/OPLOAD/PRLOAD glyphs. Occupies the PM_CHAR slot
-// under LCD_OPS_SPEED - see cst-common.h's LOAD_CHAR definition for why this is safe.
+// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD) OFF/OPLOAD/PRLOAD glyphs. Occupies the LOAD_CHAR slot,
+// permanently reserved on LCD_MAIN* / LCD_OPS* - see cst-common.h's LOAD_CHAR definition.
 const uint8_t LoadOff[8] =
 {
 	0b00000000,
@@ -722,9 +724,12 @@ void setupLCD(LcdMode mode)
 			case LCD_RESET:
 				break;
 			case LCD_DEFAULT:
+				// No clock glyph here: printTime() (the only reader of AMPM_CHAR) is only ever
+				// reached from renderBaseScreen(), which is only entered under LCD_MAIN*/LCD_OPS* -
+				// never LCD_DEFAULT. Loading it here would be dead weight (confirmed: no screen that
+				// uses LCD_DEFAULT - menu screens, the AIRBRAKE DUAL view - ever calls printTime()).
 				setupBatteryChar();
 				setupSoftkeyChars();
-				setupClockChars();
 				setupAuxChars();
 				setupPsiChars();
 				break;
@@ -736,7 +741,7 @@ void setupLCD(LcdMode mode)
 				// No static setup here - all 8 cells are rewritten every render pass by
 				// setupGaugeChars() instead (the needle moves live). This case only exists so
 				// currentMode tracks reality, letting a later setupLCD(LCD_DEFAULT) correctly
-				// detect the change and reload the battery/softkey/clock/aux/PSI glyphs.
+				// detect the change and reload the battery/softkey/aux/PSI glyphs.
 				break;
 			case LCD_SPEED_ADJ:
 				// = LCD_DEFAULT with the AUX slot reused for the "+/-" glyph. SPEED CFG is always
@@ -744,22 +749,31 @@ void setupLCD(LcdMode mode)
 				// menu-exit setupLCD(LCD_DEFAULT) restores AUX because currentMode changed here.
 				setupPlusMinusChar();
 				break;
+			case LCD_MAIN:
+			case LCD_MAIN_SPEED:
 			case LCD_OPS:
 			case LCD_OPS_SPEED:
-				// The base screen + OPS MODE screen CGRAM set (used regardless of the OPS MODE pref).
-				// PSI_CHAR_L -> the AIRBRAKE "A" button-corner glyph, PSI_CHAR_R -> the OPS "Fn active"
-				// glyph - both reloaded to the PSI glyphs by the AIRBRAKE DUAL screen / a menu, which
-				// force LCD_DEFAULT. LCD_OPS_SPEED additionally reuses the AM_CHAR slot for the narrow
-				// "H" (DISPLAY = SPEED); LCD_OPS keeps AM/PM (DISPLAY = CLOCK).
+				// MAIN_SCREEN (LCD_MAIN*) and OPS_MODE_SCREEN (LCD_OPS*) each get their own palette -
+				// PSI_CHAR_L -> the AIRBRAKE "A" button-corner glyph on both (reloaded to the PSI
+				// glyph by the AIRBRAKE DUAL screen / a menu, which force LCD_DEFAULT). PSI_CHAR_R ->
+				// the OPS "Fn active" glyph, loaded only under LCD_MAIN* - OPS_MODE_SCREEN never
+				// draws it (renderBaseScreen() only references OPS_FN_ACTIVE_CHAR when opsScreen is
+				// false), so LCD_OPS* leaves that slot genuinely free. LOAD_CHAR (slot 4) is
+				// deliberately never written here in any of the four cases - it stays exclusively
+				// runtime-managed by renderBaseScreen()'s setupLoadChar() call (see cst-common.h).
+				// The _SPEED variants reuse AMPM_CHAR's slot for the narrow "H" unit glyph instead;
+				// the non-speed variants only invalidate the AM/PM sentinel here, never write a
+				// bitmap directly - see invalidateAmPmChar() (cst-time.h) for why.
 				setupBatteryChar();
 				setupSoftkeyChars();
 				setupAuxChars();
 				setupAirbrakeGlyphChar();
-				setupOpsChars();
-				if(LCD_OPS_SPEED == mode)
+				if((LCD_MAIN == mode) || (LCD_MAIN_SPEED == mode))
+					setupOpsChars();
+				if((LCD_MAIN_SPEED == mode) || (LCD_OPS_SPEED == mode))
 					setupSpeedHChar();
 				else
-					setupClockChars();
+					invalidateAmPmChar();
 				break;
 		}
 		currentMode = mode;

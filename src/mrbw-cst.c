@@ -1584,8 +1584,9 @@ static uint8_t loadActive(Functions fn)
 }
 
 // The corner glyph for a configurable button (UP / DOWN / MENU / SEL): the "A" glyph
-// (AIRBRAKE_GLYPH_CHAR, loaded by baseScreenLcdMode()'s LCD_OPS / LCD_OPS_SPEED) if the button opens
-// the AIRBRAKE gauge - a screen jump, not a DCC function, so the softkey circle would be meaningless.
+// (AIRBRAKE_GLYPH_CHAR, loaded by baseScreenLcdMode()'s LCD_MAIN* / LCD_OPS* - both screens' base
+// palettes carry it) if the button opens the AIRBRAKE gauge - a screen jump, not a DCC function, so
+// the softkey circle would be meaningless.
 // The LOAD glyph (LOAD_CHAR) if the button is LOAD and currently eligible - loadActive(), not the
 // bare isFunctionLoad(), so a now-ineligible stale LOAD assignment falls back to the ordinary circle
 // instead of pointing at a slot that may no longer hold a LOAD bitmap. Otherwise the filled/hollow
@@ -1600,14 +1601,18 @@ static char buttonCornerGlyph(Functions fn, uint8_t asserting)
 	return (asserting && !isFunctionOff(fn)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR;
 }
 
-// The base screen and the OPS MODE screen use this CGRAM set regardless of the OPS MODE pref. The
-// only difference between the two variants is the AM_CHAR slot: the SPEED readout needs the narrow-H
-// unit glyph there, the CLOCK readout needs AM/PM - and the two readouts are mutually exclusive
-// (DISPLAY pref). renderBaseScreen() picks printSpeed()/printTime() off the same bit in the same
-// pass, so the loaded CGRAM always matches what is drawn.
-static LcdMode baseScreenLcdMode(void)
+// MAIN_SCREEN and OPS_MODE_SCREEN each get their own CGRAM palette (LCD_MAIN* / LCD_OPS* - see
+// cst-lcd.h/cst-common.h) - opsScreen picks which pair, CONFIGBITS_MAIN_SCREEN_SPEED picks the
+// _SPEED variant within it: the SPEED readout needs the narrow-H unit glyph in slot 3, the CLOCK
+// readout needs AMPM_CHAR there - and the two readouts are mutually exclusive (DISPLAY pref).
+// renderBaseScreen() picks printSpeed()/printTime() off the same bit in the same pass, so the
+// loaded CGRAM always matches what is drawn.
+static LcdMode baseScreenLcdMode(uint8_t opsScreen)
 {
-	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? LCD_OPS_SPEED : LCD_OPS;
+	uint8_t speed = (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? 1 : 0;
+	if(opsScreen)
+		return speed ? LCD_OPS_SPEED : LCD_OPS;
+	return speed ? LCD_MAIN_SPEED : LCD_MAIN;
 }
 
 // The AUX indicator glyph, or a blank. Suppressed when the AUX button drives the very DCC function
@@ -2253,11 +2258,11 @@ int main(void)
 			case MAIN_SCREEN:
 				if(!subscreenState)
 				{
-					// The base screen uses the LCD_OPS / LCD_OPS_SPEED CGRAM set (narrow battery, the
-					// AIRBRAKE "A" glyph, the narrow-H unit glyph or AM/PM); the OPS MODE pref only
+					// The base screen uses its own LCD_MAIN / LCD_MAIN_SPEED CGRAM set (narrow battery,
+					// the AIRBRAKE "A" glyph, the narrow-H unit glyph or AM/PM); the OPS MODE pref only
 					// shifts the layout (renderBaseScreen). setupLCD()'s currentMode guard makes the
 					// repeat call free.
-					setupLCD(baseScreenLcdMode());
+					setupLCD(baseScreenLcdMode(0));
 					renderBaseScreen(0, backlight, optionButtonState, activeReverserSetting, reverserPosition_tmp);
 					switch(button)
 					{
@@ -2387,8 +2392,10 @@ int main(void)
 				// OPS MODE - the base screen with MENU/SELECT freed to drive MENU BTN / SEL BTN
 				// (same momentary/latching options as UP BTN / DOWN BTN). Entered by a long-press of
 				// MENU from the base screen, left by a long-press of MENU here. UP/DOWN behave exactly
-				// as on the main screen. Same CGRAM set as the base screen (see baseScreenLcdMode()).
-				setupLCD(baseScreenLcdMode());
+				// as on the main screen. Its own LCD_OPS / LCD_OPS_SPEED CGRAM set (see
+				// baseScreenLcdMode()) - one slot lighter than the base screen's, since this screen
+				// never draws the "Fn active" reminder glyph.
+				setupLCD(baseScreenLcdMode(1));
 				renderBaseScreen(1, backlight, optionButtonState, activeReverserSetting, reverserPosition_tmp);
 
 				// opsMenuIgnoreUntilRelease (set on entry, so the still-held MENU cannot immediately
@@ -2682,7 +2689,7 @@ int main(void)
 						// If MENU was the button used to return, ignore it in OPS MODE until released
 						// so a still-held MENU cannot immediately trip the OPS MODE exit long-press.
 						opsMenuIgnoreUntilRelease = (MENU_BUTTON == button);
-						setupLCD(baseScreenLcdMode());
+						setupLCD(baseScreenLcdMode(1));
 						screenState = OPS_MODE_SCREEN;
 						lcd_clrscr();
 					}
@@ -5472,7 +5479,8 @@ int main(void)
 					// (MAIN_SCREEN != screenState): once a long-press has already landed back on the
 					// main screen, stop re-firing every pass while MENU stays held - otherwise the
 					// screen bounces main -> LAST_SCREEN -> main (a visible CGRAM reload flicker,
-					// since the base screen uses LCD_OPS / LCD_OPS_SPEED).
+					// since the base screen uses its own LCD_MAIN / LCD_MAIN_SPEED CGRAM set, distinct
+					// from LAST_SCREEN's LCD_DEFAULT).
 					else if(MAIN_SCREEN != screenState)
 					{
 						// Reset menu on long press
