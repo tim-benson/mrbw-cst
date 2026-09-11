@@ -85,6 +85,7 @@ def _encode_functions(d, errors, allow_missing=False):
     only genuine absence is relaxed."""
     out = {}
     keys_seen = set()
+    load_keys = []
     for key, offset, attrs in layout.FUNCTION_FIELDS:
         keys_seen.add(key)
         if key not in d:
@@ -100,7 +101,20 @@ def _encode_functions(d, errors, allow_missing=False):
         if value == layout.FN_AIRBRAKE and not (attrs & layout.FUNC_MENU):
             errors.append("functions.%s: AIRBRAKE is not valid here (only UP_BUTTON, DOWN_BUTTON, "
                            "MENU_BUTTON, SEL_BUTTON support it)" % key)
+        if value == layout.FN_LOAD:
+            if attrs & layout.FUNC_LOAD:
+                load_keys.append(key)
+            else:
+                errors.append("functions.%s: LOAD is not valid here (only UP_BUTTON, DOWN_BUTTON, "
+                               "MENU_BUTTON, SEL_BUTTON support it)" % key)
         out[offset] = value
+    if len(load_keys) > 1:
+        # Firmware-enforced restriction (loadUsedElsewhere(), cst-functions.c): LOAD's CGRAM indicator
+        # is one shared, dynamically-rewritten slot, so two simultaneous holders would each overwrite
+        # it with their own state - see CLAUDE.md's "LOAD button function". The on-device menu can never
+        # produce this, but a hand-edited JSON could, so it is rejected here too.
+        errors.append("functions: LOAD is assigned to more than one button (%s) - only one at a time "
+                       "is valid" % ", ".join(load_keys))
     unknown = set(d.keys()) - keys_seen
     for key in unknown:
         errors.append("functions.%s: unknown field" % key)

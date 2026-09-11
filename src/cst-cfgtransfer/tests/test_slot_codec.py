@@ -149,8 +149,9 @@ class LayoutVersionRegressionTests(unittest.TestCase):
         self.assertEqual(len(layout.FUNCTION_FIELDS), 30)
         self.assertIn(("HORN2", 0x49, 0), layout.FUNCTION_FIELDS)
         # OPS MODE (schema 6): MENU_BUTTON / SEL_BUTTON, same attributes as UP/DOWN_BUTTON.
-        self.assertIn(("MENU_BUTTON", 0x2C, layout.FUNC_SPECIAL | layout.FUNC_MENU), layout.FUNCTION_FIELDS)
-        self.assertIn(("SEL_BUTTON", 0x2D, layout.FUNC_SPECIAL | layout.FUNC_MENU), layout.FUNCTION_FIELDS)
+        expected_attrs = layout.FUNC_SPECIAL | layout.FUNC_MENU | layout.FUNC_LOAD
+        self.assertIn(("MENU_BUTTON", 0x2C, expected_attrs), layout.FUNCTION_FIELDS)
+        self.assertIn(("SEL_BUTTON", 0x2D, expected_attrs), layout.FUNCTION_FIELDS)
 
     def test_horn_threshold2_is_mirrored(self):
         self.assertEqual(layout.EE_HORN_THRESHOLD2, 0x27)
@@ -342,6 +343,32 @@ class SlotRoundTripTests(unittest.TestCase):
             encoded = slot_codec.encode_slot(d)
             decoded = slot_codec.decode_slot(encoded, source=d["source"])
             self.assertEqual(decoded["functions"]["HORN"], value)
+
+    def test_load_fn_round_trips_on_a_button(self):
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "LOAD"
+        encoded = slot_codec.encode_slot(d)
+        offsets = {k: off for k, off, _a in layout.FUNCTION_FIELDS}
+        self.assertEqual(encoded[offsets["UP_BUTTON"]], layout.FN_LOAD)
+        decoded = slot_codec.decode_slot(encoded, source=d["source"])
+        self.assertEqual(decoded["functions"]["UP_BUTTON"], "LOAD")
+
+    def test_load_fn_valid_on_load_func_only(self):
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "LOAD"
+        slot_codec.encode_slot(d)  # should not raise
+
+        d2 = _valid_slot_dict()
+        d2["functions"]["AUX"] = "LOAD"  # SPECIAL but not LOAD-capable
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d2)
+
+    def test_load_fn_rejected_on_more_than_one_button(self):
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "LOAD"
+        d["functions"]["DOWN_BUTTON"] = "LOAD"
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d)
 
     def test_emrg_valid_on_special_func_only(self):
         d = _valid_slot_dict()

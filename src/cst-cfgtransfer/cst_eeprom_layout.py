@@ -117,10 +117,12 @@ LOCO_ADDRESS_LONG_MAX = 9999
 # attributes mirrors cst-functions.c's FunctionData.attributes bitfield:
 #   FUNC_SPECIAL -> may be set to EMRG (FN_EMRG)
 #   FUNC_MENU    -> may be set to AIRBRAKE (FN_AIRBRAKE)
+#   FUNC_LOAD    -> may be set to LOAD (FN_LOAD)
 # (FUNC_LATCH/SOFTWARE_LATCH only gates what the on-device increment/decrement UI can reach; it doesn't
 # restrict what byte value is valid, so it's not enforced by this tool's validation.)
 FUNC_SPECIAL = 0x02
 FUNC_MENU = 0x04
+FUNC_LOAD = 0x08
 
 # Listed in on-device CONFIG FUNC menu order - which is exactly the `Functions` enum in
 # src/cst-functions.h, since advanceCurrentFunction() just does `currentFunction++` (the functions[]
@@ -156,10 +158,10 @@ FUNCTION_FIELDS = [
     ("REAR_DITCH",       0x0F, 0),
     ("REAR_DIM1",        0x0C, 0),
     ("REAR_DIM2",        0x0D, 0),
-    ("UP_BUTTON",        0x10, FUNC_SPECIAL | FUNC_MENU),
-    ("DOWN_BUTTON",      0x11, FUNC_SPECIAL | FUNC_MENU),
-    ("MENU_BUTTON",      0x2C, FUNC_SPECIAL | FUNC_MENU),  # OPS MODE - was a freed SPEED BRK2 scatter slot
-    ("SEL_BUTTON",       0x2D, FUNC_SPECIAL | FUNC_MENU),  # OPS MODE - was a freed SPEED BRK3 scatter slot
+    ("UP_BUTTON",        0x10, FUNC_SPECIAL | FUNC_MENU | FUNC_LOAD),
+    ("DOWN_BUTTON",      0x11, FUNC_SPECIAL | FUNC_MENU | FUNC_LOAD),
+    ("MENU_BUTTON",      0x2C, FUNC_SPECIAL | FUNC_MENU | FUNC_LOAD),  # OPS MODE - was a freed SPEED BRK2 scatter slot
+    ("SEL_BUTTON",       0x2D, FUNC_SPECIAL | FUNC_MENU | FUNC_LOAD),  # OPS MODE - was a freed SPEED BRK3 scatter slot
 ]
 
 EE_BRAKE_PULSE_WIDTH = 0x16
@@ -451,6 +453,7 @@ AIRBRAKE_FIELDS = [
 # --- FunctionValues encoding (cst-functions.h) ---
 FN_OFF = 0x80
 FN_EMRG = 0x81
+FN_LOAD = 0x82  # UP_BUTTON/DOWN_BUTTON/MENU_BUTTON/SEL_BUTTON only - see FUNC_LOAD above
 FN_AIRBRAKE = 0xC0  # was FN_BRKTEST - value unchanged
 FN_MAX_NUM = 28
 
@@ -467,9 +470,11 @@ def _build_function_value_maps():
         name_to_value[lat_name] = 0x40 + n
     value_to_name[FN_OFF] = "OFF"
     value_to_name[FN_EMRG] = "EMRG"
+    value_to_name[FN_LOAD] = "LOAD"
     value_to_name[FN_AIRBRAKE] = "AIRBRAKE"
     name_to_value["OFF"] = FN_OFF
     name_to_value["EMRG"] = FN_EMRG
+    name_to_value["LOAD"] = FN_LOAD
     name_to_value["AIRBRAKE"] = FN_AIRBRAKE
     return value_to_name, name_to_value
 

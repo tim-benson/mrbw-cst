@@ -190,11 +190,14 @@ the objects follow the top-level menu cycle
   `FRONT_DIM1`, `FRONT_DIM2`, `REAR_HEADLIGHT`, `REAR_DITCH`, `REAR_DIM1`, `REAR_DIM2`, `UP_BUTTON`,
   `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON` — each a string: `"OFF"`, `"F00_MOM"`..`"F28_MOM"`
   (momentary DCC function 0-28), `"F00_LAT"`..`"F28_LAT"` (latching), `"EMRG"` (emergency stop — only
-  valid on `AUX`, `ALERTER`, `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`), or `"AIRBRAKE"`
+  valid on `AUX`, `ALERTER`, `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`), `"AIRBRAKE"`
   (opens the AIRBRAKE gauge screen — only valid on `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`,
-  `SEL_BUTTON`). `MENU_BUTTON` / `SEL_BUTTON` are the OPS MODE function buttons — only driven while the
-  OPS MODE screen is active (a long-press of MENU from the base screen with the `ops_mode` PREFS bit
-  set), but always present in the JSON. `COMPRESSOR2` only appears as a selectable value on-device
+  `SEL_BUTTON`), or `"LOAD"` (cycles the SPEED CFG `OPLOADFN`/`PRLOADFN` load simulation on each press
+  — only valid on `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`, and rejected on more than
+  one of those four at once, mirroring the on-device firmware restriction). `MENU_BUTTON` /
+  `SEL_BUTTON` are the OPS MODE function buttons — only driven while the OPS MODE screen is active (a
+  long-press of MENU from the base screen with the `ops_mode` PREFS bit set), but always present in
+  the JSON. `COMPRESSOR2` only appears as a selectable value on-device
   when `airbrake.COMP_MODE` is `"CONSIST"` and the `airbrake` PREFS bit is on, but is always present
   in the JSON regardless.
 - **`notch_speedstep`**: 8 entries, 1-126, the reverser-notch-to-DCC-speed-step table.

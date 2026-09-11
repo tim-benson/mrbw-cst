@@ -1136,9 +1136,18 @@ since both conditions drop `loadEligible()` to false.
 
 No `EEPROM_LAYOUT_VERSION` bump: `FN_LOAD` is a new value within the existing function-value byte range
 (same encoding as `FN_OFF` / `FN_EMRG` / `FN_AIRBRAKE`), not a new field or repurposed byte — same
-precedent as the `V4` split of `SPEED_TYPE_V5MULT`. **PC tooling**: `slot_codec.py` does not yet decode or
-encode a `"LOAD"` function-value string — export/import of a profile with a button configured to LOAD is
-not yet correctly round-tripped by `cst_cfgtransfer.py` / `cst_cfgnetwork.py`.
+precedent as the `V4` split of `SPEED_TYPE_V5MULT`. No `SLOT_SCHEMA_VERSION` bump either, for the same
+reason `"AIRBRAKE"` never needed one: a new legal string within an existing field type, not a JSON shape
+change.
+
+**PC tooling**: `cst_eeprom_layout.py` mirrors the firmware `LOAD_FUNC` attribute bit as `FUNC_LOAD`
+(`0x08`), set on the same four `FUNCTION_FIELDS` entries — `UP_BUTTON`/`DOWN_BUTTON`/`MENU_BUTTON`/
+`SEL_BUTTON` — as `FUNC_MENU` (`FN_AIRBRAKE`), and registers `FN_LOAD` (`0x82`) as `"LOAD"` in the
+function-value maps. `slot_codec.py` own `_encode_functions()` rejects `"LOAD"` on any other field, and —
+mirroring `loadUsedElsewhere()` (`cst-functions.c`), since two simultaneous holders would each overwrite
+the one shared CGRAM slot with their own state (see "CGRAM" above) — also rejects it on more than one of
+the four buttons at once, a check the on-device menu enforces live but a hand-edited JSON import could
+otherwise bypass.
 
 ## On-device config-screen pattern
 
