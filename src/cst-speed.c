@@ -251,13 +251,13 @@ uint8_t speedTypeHasLoad(void)
 	return speedTypeUsesItem(&speedTypeDesc[speedType()], SPEED_ITEM_OPLOAD_FN);
 }
 
-uint32_t speedLoadFunctionMask(LoadMode loadMode)
+uint32_t speedLoadFunctionMask(LoadMode loadMode, uint8_t oploadFn, uint8_t prloadFn)
 {
 	uint8_t fn;
 	switch (loadMode)
 	{
-		case LOAD_MODE_OPLOAD:  fn = speedCfg[SPEED_ITEM_OPLOAD_FN]; break;
-		case LOAD_MODE_PRLOAD:  fn = speedCfg[SPEED_ITEM_PRLOAD_FN]; break;
+		case LOAD_MODE_OPLOAD:  fn = oploadFn; break;
+		case LOAD_MODE_PRLOAD:  fn = prloadFn; break;
 		default:                return 0;
 	}
 	return (fn <= 28) ? ((uint32_t)1 << fn) : 0;

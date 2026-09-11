@@ -272,6 +272,10 @@ dispatch, comparing raw `brakePosition` against `brakeLowThreshold`/`brakeHighTh
 the lever to max triggers the throttle built-in emergency stop (if enabled) regardless of `BRK TYPE`,
 clearing only once the lever returns fully to the bottom.
 
+`BRK TYPE`, `BRK RATE`, `VAR BRK`, and `BRK ESTP` only take real effect once saved — every check above
+reads a committed snapshot of `optionBits`/`brakePulseWidth`, not whatever `OPTION_SCREEN` is tentatively
+editing on-screen; see "Committed, not live, config state" under "On-device config-screen pattern" below.
+
 ### STACK combo brake mode
 
 A fourth mode where lever percentage drives combinations of **three DCC functions** — "Brake1" (reuses the
@@ -288,11 +292,13 @@ band 0 is permanently fixed to "no combo" and asserts `BRAKE_REL_FN` continuousl
 pulse mode release, not the stepped mode one-tick pulse) — it is not stored or editable. An interior
 band combo of `0x00` ("none active") is distinct from band 0: it asserts neither a brake-on combo nor
 `BRAKE_REL_FN`.
-Band cut-points live in the explicit ordered array in `stackThresholds()` rather than a formula, since
-boundaries could change to become uneven in the future.
+Band cut-points live in the explicit ordered arrays `stackBandThresholds3Step`/`5Step` rather than a
+formula, since boundaries could change to become uneven in the future.
 
 Combo evaluation is **stateless per loop** (`evaluateStackBrake(brakePcnt)`, called from the main
-brake-mode dispatch) — not a graft onto the `BrakeStates` state machine, which is deliberately asymmetric
+brake-mode dispatch, reading the committed band count/threshold table/combo array selection rather than
+whatever `OPTION_SCREEN` is live-editing — see "Committed, not live, config state" below) — not a graft
+onto the `BrakeStates` state machine, which is deliberately asymmetric
 (advance-only, TCS-style) and the wrong shape here. It re-derives the correct band fresh from `brakePcnt`
 on every call: escalate immediately on crossing a threshold going up, de-escalate only once
 `BRAKE_HYSTERESIS` below that same threshold coming back down — the same dead-band idiom basic on/off mode
@@ -309,7 +315,8 @@ numbering shifts dynamically based on the editable band count of the active vari
 never stored). `UP`/`DOWN` cycle each band through all 8 possible 3-bit combos (none, each single, each
 pair, all three) via a `stackComboSequence[8]` lookup table. Display is `STEP1`…`STEPn` / `BRAKE---`…
 `BRAKE123` — "band" is the internal term (includes the off band); "step" is the on-device end-user term for
-the editable bands only.
+the editable bands only. `committedStackBandCombos3Step[]`/`5Step[]` mirror whichever combo set was last
+saved and are what `evaluateStackBrake()` actually reads — see "Committed, not live, config state" below.
 
 The AIRBRAKE screen (see "AIRBRAKE" below) is a read-only viewport onto the air-brake sound model and
 suppresses nothing — working the lever there drives `BRAKE_CONTROL`/`BK2_CONTROL`/`BK3_CONTROL` and the
@@ -486,7 +493,9 @@ configured to the LOAD function — see "LOAD button function" below.
 **Brake-function detection**: the simulation reads whether Brake1/2/3 are active from the actual outgoing
 `functionMask`, not from the lever own state-machine bits — so any control mapped to the same DCC
 function number is detected regardless of source. Step brake mode is deliberately excluded (forced
-inactive) — its pulses are a one-directional decoder-side ratchet the sum-based brake model cannot
+inactive) — checked against the same committed `BRK TYPE` the main dispatch uses, not a live
+`OPTION_SCREEN` edit (see "Committed, not live, config state" under "On-device config-screen pattern"
+below) — its pulses are a one-directional decoder-side ratchet the sum-based brake model cannot
 represent; Step remains the one brake mode where the simulated behavior can diverge from a real
 Step-braking locomotive.
 
@@ -691,9 +700,12 @@ opt-in, the same way that toggle is. When off, the sound functions are simply no
 are skipped in the top-level menu cycle (still reachable via an `AIRBRAKE`-bound button or
 `AIRBRAKE DIAGS`, since the model itself always ticks).
 
-**Automatic-brake rest point.** The automatic-brake apply/release point tracks whichever `BRK TYPE`
-is actually active, via `independentBrakeAtRest` (computed once per pass in `mrbw-cst.c`, immediately
-before the `updateBrake10Hz()` call): Step reuses the 0-20 % rest zone already tracked by
+**Automatic-brake rest point.** The automatic-brake apply/release point tracks whichever `BRK TYPE` is
+actually active — the committed one, not whatever `OPTION_SCREEN` may be live-editing, so this always
+agrees with which mode is really asserting `BRAKE_FN`/`BK2_FN`/`BK3_FN`; see "Committed, not live, config
+state" under "On-device config-screen pattern" below — via `independentBrakeAtRest` (computed once per
+pass in `mrbw-cst.c`, immediately before the `updateBrake10Hz()` call): Step reuses the 0-20 % rest zone
+already tracked by
 `brakeState` (`BRAKE_LOW_BEGIN`/`WAIT`), Stack reuses the real band-0 boundary already given by
 `currentStackBand == 0` (25 % 3-STEP / 17 % 5-STEP), and Standard/Pulse — neither of which has a
 reusable rest-boundary state of its own — share a raw `brakePcnt < 20` fallback.
@@ -1075,6 +1087,15 @@ separately wiring another control to the same function number. Offered as a CONF
 SPEED is enabled (`CONFIGBITS_MAIN_SCREEN_SPEED`) and the profile `TYPE` models the load CVs (`V5DCC` /
 `V5MULT`, not `V4` — `speedTypeHasLoad()`).
 
+**Committed, not live.** `OPLOADFN`/`PRLOADFN` are read from a committed snapshot
+(`committedOploadFn`/`committedPrloadFn`, `mrbw-cst.c`), not the live `speedCfg[]` entries
+`SPEED_CONFIG_SCREEN` edits directly — necessary because the `TYPE` `UP`/`DOWN` handler calls
+`speedResetModel()` live, on every press, which forces both function numbers to the inert `OFF` sentinel
+the instant `TYPE` is tentatively cycled to `V4`; without the committed indirection, an already-asserting
+LOAD button would stop the moment `TYPE` was merely browsed past `V4`, before ever confirming the change.
+See "Committed, not live, config state" under "On-device config-screen pattern" below for the general
+pattern, which also covers whether LOAD is eligible to assert at all (`loadEligible()`).
+
 **Restricted to one button at a time, enforced in firmware.** `loadUsedElsewhere()` (`cst-functions.c`)
 skips `FN_LOAD` in the CONFIG FUNC value cycle for any button while another of the four already holds it.
 This is a hardware constraint, not a style choice: the LCD has exactly 8 CGRAM slots (a genuine HD44780
@@ -1163,6 +1184,32 @@ The stock ISE `if (N == subscreenState)` chain (magic-number branches setting a 
 a `bitPosition` sentinel byte, with `0xFB..0xFE` sub-sentinels in `OPTION_SCREEN`) is fully retired —
 `PREFS`/`COMM`/`SYSTEM`/`OPTION` were converted one screen per commit. A conversion is
 behaviour-preserving and has no EEPROM-layout or PC-tooling impact, since only the UI code moves.
+
+**Committed, not live, config state.** Most fields in these screens are edited straight into their real
+RAM global (`optionBits`, `brakePulseWidth`, `speedCfg[]`, the STACK combo arrays, ...) for on-screen
+display, with no separate staging — safe by construction, since nothing outside the screen itself reads
+that global before a `SELECT`-save, and an abandoned edit is a long-press-Menu cancel away (see
+"Long-press Menu to cancel a subscreen edit" above). A handful of fields break that assumption, because
+the main loop reads them every pass *regardless of `screenState`*: whether LOAD is eligible to assert at
+all (`CONFIGBITS_MAIN_SCREEN_SPEED` + `speedTypeHasLoad()`), which DCC function number it actually
+asserts (`OPLOADFN`/`PRLOADFN` in `SPEED_CONFIG_SCREEN` — see "LOAD button function"), and the
+brake-mode fields in `OPTION_SCREEN` (`BRK TYPE`, `STEPS` and the STACK band-combo table, `VAR BRK`,
+`BRK ESTP`, `BRK RATE` — see "Brake logic"). Any of these taking live effect would change real,
+transmitted brake or DCC-function behavior the instant the operator merely browses a new value with
+`UP`/`DOWN`, before ever confirming it — most sharply visible with `TYPE`, since `speedResetModel()`
+forces `OPLOADFN`/`PRLOADFN` inert on a live, unconfirmed switch to `V4`. For these, a small cluster of
+`committed*` globals in `mrbw-cst.c` (`committedLoadEligible`, `committedOploadFn`/`committedPrloadFn`,
+`committedOptionBits`/`committedBrakePulseWidth`/`committedStackBandCombos3Step`/`5Step`, plus committed
+STACK accessors paired with the live ones used for on-screen editing) mirrors whatever was last actually
+saved, refreshed only inside `readConfig()` — the same choke point a `SELECT`-save and a long-press-Menu
+cancel both already route through. Every runtime-affecting read site consults the committed copy instead
+of the live one — `loadEligible()`, LOAD own `functionMask` assembly, the brake-mode dispatch,
+`evaluateStackBrake()`, the `TIMER0_COMPA_vect` pulse-width wrap, AIRBRAKE own `independentBrakeAtRest`
+classification, and SPEED own `stepBrakeMode` exclusion — while the screen own display/edit code keeps
+reading the live global, so on-screen browsing stays fully reactive with no visible change in behavior;
+only the real, transmitted effect is deferred to save time. `HORNTYPE`/`REV SWAP` (`OPTION_SCREEN`),
+`AIRBRAKE_CONFIG_SCREEN` own fields, and `CONFIG_FUNC_SCREEN` own function assignments have the same
+live-edit-live-effect characteristic and are not (yet) covered by this pattern.
 
 ## Shared network CNF store
 

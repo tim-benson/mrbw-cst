@@ -463,6 +463,41 @@ volatile uint8_t prloadFunctionActive = 0;
 // DCC function currently part of the outgoing functionMask? Defaults to F09, not OFF - see cst-speed.h.
 volatile uint8_t holdFunctionActive = 0;
 
+// Cached, not live: whether LOAD is currently eligible, refreshed only inside readConfig() - i.e.
+// only at boot, at any screen's SELECT-save, or on a long-press-Menu cancel (readConfig() is the
+// universal commit/cancel choke point every config screen already routes through). Deliberately
+// lags a still-in-progress SPEED_CONFIG_SCREEN TYPE edit or PREFS_SCREEN DISPLAY edit: browsing or
+// tentatively trying a different value must not itself stop a LOAD-configured button's DCC
+// function before the operator has actually chosen to save that change - see loadEligible().
+static uint8_t committedLoadEligible = 0;
+
+// Cached, not live: LOAD's committed OPLOADFN/PRLOADFN, refreshed only inside readConfig() - same
+// rationale as committedLoadEligible above, closing a matching gap it did not cover.
+// SPEED_CONFIG_SCREEN's TYPE UP/DOWN handler calls speedResetModel() live, on every press, which
+// forces these two SPEED_ITEM_* to the inert OFF sentinel the instant TYPE is cycled to V4 - so even
+// though committedLoadEligible correctly kept LOAD asserting-eligible throughout a still-in-progress
+// TYPE edit, speedLoadFunctionMask() would otherwise read the already-zeroed live value regardless.
+// Passed into speedLoadFunctionMask() explicitly (cst-speed.c has no reason to know this is cached
+// rather than live).
+static uint8_t committedOploadFn = SPEED_STOP_WATCH_FN_OFF;
+static uint8_t committedPrloadFn = SPEED_STOP_WATCH_FN_OFF;
+
+// Cached, not live: the brake-mode-relevant subset of optionBits/brakePulseWidth/the STACK combo
+// tables, refreshed only inside readConfig() - same rationale as committedLoadEligible above.
+// OPTION_SCREEN's BRK TYPE/STEPS/a STACK band's combo/VAR BRK/BRK ESTP/BRK RATE are all edited live,
+// with no staging, into the real optionBits/brakePulseWidth/stackBandCombos3Step[]/
+// stackBandCombos5Step[] - and the brake-mode dispatch, evaluateStackBrake(), AIRBRAKE's
+// independentBrakeAtRest classification, and SPEED's stepBrakeMode check all read those globals
+// directly, every main-loop pass, regardless of screenState. Without this cache, merely browsing
+// BRK TYPE would immediately change real, transmitted BRAKE_FN/BK2_FN/BK3_FN behavior before SELECT
+// ever saves it. committedOptionBits mirrors the whole byte (not just the brake bits) for simplicity
+// - safe because only the brake-relevant read sites below consult it; HORNTYPE/REV SWAP deliberately
+// keep reading live optionBits, unaffected by this cache (left live per explicit product decision).
+static uint8_t committedOptionBits = 0;
+static uint8_t committedBrakePulseWidth = 0;
+static uint8_t committedStackBandCombos3Step[STACK_BAND_COUNT_3STEP];
+static uint8_t committedStackBandCombos5Step[STACK_BAND_COUNT_5STEP];
+
 // Same watching mechanism again, for Brake1/2/3 (BRAKE_FN/BK2_FN/BK3_FN) - is each one's configured DCC
 // function currently part of the outgoing functionMask, regardless of which physical control (the brake
 // lever's own state machine, or anything else mapped to the same function number) put it there? Forced
@@ -473,10 +508,11 @@ volatile uint8_t brake1FunctionActive = 0;
 volatile uint8_t brake2FunctionActive = 0;
 volatile uint8_t brake3FunctionActive = 0;
 
-// STACK 3-STEP/5-STEP: single shared hysteresis-walk algorithm (evaluateStackBrake() below), parameterized
-// by these 3 small accessors rather than duplicated per variant - the two variants are structurally
-// identical (an N-band walk over a threshold table, ending in an array lookup), differing only in which
-// table/array they use.
+// STACK 3-STEP/5-STEP: OPTION_SCREEN's own display/edit code only ever needs the band count (how many
+// steps to show/cycle) and the combo array (what to cycle) - never the threshold table, which is only
+// consulted by the runtime hysteresis walk (evaluateStackBrake() below, via the committed accessors
+// further down). Two small accessors, parameterizing the two variants rather than duplicating them -
+// structurally identical (an N-band walk ending in an array lookup), differing only in which array they use.
 static uint8_t stackIs5Step(void)
 {
 	return (optionBits & _BV(OPTIONBITS_STACK_5STEP)) ? 1 : 0;
@@ -485,13 +521,33 @@ static uint8_t stackBandCount(void)
 {
 	return stackIs5Step() ? STACK_BAND_COUNT_5STEP : STACK_BAND_COUNT_3STEP;
 }
-static const uint8_t* stackThresholds(void)
-{
-	return stackIs5Step() ? stackBandThresholds5Step : stackBandThresholds3Step;
-}
 static uint8_t* stackCombos(void)
 {
 	return stackIs5Step() ? stackBandCombos5Step : stackBandCombos3Step;
+}
+
+// Committed counterparts of the accessors above, reading committedOptionBits/the committed STACK combo
+// mirrors instead of the live editing state - used exclusively by evaluateStackBrake() (the runtime
+// evaluation), never by OPTION_SCREEN's own display/edit code, which keeps using the live versions above
+// so on-screen browsing stays fully reactive. The threshold *tables* themselves (stackBandThresholds3Step/
+// 5Step) are compile-time constants, never edited, so only which table to select needs a committed
+// version - no separate committed copy of the threshold values. committedStackThresholds() has no live
+// counterpart above (only evaluateStackBrake() ever needed it), which is why the live cluster only has two.
+static uint8_t committedStackIs5Step(void)
+{
+	return (committedOptionBits & _BV(OPTIONBITS_STACK_5STEP)) ? 1 : 0;
+}
+static uint8_t committedStackBandCount(void)
+{
+	return committedStackIs5Step() ? STACK_BAND_COUNT_5STEP : STACK_BAND_COUNT_3STEP;
+}
+static const uint8_t* committedStackThresholds(void)
+{
+	return committedStackIs5Step() ? stackBandThresholds5Step : stackBandThresholds3Step;
+}
+static uint8_t* committedStackCombos(void)
+{
+	return committedStackIs5Step() ? committedStackBandCombos5Step : committedStackBandCombos3Step;
 }
 
 // SPEED_CONFIG_SCREEN: the four watched-DCC-function items (HOLDFN/STOPFN/OPLOADFN/PRLOADFN) share one
@@ -607,9 +663,13 @@ static void optionCycleBandCombo(uint8_t band, int8_t dir)
 void evaluateStackBrake(uint8_t brakePcnt)
 {
 	uint8_t pcnt = (brakePcnt > 100) ? 100 : brakePcnt;
-	uint8_t bandCount = stackBandCount();
-	const uint8_t *thresholds = stackThresholds();
-	uint8_t *combos = stackCombos();
+	// Committed, not live - see committedStackBandCount()/committedStackThresholds()/
+	// committedStackCombos() above. This is the only caller of these three; OPTION_SCREEN's own
+	// display/edit code uses the live stackBandCount()/stackCombos() instead (it never needed the
+	// threshold table itself).
+	uint8_t bandCount = committedStackBandCount();
+	const uint8_t *thresholds = committedStackThresholds();
+	uint8_t *combos = committedStackCombos();
 
 	// Clamp a leftover band from the other variant (e.g. 4, valid only in 5-STEP) so the walk below can
 	// never index either table out of bounds right after the toggle switches variants.
@@ -1005,7 +1065,10 @@ ISR(TIMER0_COMPA_vect)
 		
 		brakeCounter++;
 		// brakePulseWidth sets the minimum pulse width, which occurs when pulsing on 25% of the time. Therefore the period of the counter should be 4 x brakePulseWidth.
-		if(brakeCounter >= (4*brakePulseWidth))
+		// Committed, not live - must stay consistent with the Pulse dispatch's own committedBrakePulseWidth
+		// divisor (mrbw-cst.c, the BRK_TYPE_PULSE branch), else the wrap boundary and the duty-cycle math
+		// could disagree while brakePulseWidth is being live-edited in OPTION_SCREEN - see committedOptionBits.
+		if(brakeCounter >= (4*committedBrakePulseWidth))
 			brakeCounter = 0;
 		
 		updateTime10Hz();
@@ -1314,6 +1377,20 @@ void readConfig(void)
 	airbrakeSet(AIRBRAKE_MR_LOAD,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_MR_LOAD,     AIRBRAKE_MR_LOAD_DEFAULT));
 	airbrakeSet(AIRBRAKE_DISPLAY,     readByteOrDefault((uint8_t*)EE_AIRBRAKE_DISPLAY,     AIRBRAKE_DISPLAY_DEFAULT));
 	airbrakeSet(AIRBRAKE_COMP_MODE,   readByteOrDefault((uint8_t*)EE_AIRBRAKE_COMP_MODE,   AIRBRAKE_COMP_MODE_DEFAULT));
+
+	// Refresh the cached, committed LOAD eligibility and OPLOADFN/PRLOADFN now that configBits and
+	// every SPEED_ITEM_* reflect the just-loaded EEPROM truth - see loadEligible()/
+	// committedLoadEligible and committedOploadFn/committedPrloadFn.
+	committedOploadFn = speedGet(SPEED_ITEM_OPLOAD_FN);
+	committedPrloadFn = speedGet(SPEED_ITEM_PRLOAD_FN);
+	committedLoadEligible = (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) && speedTypeHasLoad();
+
+	// Refresh the cached, committed brake-mode state now that optionBits/brakePulseWidth/both STACK
+	// combo arrays reflect the just-loaded EEPROM truth - see committedOptionBits above.
+	committedOptionBits = optionBits;
+	committedBrakePulseWidth = brakePulseWidth;
+	memcpy(committedStackBandCombos3Step, stackBandCombos3Step, sizeof(stackBandCombos3Step));
+	memcpy(committedStackBandCombos5Step, stackBandCombos5Step, sizeof(stackBandCombos5Step));
 }
 
 void copyConfig(uint8_t srcConfig, uint8_t destConfig)
@@ -1565,18 +1642,21 @@ static LoadMode advanceLoadMode(LoadMode m)
 	}
 }
 
-// Live LOAD eligibility: SPEED enabled and the profile's TYPE models the load CVs (V5DCC/V5MULT,
-// not V4). Checked at every runtime touch-point (not just CONFIG FUNC's value cycle) because
-// CONFIGBITS_MAIN_SCREEN_SPEED is edited live in RAM from PREFS with no save required - it can flip
-// on the very next render pass while a button still stores a stale FN_LOAD from before. Without
-// re-checking here, setupLoadChar() would overwrite the CGRAM slot setupLCD() just correctly
-// reloaded for the real PM glyph in that same pass, corrupting it persistently until some unrelated
-// mode transition happened to reload clock chars again. isFunctionLoad(fn) alone is only safe to use
-// at CONFIG FUNC's value-cycle gate (cst-functions.c), which is about *offering* LOAD as a choice,
-// not about whether a slot is safe to write to right now.
+// LOAD eligibility: SPEED enabled and the profile's TYPE models the load CVs (V5DCC/V5MULT, not
+// V4). Checked at every runtime touch-point (not just CONFIG FUNC's value cycle). Returns the
+// cached committedLoadEligible, NOT a live recomputation - TYPE and DISPLAY are both edited live in
+// RAM (SPEED_CONFIG_SCREEN's UP/DOWN, PREFS_SCREEN's UP/DOWN), and functionMask is assembled and
+// transmitted every main-loop pass regardless of screenState, so a live recomputation would stop a
+// LOAD-configured button's DCC function the instant the operator merely browses a different TYPE or
+// DISPLAY value - before ever pressing SELECT to save it. committedLoadEligible only changes inside
+// readConfig(), so this correctly lags an in-progress edit and only takes effect once the change is
+// actually saved (or reverts unchanged on a long-press-Menu cancel, which is itself just a
+// readConfig() reload). isFunctionLoad(fn) alone is only safe to use at CONFIG FUNC's value-cycle
+// gate (cst-functions.c), which is about *offering* LOAD as a choice, not about whether the button
+// should currently assert.
 static uint8_t loadEligible(void)
 {
-	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) && speedTypeHasLoad();
+	return committedLoadEligible;
 }
 static uint8_t loadActive(Functions fn)
 {
@@ -1973,7 +2053,8 @@ int main(void)
 			brakePcnt = (brakePosition >= brakeLowThreshold) ? 100 : 0;   // degenerate/uncalibrated: all-or-nothing
 
 		// Handle emergency on brake control.  Do this outside the main brake state machine so the effect is immediate
-		if(optionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE))
+		// Committed, not live - see committedOptionBits.
+		if(committedOptionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE))
 		{
 			if(brakePosition < brakeLowThreshold)
 				estopStatus &= ~ESTOP_BRAKE;
@@ -1986,7 +2067,8 @@ int main(void)
 		}
 		
 		// Handle brake
-		if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
+		// Committed, not live, throughout this dispatch - see committedOptionBits.
+		if( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(committedOptionBits)) )
 		{
 			// This state machine handles the variable (stepped) brake.
 			switch(brakeState)
@@ -2060,7 +2142,7 @@ int main(void)
 					break;
 			}
 		}
-		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_PULSE == GET_BRK_TYPE(optionBits)) )
+		else if( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_PULSE == GET_BRK_TYPE(committedOptionBits)) )
 		{
 			// This state machine handles the variable (pulse) brake.
 			switch(brakeState)
@@ -2080,7 +2162,7 @@ int main(void)
 				case BRAKE_20PCNT_WAIT:
 				case BRAKE_40PCNT_BEGIN:
 				case BRAKE_40PCNT_WAIT:
-					if( brakePcnt >= (((brakeCounter / brakePulseWidth)+1)*20) )
+					if( brakePcnt >= (((brakeCounter / committedBrakePulseWidth)+1)*20) )
 						brakeState = BRAKE_FULL_BEGIN;
 					break;
 
@@ -2089,7 +2171,7 @@ int main(void)
 				case BRAKE_60PCNT_WAIT:
 				case BRAKE_80PCNT_BEGIN:
 				case BRAKE_80PCNT_WAIT:
-					if( brakePcnt < (((brakeCounter / brakePulseWidth)+1)*20) )
+					if( brakePcnt < (((brakeCounter / committedBrakePulseWidth)+1)*20) )
 						brakeState = BRAKE_LOW_BEGIN;
 					break;
 
@@ -2104,7 +2186,7 @@ int main(void)
 					break;
 			}
 		}
-		else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+		else if( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(committedOptionBits)) )
 		{
 			// STACK combo mode - stateless per loop, see evaluateStackBrake().
 			evaluateStackBrake(brakePcnt);
@@ -2158,7 +2240,7 @@ int main(void)
 
 		// Make sure a stale combo doesn't stick if BRK TYPE is switched away from STACK mid-combo.
 		// BRAKE_CONTROL/BRAKE_REL_CONTROL are left alone - already owned by whichever mode just ran.
-		if(!( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) ))
+		if(!( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(committedOptionBits)) ))
 		{
 			controls &= ~(BK2_CONTROL | BK3_CONTROL);
 			currentStackBand = 0;
@@ -4128,7 +4210,6 @@ int main(void)
 										if(!stackIs5Step())
 										{
 											optionBits |= _BV(OPTIONBITS_STACK_5STEP);
-											currentStackBand = 0;  // avoid a stale out-of-range band mid-switch
 										}
 										ticks_autoincrement = 0;
 										break;
@@ -4171,7 +4252,6 @@ int main(void)
 										if(stackIs5Step())
 										{
 											optionBits &= ~_BV(OPTIONBITS_STACK_5STEP);
-											currentStackBand = 0;
 										}
 										ticks_autoincrement = 0;
 										break;
@@ -5681,16 +5761,19 @@ int main(void)
 			ATOMIC_BLOCK(ATOMIC_RESTORESTATE) { doBrakeTick = brake10HzTick; brake10HzTick = 0; }
 			if(doBrakeTick)
 			{
+				// Committed, not live - must agree with which BRK TYPE the main dispatch is actually
+				// running (see committedOptionBits above), else AIRBRAKE could model a different brake
+				// type than the one currently asserting BRAKE_FN/BK2_FN/BK3_FN.
 				uint8_t independentBrakeAtRest;
-				if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits)) )
+				if( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(committedOptionBits)) )
 					independentBrakeAtRest = (BRAKE_LOW_BEGIN == brakeState) || (BRAKE_LOW_WAIT == brakeState);
-				else if( (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(optionBits)) )
+				else if( (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STACK == GET_BRK_TYPE(committedOptionBits)) )
 					independentBrakeAtRest = (0 == currentStackBand);
 				else
 					independentBrakeAtRest = (brakePcnt < 20);   // Standard + Pulse - matches Step's own 20% onset
 
 				updateBrake10Hz(min(brakePcnt,100), independentBrakeAtRest,
-				                (optionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE)) ? 1 : 0);
+				                (committedOptionBits & _BV(OPTIONBITS_ESTOP_ON_BRAKE)) ? 1 : 0);
 			}
 		}
 
@@ -5816,10 +5899,10 @@ int main(void)
 		// used elsewhere (e.g. NEUTRAL_FN) rather than a momentary/latching read. Runs before the
 		// STOPFN/OPLOADFN/PRLOADFN/HOLDFN scan below, so that scan picks up LOAD's contribution
 		// automatically, regardless of source, with no changes needed to it.
-		if(loadActive(UP_FN))   functionMask |= speedLoadFunctionMask(loadModeUp);
-		if(loadActive(DOWN_FN)) functionMask |= speedLoadFunctionMask(loadModeDown);
-		if(loadActive(MENU_FN)) functionMask |= speedLoadFunctionMask(loadModeMenu);
-		if(loadActive(SEL_FN))  functionMask |= speedLoadFunctionMask(loadModeSel);
+		if(loadActive(UP_FN))   functionMask |= speedLoadFunctionMask(loadModeUp,   committedOploadFn, committedPrloadFn);
+		if(loadActive(DOWN_FN)) functionMask |= speedLoadFunctionMask(loadModeDown, committedOploadFn, committedPrloadFn);
+		if(loadActive(MENU_FN)) functionMask |= speedLoadFunctionMask(loadModeMenu, committedOploadFn, committedPrloadFn);
+		if(loadActive(SEL_FN))  functionMask |= speedLoadFunctionMask(loadModeSel,  committedOploadFn, committedPrloadFn);
 
 		if(controls & THR_UNLK_CONTROL)
 			functionMask |= getFunctionMask(THR_UNLOCK_FN);
@@ -5913,8 +5996,9 @@ int main(void)
 			// Same mechanism, for Brake1/2/3 (BRAKE_FN/BK2_FN/BK3_FN) - forced false in Step mode, since
 			// Step's brake pulses advance a TCS-style ratchet on the real decoder rather than meaning
 			// "hold to brake", which the sim's held-while-active model can't represent regardless of
-			// how the active state is detected.
-			uint8_t stepBrakeMode = (optionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(optionBits));
+			// how the active state is detected. Committed, not live - must agree with which BRK TYPE
+			// the main dispatch is actually running - see committedOptionBits.
+			uint8_t stepBrakeMode = (committedOptionBits & _BV(OPTIONBITS_VARIABLE_BRAKE)) && (BRK_TYPE_STEP == GET_BRK_TYPE(committedOptionBits));
 			brake1FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BRAKE_FN))) ? 1 : 0;
 			brake2FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BK2_FN))) ? 1 : 0;
 			brake3FunctionActive = (!stepBrakeMode && (functionMask & getFunctionMask(BK3_FN))) ? 1 : 0;

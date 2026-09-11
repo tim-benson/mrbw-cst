@@ -319,8 +319,14 @@ uint8_t speedTypeHasLoad(void);
 
 // Maps a LOAD button's 3-way cycle state to the functionMask bit for the DCC function OPLOADFN/
 // PRLOADFN is currently configured to (0 for LOAD_MODE_OFF, or if the watched function is OFF/
-// unconfigured). Lets mrbw-cst.c assert the SPEED CFG-configured load function directly from a
-// button's persistent state without knowing SPEED_ITEM_* internals.
-uint32_t speedLoadFunctionMask(LoadMode loadMode);
+// unconfigured). oploadFn/prloadFn are passed in explicitly - the caller's *committed* (not live)
+// copies of SPEED_ITEM_OPLOAD_FN/SPEED_ITEM_PRLOAD_FN, refreshed only on readConfig() - rather than
+// this function reading speedCfg[] directly, since SPEED_CONFIG_SCREEN's TYPE editing calls
+// speedResetModel() live, on every UP/DOWN press, which forces these two items to the inert OFF
+// sentinel the instant TYPE is cycled to V4. Reading speedCfg[] directly here would make a
+// LOAD-configured button stop asserting the moment TYPE is merely browsed, before SELECT ever saves
+// it - the same live-edit-before-save hazard loadEligible()/committedLoadEligible already guards
+// against for LOAD's eligibility; this closes the matching gap for which function number it targets.
+uint32_t speedLoadFunctionMask(LoadMode loadMode, uint8_t oploadFn, uint8_t prloadFn);
 
 #endif
