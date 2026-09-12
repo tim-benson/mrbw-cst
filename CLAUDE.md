@@ -211,6 +211,39 @@ another reading overrides the candidate. Applied via a candidate+counter static 
 The reverser (`ADC_STATE_READ_VREV`) uses the identical raw-threshold-no-smoothing pattern and could in
 principle exhibit the same class of transient glitch — not reported as an issue, not currently addressed.
 
+## Light-function trailing lag
+
+Some ESU decoders take measurable time to process the in-decoder logic for a newly asserted light
+function while dropping a de-asserted one instantly. When the light knob moves to a new position, the
+outgoing packet clears the old function bit(s) and sets the new one(s) in the same packet — correct at
+the wire level, but the decoder asserting side lags its de-asserting side, producing a momentary dark
+flicker on the physical light output during the crossfade (and, symmetrically, when the knob returns to
+`LIGHT_OFF`). This is independent of the anti-glitch debounce described above, which already settles
+`frontLight`/`rearLight` to a stable value before this mechanism ever sees a transition.
+
+Each light channel (front, rear) holds a de-asserting function bit on for `LIGHT_LAG_HOLD_DECISECS`
+(`mrbw-cst.c`) past a genuine `frontLight`/`rearLight` position change: on such a change, whichever
+function bits were asserted for that channel last pass and are not part of the new position — the same
+computation whether a bit is being replaced by a different one or the knob went fully to `LIGHT_OFF` —
+are held asserted in `functionMask` for the lag window, on top of whatever the new position asserts on
+its own. `frontLightLagTimeout_decisecs`/`rearLightLagTimeout_decisecs` (`volatile uint8_t`, decremented
+in `TIMER0_COMPA_vect`'s 100ms block, the same idiom as `backlightTimeout_decisecs` — see "Menu
+backlight hold") gate the hold; the held mask and the previous-position tracking are ordinary `main()`
+locals, persistent across passes the same way `functionMask` itself is. The lag only adds bits, never
+suppresses one, so `FORCE FUNC` and any other independent source of the same DCC bit are unaffected and
+still take final precedence.
+
+Applies uniformly to all eight light-knob-driven functions (`FRONT_HEADLIGHT_FN`/`FRONT_DITCH_FN`/
+`FRONT_DIM1_FN`/`FRONT_DIM2_FN` and the `REAR_*` equivalents) — front and rear run independent timers,
+since they are independent physical controls.
+
+`LIGHT_LAG_HOLD_DECISECS` is a compile-time constant, not an on-device or EEPROM-configurable value — no
+`EEPROM_LAYOUT_VERSION` bump, migration, or PC-tooling change is involved. Confirmed working on real
+hardware against an ESU decoder at the current default of 1 decisecond (100ms); 2 and 3 deciseconds
+(200ms/300ms) were also confirmed to eliminate the flicker during bench testing before the value was
+lowered to its current minimum, so there is comfortable margin above 100ms if a different decoder needs
+more.
+
 ## Two-stage horn ("Horn2")
 
 A second, independently-configurable DCC function (`HORN2_FN`, menu name "HORN2") tied to its own calibrated

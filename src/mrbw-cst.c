@@ -61,6 +61,13 @@ LICENSE:
 #define BACKLIGHT_HOLD_DECISECS           30   // ~3s the LCD backlight lingers after the last MENU
                                                // press / return from a menu screen
 
+// A light-function bit that is being de-asserted because the light knob moved to a new position is
+// held on for this long past the transition before it actually drops - some ESU decoders take
+// measurable time to process the in-decoder logic for the newly-asserted bit in the same packet,
+// while dropping the de-asserted one instantly, producing a momentary dark flicker on the physical
+// light output during the crossfade. Needs real-hardware tuning against the decoder(s) in question.
+#define LIGHT_LAG_HOLD_DECISECS            1   // ~100ms
+
 // LOAD/SAVE CNF picker's N01-N20 loco-address preview settle delay - the query it fires
 // (syncQuerySharedLocoAddress()) is a blocking radio round-trip, so firing it on every single UP/DOWN
 // step during a fast sweep across many shared slots would freeze the throttle for a beat at each one.
@@ -282,6 +289,8 @@ volatile uint16_t decisecs = 0;
 volatile uint16_t sleepTimeout_decisecs = 0;
 volatile uint16_t alerterTimeout_decisecs = 0;
 volatile uint8_t backlightTimeout_decisecs = 0;  // uint8_t -> atomic on AVR, no ATOMIC_BLOCK needed
+volatile uint8_t frontLightLagTimeout_decisecs = 0;  // see LIGHT_LAG_HOLD_DECISECS
+volatile uint8_t rearLightLagTimeout_decisecs = 0;
 volatile uint8_t txHoldoff = 0;
 volatile uint8_t status = 0;
 
@@ -1068,6 +1077,12 @@ ISR(TIMER0_COMPA_vect)
 
 		if(backlightTimeout_decisecs)
 			backlightTimeout_decisecs--;
+
+		if(frontLightLagTimeout_decisecs)
+			frontLightLagTimeout_decisecs--;
+
+		if(rearLightLagTimeout_decisecs)
+			rearLightLagTimeout_decisecs--;
 
 		ledUpdate();
 
@@ -2039,6 +2054,17 @@ int main(void)
 
 	uint32_t functionMask = 0;
 	uint32_t lastFunctionMask = 0;
+
+	// Light-function trailing lag (LIGHT_LAG_HOLD_DECISECS) - tracks what was actually asserted for
+	// each light channel last pass (lag bits included) and the committed knob position last seen, so
+	// a genuine position change can be detected and the bits it drops can be held a little longer.
+	LightPosition previousFrontLight = LIGHT_OFF;
+	uint32_t frontLightAssertedMask = 0;
+	uint32_t frontLightLagMask = 0;
+
+	LightPosition previousRearLight = LIGHT_OFF;
+	uint32_t rearLightAssertedMask = 0;
+	uint32_t rearLightLagMask = 0;
 
 	ReverserPosition direction = FORWARD;
 
@@ -6067,40 +6093,80 @@ int main(void)
 
 		wdt_reset();
 
-		switch(frontLight)
 		{
-			case LIGHT_OFF:
-				break;
-			case LIGHT_DIM:
-				functionMask |= getFunctionMask(FRONT_DIM1_FN);
-				functionMask |= getFunctionMask(FRONT_DIM2_FN);
-				break;
-			case LIGHT_BRIGHT:
-				functionMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
-				break;
-			case LIGHT_BRIGHT_DITCH:
-				functionMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
-				functionMask |= getFunctionMask(FRONT_DITCH_FN);
-				break;
+			uint32_t frontLightNewMask = 0;
+			switch(frontLight)
+			{
+				case LIGHT_OFF:
+					break;
+				case LIGHT_DIM:
+					frontLightNewMask |= getFunctionMask(FRONT_DIM1_FN);
+					frontLightNewMask |= getFunctionMask(FRONT_DIM2_FN);
+					break;
+				case LIGHT_BRIGHT:
+					frontLightNewMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
+					break;
+				case LIGHT_BRIGHT_DITCH:
+					frontLightNewMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
+					frontLightNewMask |= getFunctionMask(FRONT_DITCH_FN);
+					break;
+			}
+
+			// Trailing lag - see LIGHT_LAG_HOLD_DECISECS. A genuine knob-position change captures
+			// whichever bits were asserted last pass and are not part of the new position (covers
+			// both "replaced by a different bit" and "knob went to OFF" the same way) and holds them
+			// on for the lag window, on top of whatever the new position asserts on its own.
+			if(frontLight != previousFrontLight)
+			{
+				frontLightLagMask = frontLightAssertedMask & ~frontLightNewMask;
+				frontLightLagTimeout_decisecs = frontLightLagMask ? LIGHT_LAG_HOLD_DECISECS : 0;
+				previousFrontLight = frontLight;
+			}
+
+			if(frontLightLagTimeout_decisecs)
+				frontLightNewMask |= frontLightLagMask;
+			else
+				frontLightLagMask = 0;
+
+			functionMask |= frontLightNewMask;
+			frontLightAssertedMask = frontLightNewMask;
 		}
 
 		wdt_reset();
 
-		switch(rearLight)
 		{
-			case LIGHT_OFF:
-				break;
-			case LIGHT_DIM:
-				functionMask |= getFunctionMask(REAR_DIM1_FN);
-				functionMask |= getFunctionMask(REAR_DIM2_FN);
-				break;
-			case LIGHT_BRIGHT:
-				functionMask |= getFunctionMask(REAR_HEADLIGHT_FN);
-				break;
-			case LIGHT_BRIGHT_DITCH:
-				functionMask |= getFunctionMask(REAR_HEADLIGHT_FN);
-				functionMask |= getFunctionMask(REAR_DITCH_FN);
-				break;
+			uint32_t rearLightNewMask = 0;
+			switch(rearLight)
+			{
+				case LIGHT_OFF:
+					break;
+				case LIGHT_DIM:
+					rearLightNewMask |= getFunctionMask(REAR_DIM1_FN);
+					rearLightNewMask |= getFunctionMask(REAR_DIM2_FN);
+					break;
+				case LIGHT_BRIGHT:
+					rearLightNewMask |= getFunctionMask(REAR_HEADLIGHT_FN);
+					break;
+				case LIGHT_BRIGHT_DITCH:
+					rearLightNewMask |= getFunctionMask(REAR_HEADLIGHT_FN);
+					rearLightNewMask |= getFunctionMask(REAR_DITCH_FN);
+					break;
+			}
+
+			if(rearLight != previousRearLight)
+			{
+				rearLightLagMask = rearLightAssertedMask & ~rearLightNewMask;
+				rearLightLagTimeout_decisecs = rearLightLagMask ? LIGHT_LAG_HOLD_DECISECS : 0;
+				previousRearLight = rearLight;
+			}
+
+			if(rearLightLagTimeout_decisecs)
+				rearLightNewMask |= rearLightLagMask;
+			else
+				rearLightLagMask = 0;
+
+			functionMask |= rearLightNewMask;
+			rearLightAssertedMask = rearLightNewMask;
 		}
 
 		uint16_t alerterTimeout_decisecs_tmp;
