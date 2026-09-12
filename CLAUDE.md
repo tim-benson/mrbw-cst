@@ -1328,7 +1328,9 @@ validate, no hardware dependency) — a **hand-maintained mirror** of `src/cst-e
 logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte
 offsets, not the bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The
 `-h`/`--help` output of both tools — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` —
-documents every flag in more detail than covered below; check there for the exact current option set.
+documents every flag in more detail than covered below; check there for the exact current option set. A
+third tool, `cst_fastclock.py`, also lives in this section but is unrelated to loco configuration — it
+broadcasts a fast-clock time signal instead, with no EEPROM or config-slot involvement at all (see below).
 
 ### `cst_cfgtransfer.py` — ISP-based export/import
 
@@ -1481,6 +1483,39 @@ absent from the file rather than rejecting it.
 protocol `SUBTYPE_RESET` (see "Shared network CNF store" above) — a deliberate, human-triggered reset,
 not something any version mismatch triggers automatically. Backs up all 20 entries by default (`--out-dir`
 required unless `--skip-backup`), reusing the same output-folder convention `export` already uses.
+
+### `cst_fastclock.py` — XBee-broadcast software fast clock
+
+`src/cst-fastclock/cst_fastclock.py` broadcasts an MRBus/MRBee fast-clock `'T'` packet from a PC over a
+USB-attached XBee radio, standing in for the mrb-fcm fast-clock-master hardware from ISE during bench
+testing. Unlike the two tools above, it has no EEPROM/config-slot dependency at all — it only reuses the
+radio transport (`cnf_radio_io.py`, serial port setup, XBee API framing, MRBus CRC16) from
+`cst-cfgnetwork/`, via a small public `send_raw()` wrapper added around the existing internal
+`_send_mrbus()` primitive of that module.
+
+```bash
+python3 cst_fastclock.py --port /dev/cu.usbserial-XXXX --my-addr 0x50 --start 08:00 --ratio 4
+```
+
+The wire format is copied unchanged from the mrb-fcm.c of ISE (an 18-byte packet: 6-byte MRBus header plus
+12 payload bytes — real hours/minutes/seconds, a flags byte, fast hours/minutes/seconds, a big-endian
+`timeScaleFactor` at ratio × 10, and three date bytes this throttle never reads) and is consumed unchanged
+by the existing `processTimePacket()` in `src/cst-time.c` — no firmware change was needed to support this
+tool. `--start`/`--ratio` set the fast time as of the moment the tool starts and the fast:real speed
+ratio; the tool re-broadcasts every `--interval` seconds (default 2), comfortably inside the
+dead-reckoning timeout the throttle already implements between packets, so no ack/retry logic is needed,
+matching the fire-and-forget behavior of mrb-fcm itself. `--ampm` sets the `DISP_FAST_AMPM` flag bit for a
+12-hour on-screen display (24-hour is the default; the on-screen indicator is a small custom pictographic
+glyph, not literal text — see `displayTime()`/`ClockAM`/`ClockPM` in `cst-time.c`); `--hold` sets
+`DISP_FAST_HOLD` alongside `DISP_FAST` to broadcast the clock paused, exercising the `" HOLD "` display
+state of `printTime()`.
+
+Requires the on-device `COMM CFG` → `TIME ADR` set to `0xFF` (accept a `'T'` packet from any MRBus source
+address — the factory default of `0x00` instead restricts acceptance to whatever `BASE ADR` the throttle
+is itself configured to) and `PREFS` → `DISPLAY` set to the clock option, not `SPEED` (see the SPEED
+section above). Hardware-confirmed on a real throttle, including with `OPS MODE` active — the fast clock
+is drawn by the same `renderBaseScreen()` path shared by `MAIN_SCREEN` and `OPS_MODE_SCREEN`, so it is
+unaffected by the OPS MODE button rebinding.
 
 ### Maintenance checklist — follow whenever the EEPROM layout changes
 

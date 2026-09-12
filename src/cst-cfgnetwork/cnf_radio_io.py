@@ -449,6 +449,11 @@ class CnfRadioLink:
 
     # --- low level ---
 
+    def send_raw(self, dest, type_byte, payload):
+        """Send an arbitrary MRBus/MRBee packet - the generic low-level primitive other tools (e.g.
+        cst-fastclock) can reuse without any dependency on the shared-CNF protocol below."""
+        self._send_mrbus(dest, type_byte, payload)
+
     def _send_mrbus(self, dest, type_byte, payload):
         packet = bytearray()
         packet.append(dest & 0xFF)

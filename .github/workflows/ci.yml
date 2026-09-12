@@ -55,3 +55,6 @@ jobs:
       - name: cst-cfgnetwork
         working-directory: src/cst-cfgnetwork
         run: python3 -m unittest discover tests
+      - name: cst-fastclock
+        working-directory: src/cst-fastclock
+        run: python3 -m unittest discover tests
