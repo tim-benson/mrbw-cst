@@ -1663,22 +1663,151 @@ static uint8_t loadActive(Functions fn)
 	return isFunctionLoad(fn) && loadEligible();
 }
 
-// The corner glyph for a configurable button (UP / DOWN / MENU / SEL): the "A" glyph
-// (AIRBRAKE_GLYPH_CHAR, loaded by baseScreenLcdMode()'s LCD_MAIN* / LCD_OPS* - both screens' base
-// palettes carry it) if the button opens the AIRBRAKE gauge - a screen jump, not a DCC function, so
-// the softkey circle would be meaningless.
-// The LOAD glyph (LOAD_CHAR) if the button is LOAD and currently eligible - loadActive(), not the
-// bare isFunctionLoad(), so a now-ineligible stale LOAD assignment falls back to the ordinary circle
-// instead of pointing at a slot that may no longer hold a LOAD bitmap. Otherwise the filled/hollow
-// circle - filled while the function is asserting and configured, hollow otherwise (shown even when
-// the function is OFF, matching the stock UP/DOWN glyphs).
+// Whether SPEED display is on - the sole eligibility condition for offering FN_CLOCK in CONFIG FUNC
+// (cst-functions.c's incrementCurrentFunctionValue()/decrementCurrentFunctionValue()). Unlike
+// loadEligible(), this is read live rather than from a committed snapshot: CLOCK never reaches
+// functionMask (see the main-loop assembly below), so there is no "edited elsewhere, read here
+// mid-edit" hazard the way LOAD's TYPE/DISPLAY interaction has - renderBaseScreen() (the only other
+// consumer of "is SPEED active") already reads configBits directly for the same reason.
+static uint8_t clockEligible(void)
+{
+	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? 1 : 0;
+}
+
+// Tracks which CGRAM slot (if any) currently represents each concept a button corner can show -
+// 0xFF means "not needed this render pass". Set by allocateSpecialGlyphSlots(), read by
+// buttonCornerGlyph(). See cst-common.h for the architecture this implements.
+static uint8_t hollowGlyphSlot, filledGlyphSlot, airbrakeGlyphSlot, loadGlyphSlot, clockGlyphSlot;
+
+// True if fn drives the ordinary hollow/filled softkey circle rather than one of the icon-bearing
+// special functions - mirrors buttonCornerGlyph()'s own fallthrough condition exactly, since that is
+// the definition being used here.
+static uint8_t isButtonPlain(Functions fn)
+{
+	return !isFunctionAirBrake(fn) && !loadActive(fn) && !isFunctionClock(fn);
+}
+
+// True if a plain button (isButtonPlain(fn) already true) is in the "filled" state - mirrors
+// buttonCornerGlyph()'s own filled/hollow test exactly.
+static uint8_t plainButtonIsFilled(Functions fn, uint8_t asserting)
+{
+	return (asserting && !isFunctionOff(fn)) ? 1 : 0;
+}
+
+// Allocates CGRAM slots to whichever corner-glyph concepts - the plain hollow/filled circle, plus
+// every icon-bearing special function (AIRBRAKE, LOAD, CLOCK, and any added later) - are actually in
+// use on the buttons this screen draws a corner for, fresh every render pass (not gated by
+// currentMode, matching setupLoadChar()'s existing "just do it every pass" style, since LOAD's own
+// live 3-way state and any plain button's asserting state can both change without any LcdMode
+// transition).
+//
+// This is the general form of a pigeonhole argument, not a policy: however many corner-glyph
+// concepts exist in total, a screen that draws N button corners can never need more than N distinct
+// bitmaps at once, because each button resolves to exactly one concept. MAIN_SCREEN draws 2 corners
+// (UP BTN/DOWN BTN only), so its dedicated pool {4, 6} - untouched by anything else while LCD_MAIN*
+// is active - always covers its worst case, regardless of how many special functions are ever added;
+// slots 1/2 stay fixed there (see buttonCornerGlyph()'s ultimate fallback) since 2 slots already
+// suffice and there is nothing to gain by making them movable too. OPS_MODE_SCREEN draws all 4
+// corners, so it folds the two softkey-circle slots (1, 2) into its own pool alongside 4, 6, and 7
+// (otherwise unused on LCD_OPS*/LCD_OPS_SPEED, since that screen never draws OPS_FN_ACTIVE_CHAR's
+// reminder) - 5 candidate slots against a hard ceiling of 4 simultaneous concepts, always leaving at
+// least one spare. Adding a future icon-bearing function needs no change here beyond one more
+// isFunctionXxx()-style predicate, one more needXxx check below, and one more setupXxxChar(slot)
+// glyph loader (see cst-common.h) - both screens already have enough headroom for it.
+static void allocateSpecialGlyphSlots(uint8_t opsScreen, uint8_t optionButtonState)
+{
+	static const uint8_t mainPool[2] = { 4, 6 };
+	static const uint8_t opsPool[5]  = { 1, 2, 4, 6, 7 };
+	const uint8_t *pool = opsScreen ? opsPool : mainPool;
+	uint8_t poolSize = opsScreen ? 5 : 2;
+	uint8_t next = 0;
+
+	uint8_t needAirbrake = isFunctionAirBrake(UP_FN) || isFunctionAirBrake(DOWN_FN) ||
+	                       (opsScreen && (isFunctionAirBrake(MENU_FN) || isFunctionAirBrake(SEL_FN)));
+	uint8_t needLoad = loadActive(UP_FN) || loadActive(DOWN_FN) ||
+	                   (opsScreen && (loadActive(MENU_FN) || loadActive(SEL_FN)));
+	uint8_t needClock = isFunctionClock(UP_FN) || isFunctionClock(DOWN_FN) ||
+	                    (opsScreen && (isFunctionClock(MENU_FN) || isFunctionClock(SEL_FN)));
+
+	airbrakeGlyphSlot = loadGlyphSlot = clockGlyphSlot = 0xFF;
+
+	if(needAirbrake && (next < poolSize))
+	{
+		airbrakeGlyphSlot = pool[next++];
+		setupAirbrakeGlyphChar(airbrakeGlyphSlot);
+	}
+	if(needLoad && (next < poolSize))
+	{
+		loadGlyphSlot = pool[next++];
+		LoadMode m = isFunctionLoad(UP_FN)   ? loadModeUp   :
+		             isFunctionLoad(DOWN_FN) ? loadModeDown :
+		             isFunctionLoad(MENU_FN) ? loadModeMenu : loadModeSel;
+		setupLoadChar(loadGlyphSlot, m);
+	}
+	if(needClock && (next < poolSize))
+	{
+		clockGlyphSlot = pool[next++];
+		setupClockPeekGlyphChar(clockGlyphSlot);
+	}
+
+	// MAIN_SCREEN never reallocates the softkey circle - its 2-slot pool above already covers its
+	// full worst case without needing to, so hollow/filled stay anchored at their usual fixed slots,
+	// exactly as before this screen's pool existed at all.
+	if(!opsScreen)
+	{
+		hollowGlyphSlot = FUNCTION_INACTIVE_CHAR;
+		filledGlyphSlot = FUNCTION_ACTIVE_CHAR;
+		return;
+	}
+
+	uint8_t needHollow = (isButtonPlain(UP_FN)   && !plainButtonIsFilled(UP_FN,   optionButtonState & UP_OPTION_BUTTON))   ||
+	                     (isButtonPlain(DOWN_FN) && !plainButtonIsFilled(DOWN_FN, optionButtonState & DOWN_OPTION_BUTTON)) ||
+	                     (isButtonPlain(MENU_FN) && !plainButtonIsFilled(MENU_FN, optionButtonState & MENU_OPTION_BUTTON)) ||
+	                     (isButtonPlain(SEL_FN)  && !plainButtonIsFilled(SEL_FN,  optionButtonState & SEL_OPTION_BUTTON));
+	uint8_t needFilled = (isButtonPlain(UP_FN)   && plainButtonIsFilled(UP_FN,   optionButtonState & UP_OPTION_BUTTON))   ||
+	                     (isButtonPlain(DOWN_FN) && plainButtonIsFilled(DOWN_FN, optionButtonState & DOWN_OPTION_BUTTON)) ||
+	                     (isButtonPlain(MENU_FN) && plainButtonIsFilled(MENU_FN, optionButtonState & MENU_OPTION_BUTTON)) ||
+	                     (isButtonPlain(SEL_FN)  && plainButtonIsFilled(SEL_FN,  optionButtonState & SEL_OPTION_BUTTON));
+
+	hollowGlyphSlot = filledGlyphSlot = 0xFF;
+
+	if(needHollow && (next < poolSize))
+	{
+		hollowGlyphSlot = pool[next++];
+		setupSoftkeyInactiveChar(hollowGlyphSlot);
+	}
+	if(needFilled && (next < poolSize))
+	{
+		filledGlyphSlot = pool[next++];
+		setupSoftkeyActiveChar(filledGlyphSlot);
+	}
+}
+
+// The corner glyph for a configurable button (UP / DOWN / MENU / SEL): the AIRBRAKE "A" glyph if the
+// button opens the AIRBRAKE gauge - a screen jump, not a DCC function, so the softkey circle would be
+// meaningless - or the CLOCK peek glyph if the button is a CLOCK peek, shown for as long as the
+// assignment exists, not gated on the button being held (only the readout swap in renderBaseScreen()
+// is momentary), or the LOAD glyph if the button is LOAD and currently eligible - loadActive(), not
+// the bare isFunctionLoad(), so a now-ineligible stale LOAD assignment falls back to the ordinary
+// circle. Otherwise the filled/hollow circle - filled while the function is asserting and configured,
+// hollow otherwise (shown even when the function is OFF, matching the stock UP/DOWN glyphs). Which
+// physical CGRAM slot each of these resolves to was decided by allocateSpecialGlyphSlots() earlier
+// this render pass (see cst-common.h) - the 0xFF guards and the final hardcoded fallback are a
+// defensive backstop that should be unreachable given the pool-sizing proof there, not a normally
+// exercised path.
 static char buttonCornerGlyph(Functions fn, uint8_t asserting)
 {
-	if(isFunctionAirBrake(fn))
-		return AIRBRAKE_GLYPH_CHAR;
-	if(loadActive(fn))
-		return LOAD_CHAR;
-	return (asserting && !isFunctionOff(fn)) ? FUNCTION_ACTIVE_CHAR : FUNCTION_INACTIVE_CHAR;
+	if(isFunctionAirBrake(fn) && (0xFF != airbrakeGlyphSlot))
+		return airbrakeGlyphSlot;
+	if(loadActive(fn) && (0xFF != loadGlyphSlot))
+		return loadGlyphSlot;
+	if(isFunctionClock(fn) && (0xFF != clockGlyphSlot))
+		return clockGlyphSlot;
+	if(asserting && !isFunctionOff(fn) && (0xFF != filledGlyphSlot))
+		return filledGlyphSlot;
+	if(0xFF != hollowGlyphSlot)
+		return hollowGlyphSlot;
+	return FUNCTION_INACTIVE_CHAR;
 }
 
 // MAIN_SCREEN and OPS_MODE_SCREEN each get their own CGRAM palette (LCD_MAIN* / LCD_OPS* - see
@@ -1725,6 +1854,16 @@ static void renderBaseScreen(uint8_t opsScreen, uint8_t backlight, uint8_t optio
 {
 	uint8_t opsLayout = (configBits & _BV(CONFIGBITS_OPS_MODE)) ? 1 : 0;
 
+	// True while whichever button holds FN_CLOCK is currently physically held (optionButtonState's
+	// bits already track exactly this for any momentary value - FN_CLOCK is not in
+	// isFunctionLatching()'s switch, so it rides the same generic press/release bookkeeping every
+	// plain DCC function uses, with no dedicated press-edge handling needed). At most one of the four
+	// can be true at once, since only one physical button can be held at a time.
+	uint8_t clockPeekHeld = (isFunctionClock(UP_FN)   && (optionButtonState & UP_OPTION_BUTTON))   ||
+	                        (isFunctionClock(DOWN_FN) && (optionButtonState & DOWN_OPTION_BUTTON)) ||
+	                        (isFunctionClock(MENU_FN) && (optionButtonState & MENU_OPTION_BUTTON)) ||
+	                        (isFunctionClock(SEL_FN)  && (optionButtonState & SEL_OPTION_BUTTON));
+
 	lcd_gotoxy(2,0);
 	if(throttleStatus & THROTTLE_STATUS_EMERGENCY)
 	{
@@ -1768,21 +1907,31 @@ static void renderBaseScreen(uint8_t opsScreen, uint8_t backlight, uint8_t optio
 
 	lcd_gotoxy(1,1);
 	if(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED))
-		printSpeed();
+	{
+		if(clockPeekHeld)
+		{
+			printTime();
+		}
+		else
+		{
+			// Slot 3 (SPEED_H_CHAR/AMPM_CHAR) may have been left holding an AM/PM bitmap by a peek
+			// that just ended (displayTime() writes it unconditionally in 12-hour mode) - restore
+			// "H" and reset displayTime()'s change-detection sentinel so the NEXT peek's AM/PM draw
+			// is not skipped just because the AM/PM value happens to match what was drawn before
+			// the restore.
+			setupSpeedHChar();
+			invalidateAmPmChar();
+			printSpeed();
+		}
+	}
 	else
 		printTime();
 
 	printBattery(opsLayout ? 6 : 0);
 
-	// Rewrite LOAD_CHAR for whichever button is currently LOAD-active (at most one, firmware-enforced
-	// - see loadUsedElsewhere() in cst-functions.c) before drawing any corner. Gating on loadActive()
-	// rather than isFunctionLoad() is what actually keeps this safe: whenever eligibility drops (SPEED
-	// disabled or TYPE=V4), none of these fire, so the shared slot is left alone for setupLCD()'s
-	// ordinary clock-glyph reload to own without being overwritten in the same pass.
-	if(loadActive(UP_FN))        setupLoadChar(loadModeUp);
-	else if(loadActive(DOWN_FN)) setupLoadChar(loadModeDown);
-	else if(loadActive(MENU_FN)) setupLoadChar(loadModeMenu);
-	else if(loadActive(SEL_FN))  setupLoadChar(loadModeSel);
+	// Allocate this render pass's corner-glyph pool slots before drawing any corner - see
+	// allocateSpecialGlyphSlots().
+	allocateSpecialGlyphSlots(opsScreen, optionButtonState);
 
 	lcd_gotoxy(7,0);
 	lcd_putc(buttonCornerGlyph(UP_FN, optionButtonState & UP_OPTION_BUTTON));
@@ -3591,14 +3740,14 @@ int main(void)
 						case UP_BUTTON:
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								incrementCurrentFunctionValue(loadEligible());
+								incrementCurrentFunctionValue(loadEligible(), clockEligible());
 								ticks_autoincrement = 0;
 							}
 							break;
 						case DOWN_BUTTON:
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
-								decrementCurrentFunctionValue(loadEligible());
+								decrementCurrentFunctionValue(loadEligible(), clockEligible());
 								ticks_autoincrement = 0;
 							}
 							break;
@@ -4824,12 +4973,16 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_DEAD_RECKONING_TIME, getMaxDeadReckoningTime());
 								eeprom_write_byte((uint8_t*)EE_CONFIGBITS, configBits);
 								// If the saved DISPLAY setting no longer shows SPEED, clear any UP/DOWN/
-								// MENU/SEL BTN already set to LOAD - otherwise it would keep showing
-								// "LOAD" in CONFIG FUNC despite being unreachable there now (same
-								// reasoning as SPEED_CONFIG_SCREEN's TYPE-drops-to-V4 clearLoadFunctions()
-								// call).
+								// MENU/SEL BTN already set to LOAD or CLOCK - otherwise they would keep
+								// showing "LOAD"/"CLOCK" in CONFIG FUNC despite being unreachable there
+								// now (same reasoning as SPEED_CONFIG_SCREEN's TYPE-drops-to-V4
+								// clearLoadFunctions() call - CLOCK has nothing to peek away from once
+								// the main screen already shows the clock).
 								if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
+								{
 									clearLoadFunctions();
+									clearClockFunctions();
+								}
 								readConfig();
 								// Resync the new* staging locals from the (readConfig()-restored) real
 								// values. Also done by the long-press-Menu cancel handler in the top-level

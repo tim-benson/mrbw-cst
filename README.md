@@ -32,6 +32,9 @@ This is a fork adding:
 - **LOAD button function** — a fifth option for `UP BTN` / `DOWN BTN` / `MENU BTN` / `SEL BTN` that
   cycles OFF -> Optional Load -> Primary Load -> OFF on each press, driving SPEED's `OPLOADFN`/`PRLOADFN`
   without wiring a separate control to the same DCC function.
+- **CLOCK Peek button function** — a sixth option for `UP BTN` / `DOWN BTN` / `MENU BTN` / `SEL BTN`
+  that, while held, temporarily swaps the SPEED readout for the fast clock, reverting the instant it is
+  released; offered only while the SPEED display is enabled.
 - **AIRBRAKE train-brake simulation** — models a locomotive automatic (train) brake — brake pipe, main
   reservoir, compressor governor — driving the ESU air sound functions from the simulated pressures,
   with a read-only gauge screen (two-pressure or analogue-dial style). Opt-in via a PREFS toggle;

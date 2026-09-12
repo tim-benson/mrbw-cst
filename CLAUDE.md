@@ -1007,12 +1007,14 @@ glyph (blank unless that function is still latched) on the plain base screen. Lo
 pref and on which screen is showing. `printBattery()` takes an `x`-column parameter for this. Button
 handling stays in each `case` (it is what actually differs). Two small helpers:
 
-- **`buttonCornerGlyph(fn, asserting)`** — returns `AIRBRAKE_GLYPH_CHAR` (a bold custom "A") when the
-  button function is `AIRBRAKE`, since that is a screen jump rather than a DCC function and the softkey
-  circle would be meaningless; otherwise the filled circle while the function is asserting and
-  configured, the hollow circle otherwise (shown even when the function is `FN_OFF`). Used for all
-  four button corners on the base and OPS MODE screens — `UP` / `DOWN` at `(7,*)` on every base/OPS
-  screen, `MENU` / `SEL` at `(0,*)` on the OPS MODE screen only.
+- **`buttonCornerGlyph(fn, asserting)`** — looks up whichever CGRAM slot `allocateSpecialGlyphSlots()`
+  assigned this render pass (see "CGRAM" below) for the button's current special value: a bold custom
+  "A" for `AIRBRAKE` (a screen jump rather than a DCC function, so the softkey circle would be
+  meaningless), the `LOAD` glyph (see "LOAD button function"), or the `CLOCK` peek glyph (see "CLOCK
+  Peek") — or otherwise the filled/hollow circle, filled while the function is asserting and
+  configured, hollow otherwise (shown even when the function is `FN_OFF`). Used for all four button
+  corners on the base and OPS MODE screens — `UP` / `DOWN` at `(7,*)` on every base/OPS screen, `MENU`
+  / `SEL` at `(0,*)` on the OPS MODE screen only.
 - **`auxIndicatorChar()`** — the `AUX` indicator glyph, or a blank. Suppressed when `AUX` drives the
   very DCC function `HOLDFN` watches for ESU Drive Hold: activating `AUX` then already replaces the
   loco address with `HOLD`, so the glyph would be noise. A static config comparison
@@ -1039,18 +1041,48 @@ set the top-level `MENU` handler is bypassed.
 
 **CGRAM.** `MAIN_SCREEN` and `OPS_MODE_SCREEN` each use their own `LcdMode` palette — `LCD_MAIN` /
 `LCD_MAIN_SPEED` and `LCD_OPS` / `LCD_OPS_SPEED` respectively, selected by `baseScreenLcdMode(opsScreen)`
-off `CONFIGBITS_MAIN_SCREEN_SPEED`. Both palettes are `LCD_DEFAULT`-shaped with slot 6 (`PSI_CHAR_L`,
-rendered only on the `AIRBRAKE` DUAL screen) reused as `AIRBRAKE_GLYPH_CHAR`, and — under the `_SPEED`
-variants only — slot 3 reused as `SPEED_H_CHAR`, the narrow "H" of `MPH` / `KMH` in the running speed
+off `CONFIGBITS_MAIN_SCREEN_SPEED`. Both palettes are `LCD_DEFAULT`-shaped, and — under the `_SPEED`
+variants only — slot 3 is reused as `SPEED_H_CHAR`, the narrow "H" of `MPH` / `KMH` in the running speed
 readout; the non-speed variants hold `AMPM_CHAR` (the clock indicator, see below) in that same slot
-instead. `LCD_MAIN`(`_SPEED`) additionally loads slot 7 (`PSI_CHAR_R`) as `OPS_FN_ACTIVE_CHAR`;
-`LCD_OPS`(`_SPEED`) does not — `OPS_MODE_SCREEN` never draws that glyph, only the plain base screen
-"still latched" reminder needs it — leaving that slot genuinely free on `OPS_MODE_SCREEN`: one slot of
-headroom for future glyph work there. Slot 4 (`LOAD_CHAR`) is permanently reserved on all four palette
-variants — see "LOAD button function" below. Every transition to a menu or `AIRBRAKE` screen forces
-`LCD_DEFAULT`, whose `currentMode` guard reloads the displaced `PSI` glyphs; changing the `DISPLAY` pref
-always round-trips through `LCD_DEFAULT`. The battery `FULL` / `HALF` / `EMPTY` glyphs are narrow 3-pixel
-bitmaps.
+instead. `LCD_MAIN`(`_SPEED`) additionally, statically loads slot 7 (`PSI_CHAR_R`) as
+`OPS_FN_ACTIVE_CHAR`; `LCD_OPS`(`_SPEED`) does not, since `OPS_MODE_SCREEN` never draws that glyph
+(only the plain base screen "still latched" reminder needs it) — that slot instead joins the pool
+described next.
+
+Every other button-corner glyph — the plain hollow/filled softkey circle, plus every icon-bearing
+special button function (`AIRBRAKE`, `LOAD`, `CLOCK` peek — see "LOAD button function" and "CLOCK
+Peek" below) — is resolved from a **dynamic pool** of CGRAM slots, reallocated fresh every render pass
+by `allocateSpecialGlyphSlots()` (`mrbw-cst.c`), rather than each being fixed to one slot the way
+`AIRBRAKE_GLYPH_CHAR`/`LOAD_CHAR` originally were. The underlying argument is a pigeonhole one, not a
+policy, and it is what makes the architecture future-proof rather than tuned to today's specific 3
+special functions: a screen that draws N button corners can never need more than N distinct corner
+bitmaps at once, because each button resolves to exactly one concept (plain-hollow, plain-filled, or
+one special function) per render pass — regardless of how many concept *types* exist in total.
+- `MAIN_SCREEN` draws only 2 corners (`UP BTN`/`DOWN BTN` — `MENU BTN`/`SEL BTN`'s own corners are
+  never drawn there, only their separate `OPS_FN_ACTIVE_CHAR` reminder is), so its dedicated 2-slot
+  pool (slots 4 and 6, borrowing `PSI_CHAR_L`'s slot number) always covers its worst case, no matter
+  how many special function types are ever added. The softkey circle stays at its fixed slots (1/2)
+  there instead of joining the pool — 2 slots already suffice for 2 buttons, so there is nothing to
+  gain by making the circle movable too.
+- `OPS_MODE_SCREEN` draws all 4 corners. Its non-circle pool alone (slots 4, 6, and 7) happens to
+  exactly match today's 3 special function types, which is a coincidence, not headroom: a 4th
+  icon-bearing special function would need a 4th simultaneous slot the moment all 4 buttons held 4
+  different values. Folding the softkey-circle slots (1, 2) into the *same* pool — 5 candidate slots
+  total — removes that ceiling permanently: with 4 buttons, at most 4 distinct concepts are ever
+  needed at once (out of hollow, filled, and however many special functions exist), so 5 candidates
+  always leave at least one spare.
+
+Adding a future icon-bearing special function needs no change to this pool architecture at all — only
+the same three pieces every existing one already has: an `isFunctionXxx()` predicate
+(`cst-functions.c`), a `needXxx` check plus a `setupXxxChar(slot)` glyph loader wired into
+`allocateSpecialGlyphSlots()` (`mrbw-cst.c`) and `cst-lcd.c` respectively, and a case in
+`buttonCornerGlyph()` to read the resulting tracking slot back. `cst-common.h` carries the full
+derivation next to the slot `#define`s.
+
+Every transition to a menu or `AIRBRAKE` screen forces `LCD_DEFAULT`, whose `currentMode` guard
+reloads the displaced `PSI` glyphs and the fixed-slot softkey circle; changing the `DISPLAY` pref
+always round-trips through `LCD_DEFAULT`. The battery `FULL` / `HALF` / `EMPTY` glyphs are narrow
+3-pixel bitmaps.
 
 **AM/PM clock indicator (`AMPM_CHAR`).** One dynamically-rewritten slot rather than the two static ones
 (`AM_CHAR`/`PM_CHAR`) this replaced, since the clock is drawn at exactly one screen position and changes
@@ -1098,24 +1130,23 @@ pattern, which also covers whether LOAD is eligible to assert at all (`loadEligi
 
 **Restricted to one button at a time, enforced in firmware.** `loadUsedElsewhere()` (`cst-functions.c`)
 skips `FN_LOAD` in the CONFIG FUNC value cycle for any button while another of the four already holds it.
-This is a hardware constraint, not a style choice: the LCD has exactly 8 CGRAM slots (a genuine HD44780
-ceiling), all already committed on the base/OPS MODE screen, and the LOAD indicator needs its bitmap
-dynamically rewritten to match whichever button currently holds it — unlike the static hollow/filled
-circle, which uses two permanently loaded slots precisely so several corners can simultaneously show
-different states with no rewriting at all. A single dynamically-rewritten slot is only ever correct when
+This is a hardware constraint, not a style choice: the LOAD indicator needs its bitmap dynamically
+rewritten to match whichever button currently holds it — unlike a purely static bitmap (`AIRBRAKE`'s or
+`CLOCK` peek's), which can be assigned to any number of simultaneous corners with no rewriting at all,
+since every holder wants identical content. A single dynamically-rewritten slot is only ever correct when
 exactly one corner references it; two simultaneous holders in different states would show whichever was
 written most recently at both corners, since CGRAM slot content is global, not per-cell.
 
-**CGRAM.** The indicator (`LOAD_CHAR`, `cst-lcd.c` / `cst-common.h`) is a permanently-reserved slot (4) on
-both `LCD_MAIN`(`_SPEED`) and `LCD_OPS`(`_SPEED`) — see "OPS MODE screen" CGRAM above for the palette
-split that freed this slot unconditionally (no longer dependent on `DISPLAY`, unlike when it borrowed the
-old `PM_CHAR` slot). `setupLCD()` never writes this slot in any mode — it stays exclusively managed by the
-runtime `setupLoadChar()` call from `renderBaseScreen()`, tracking whichever of the four buttons currently
-holds LOAD. `loadActive(fn)` / `loadEligible()` (`mrbw-cst.c`) still gate every runtime use of LOAD — the
-press-edge advance, the `functionMask` assembly, `buttonCornerGlyph()`, and the `setupLoadChar()` call
-itself — but this is now a product-behavior choice rather than a CGRAM-safety requirement: an
-already-assigned LOAD button is deliberately left going fully inert the moment `DISPLAY` drops back to
-`CLOCK`, matching the behavior from before the palette split.
+**CGRAM.** The indicator (`cst-lcd.c`'s `setupLoadChar(slot, loadMode)`) draws from the same dynamic pool
+as `AIRBRAKE`/`CLOCK` peek — see "OPS MODE screen" CGRAM above for the full pool architecture.
+`setupLCD()` never writes to any pool slot in any mode — it stays exclusively managed by
+`allocateSpecialGlyphSlots()`, called every render pass from `renderBaseScreen()`, which resolves
+`loadModeUp`/`Down`/`Menu`/`Sel` (whichever single button currently holds LOAD, per the restriction
+above) into whichever slot the pool assigns that pass. `loadActive(fn)` / `loadEligible()` (`mrbw-cst.c`)
+still gate every runtime use of LOAD — the press-edge advance, the `functionMask` assembly,
+`buttonCornerGlyph()`, and the pool allocation itself — but this is a product-behavior choice rather than
+a CGRAM-safety requirement: an already-assigned LOAD button is deliberately left going fully inert the
+moment `DISPLAY` drops back to `CLOCK`.
 
 **Base-screen "Fn active" reminder.** A LOAD-configured `MENU_FN` / `SEL_FN` never sets the
 `optionButtonState` bit (its press-edge handler advances the persistent `LoadMode` state directly instead
@@ -1148,6 +1179,64 @@ mirroring `loadUsedElsewhere()` (`cst-functions.c`), since two simultaneous hold
 the one shared CGRAM slot with their own state (see "CGRAM" above) — also rejects it on more than one of
 the four buttons at once, a check the on-device menu enforces live but a hand-edited JSON import could
 otherwise bypass.
+
+## CLOCK Peek
+
+A sixth special value for the same four configurable buttons `AIRBRAKE`/`LOAD` occupy (`UP_FN` /
+`DOWN_FN` / `MENU_FN` / `SEL_FN`) — `FN_CLOCK`, menu name "CLOCK", spliced into the value cycle directly
+after `AIRBRAKE` (the last position before wrapping to `OFF`). While the configured button is
+physically held, the `(1,1)` speed readout is replaced by the fast-clock readout (`printTime()`);
+releasing the button reverts immediately — `printSpeed()`/`printTime()` draw an identical 6-character
+field at the same position, so the swap is just "call the other function instead," no `lcd_gotoxy()`
+bookkeeping needed. Offered as a CONFIG FUNC choice only while SPEED is enabled
+(`CONFIGBITS_MAIN_SCREEN_SPEED` — `clockEligible()`, `mrbw-cst.c`), since there is nothing to "peek"
+away from otherwise; unlike `LOAD` there is no decoder-`TYPE` dependency, and no committed/live
+snapshot is needed either — `CLOCK` never reaches `functionMask` (see below), so there is no "edited
+elsewhere, read here mid-edit" hazard the way `LOAD`'s `TYPE`/`DISPLAY` interaction has.
+
+**Not a DCC function.** Like `AIRBRAKE`, `FN_CLOCK` never reaches `functionMask` — `getFunctionMask()`/
+`isFunctionEstop()` already return 0/false for any value outside the `F00`-`F28` ranges and `FN_EMRG`,
+so no code change was needed there. Unlike `AIRBRAKE` (a screen jump) or `LOAD` (a persistent 3-way
+state advanced on the press edge), `CLOCK` needs no press-edge interception at all: it is not listed in
+`isFunctionLatching()`'s switch, so it falls through to the default "momentary" case for free — the
+existing generic `optionButtonState` press/release bookkeeping already tracks "is this button currently
+held" for any plain momentary function, and `renderBaseScreen()` just reads that same bit
+(`clockPeekHeld`, OR'd across all four buttons) to decide which readout to draw.
+
+**CGRAM.** The corner icon (`cst-lcd.c`'s `setupClockPeekGlyphChar(slot)`) draws from the same dynamic
+pool as `AIRBRAKE`/`LOAD` — see "OPS MODE screen" CGRAM above for the full architecture — and is shown
+for as long as the assignment exists, not gated on the button being held (only the readout swap above
+is momentary; matching `AIRBRAKE`'s always-on convention makes the corner a configuration reminder, not
+a press indicator).
+
+The readout swap itself touches a *different* CGRAM slot entirely (3, shared between `SPEED_H_CHAR` and
+`AMPM_CHAR` — see "AM/PM clock indicator" above) and needs its own care, independent of the pool: while
+peeking, `printTime()` is called without leaving `LCD_MAIN_SPEED`/`LCD_OPS_SPEED` (`DISPLAY` is still
+SPEED), so if the fast clock is in 12-hour mode, `displayTime()` unconditionally overwrites slot 3 with
+the real AM/PM bitmap — correctly, since showing AM/PM during a peek is the point. But nothing else
+would then restore the "H" bitmap once the peek ends, so `renderBaseScreen()`'s non-peek path
+explicitly calls `setupSpeedHChar()` (restoring "H") *and* `invalidateAmPmChar()` (resetting
+`displayTime()`'s change-detection sentinel, `cst-time.c`'s `lastAmPm`) every pass `printSpeed()` runs.
+The second call is not optional: `displayTime()` only rewrites slot 3 when the AM/PM *value* differs
+from the last one it drew, so without invalidating that cache, a second peek within the same AM/PM
+half-day would see "no change" and skip the rewrite — even though slot 3's physical content was
+overwritten by `setupSpeedHChar()` in the meantime, leaving "H" stuck in the readout instead of the
+correct AM/PM glyph.
+
+**Stale-assignment cleanup.** `clearClockFunctions()` (`cst-functions.c`) mirrors `clearLoadFunctions()`
+exactly — resets any of the four buttons holding `FN_CLOCK` back to `FN_OFF` (RAM and EEPROM directly),
+called from the same `PREFS` `SELECT`-save site as `clearLoadFunctions()`, guarded by the same
+`if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))`: once `DISPLAY` drops back to `CLOCK`, there is
+nothing left for `CLOCK` peek to peek away from.
+
+No `EEPROM_LAYOUT_VERSION` bump: `FN_CLOCK` is a new value within the existing function-value byte
+range (`0x83`, the next free byte after `FN_LOAD`'s `0x82`) — same precedent as `FN_LOAD`/`FN_AIRBRAKE`.
+
+**Not yet done**: PC tooling — deferred until the firmware side is hardware-confirmed, per the usual
+workflow. Would mirror `FN_LOAD`'s treatment: a `FUNC_CLOCK` mirror bit in `cst_eeprom_layout.py` on the
+same four `FUNCTION_FIELDS` entries as `FUNC_MENU`/`FUNC_LOAD`, and `FN_CLOCK` registered as `"CLOCK"`
+in the function-value maps — no multi-holder rejection needed in `slot_codec.py`, unlike `"LOAD"`, since
+`CLOCK` has no single-owner restriction.
 
 ## On-device config-screen pattern
 

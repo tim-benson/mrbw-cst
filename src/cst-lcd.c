@@ -97,10 +97,26 @@ void setupDiagChars(void)
 	lcd_setup_custom(HORN_CHAR, Horn);
 }
 
+// Rewrites the given CGRAM slot with the hollow/filled softkey circle bitmap. Split out from
+// setupSoftkeyChars() below so mrbw-cst.c's allocateSpecialGlyphSlots() can write either one into
+// whichever slot it assigns them on OPS_MODE_SCREEN's pool - see cst-common.h.
+void setupSoftkeyInactiveChar(uint8_t slot)
+{
+	lcd_setup_custom(slot, SoftkeyInactive);
+}
+
+void setupSoftkeyActiveChar(uint8_t slot)
+{
+	lcd_setup_custom(slot, SoftkeyActive);
+}
+
+// Unconditional, fixed-slot form for LCD_DEFAULT and LCD_DIAGS, which never reallocate slots 1/2 -
+// only LCD_MAIN*/LCD_OPS* fold them into mrbw-cst.c's allocateSpecialGlyphSlots() pool instead (see
+// cst-common.h), so setupLCD() no longer calls this for those four modes.
 void setupSoftkeyChars(void)
 {
-	lcd_setup_custom(FUNCTION_INACTIVE_CHAR, SoftkeyInactive);
-	lcd_setup_custom(FUNCTION_ACTIVE_CHAR, SoftkeyActive);
+	setupSoftkeyInactiveChar(FUNCTION_INACTIVE_CHAR);
+	setupSoftkeyActiveChar(FUNCTION_ACTIVE_CHAR);
 }
 
 void setupAuxChars(void)
@@ -182,9 +198,8 @@ void setupOpsChars(void)
 
 // Bold "A" glyph shown on an AIRBRAKE-bound button corner (UP/DOWN/MENU/SEL BTN = AIRBRAKE), in
 // place of the softkey circle - the button jumps to the AIRBRAKE gauge rather than driving a DCC
-// function. Occupies the PSI_CHAR_L slot, loaded on all four base-screen modes (LCD_MAIN /
-// LCD_MAIN_SPEED / LCD_OPS / LCD_OPS_SPEED - both screens' corners can be AIRBRAKE-bound); the
-// AIRBRAKE DUAL screen reloads PSI_CHAR_L on its own LCD_DEFAULT mode change.
+// function. Written into whichever pool slot mrbw-cst.c's allocateSpecialGlyphSlots() assigns it
+// this render pass (see cst-common.h) - not a fixed slot, and not loaded by setupLCD().
 const uint8_t AirbrakeGlyph[8] =
 {
 	0b00000000,
@@ -197,9 +212,30 @@ const uint8_t AirbrakeGlyph[8] =
 	0b00000000
 };
 
-void setupAirbrakeGlyphChar(void)
+void setupAirbrakeGlyphChar(uint8_t slot)
 {
-	lcd_setup_custom(AIRBRAKE_GLYPH_CHAR, AirbrakeGlyph);
+	lcd_setup_custom(slot, AirbrakeGlyph);
+}
+
+// Small clock-face glyph shown on a CLOCK-bound button corner (UP/DOWN/MENU/SEL BTN = CLOCK), shown
+// for as long as that assignment exists (not gated on the button being held). Written into whichever
+// pool slot allocateSpecialGlyphSlots() assigns it this render pass - see setupAirbrakeGlyphChar()
+// above.
+const uint8_t ClockPeekGlyph[8] =
+{
+	0b00000000,
+	0b00001110,
+	0b00010101,
+	0b00010111,
+	0b00010001,
+	0b00001110,
+	0b00000000,
+	0b00000000
+};
+
+void setupClockPeekGlyphChar(uint8_t slot)
+{
+	lcd_setup_custom(slot, ClockPeekGlyph);
 }
 
 // Narrow "H" for the MPH/KMH unit in the running SPEED readout (printSpeed()), tighter than the
@@ -223,8 +259,8 @@ void setupSpeedHChar(void)
 	lcd_setup_custom(SPEED_H_CHAR, SpeedNarrowH);
 }
 
-// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD) OFF/OPLOAD/PRLOAD glyphs. Occupies the LOAD_CHAR slot,
-// permanently reserved on LCD_MAIN* / LCD_OPS* - see cst-common.h's LOAD_CHAR definition.
+// LOAD button (UP/DOWN/MENU/SEL BTN = LOAD) OFF/OPLOAD/PRLOAD glyphs. Written into whichever pool
+// slot mrbw-cst.c's allocateSpecialGlyphSlots() assigns it this render pass - see cst-common.h.
 const uint8_t LoadOff[8] =
 {
 	0b00000000,
@@ -261,16 +297,17 @@ const uint8_t LoadPrLoad[8] =
 	0b00000000
 };
 
-// Rewrites the LOAD_CHAR slot for the button's current 3-way state - called every render pass while
-// a button is LOAD-active (mrbw-cst.c's renderBaseScreen()), not gated by setupLCD()'s currentMode,
-// since the bitmap must track live state even while currentMode stays LCD_OPS_SPEED across passes.
-void setupLoadChar(LoadMode loadMode)
+// Rewrites the given slot for the button's current 3-way state - called every render pass while a
+// button is LOAD-active (mrbw-cst.c's allocateSpecialGlyphSlots()), not gated by setupLCD()'s
+// currentMode, since the bitmap must track live state even while currentMode stays LCD_OPS_SPEED
+// across passes.
+void setupLoadChar(uint8_t slot, LoadMode loadMode)
 {
 	switch(loadMode)
 	{
-		case LOAD_MODE_OPLOAD: lcd_setup_custom(LOAD_CHAR, LoadOpLoad); break;
-		case LOAD_MODE_PRLOAD: lcd_setup_custom(LOAD_CHAR, LoadPrLoad); break;
-		default:                lcd_setup_custom(LOAD_CHAR, LoadOff);   break;
+		case LOAD_MODE_OPLOAD: lcd_setup_custom(slot, LoadOpLoad); break;
+		case LOAD_MODE_PRLOAD: lcd_setup_custom(slot, LoadPrLoad); break;
+		default:                lcd_setup_custom(slot, LoadOff);   break;
 	}
 }
 
@@ -753,21 +790,23 @@ void setupLCD(LcdMode mode)
 			case LCD_MAIN_SPEED:
 			case LCD_OPS:
 			case LCD_OPS_SPEED:
-				// MAIN_SCREEN (LCD_MAIN*) and OPS_MODE_SCREEN (LCD_OPS*) each get their own palette -
-				// PSI_CHAR_L -> the AIRBRAKE "A" button-corner glyph on both (reloaded to the PSI
-				// glyph by the AIRBRAKE DUAL screen / a menu, which force LCD_DEFAULT). PSI_CHAR_R ->
-				// the OPS "Fn active" glyph, loaded only under LCD_MAIN* - OPS_MODE_SCREEN never
-				// draws it (renderBaseScreen() only references OPS_FN_ACTIVE_CHAR when opsScreen is
-				// false), so LCD_OPS* leaves that slot genuinely free. LOAD_CHAR (slot 4) is
-				// deliberately never written here in any of the four cases - it stays exclusively
-				// runtime-managed by renderBaseScreen()'s setupLoadChar() call (see cst-common.h).
-				// The _SPEED variants reuse AMPM_CHAR's slot for the narrow "H" unit glyph instead;
-				// the non-speed variants only invalidate the AM/PM sentinel here, never write a
-				// bitmap directly - see invalidateAmPmChar() (cst-time.h) for why.
+				// MAIN_SCREEN (LCD_MAIN*) and OPS_MODE_SCREEN (LCD_OPS*) each get their own palette.
+				// Slots 1, 2 (softkey circle), 4, and 6 (PSI_CHAR_L) - plus, on LCD_OPS*, slot 7
+				// (PSI_CHAR_R, otherwise unused there) - are a dynamic pool shared by the plain
+				// hollow/filled circle and every icon-bearing special button function (AIRBRAKE,
+				// LOAD, CLOCK, and any added later): deliberately never written here in any of the
+				// four cases, since which concept belongs in which pool slot depends on live button
+				// configuration, not just LcdMode, so it stays exclusively runtime-managed by
+				// mrbw-cst.c's allocateSpecialGlyphSlots() every render pass (see cst-common.h for
+				// why this is always sufficient, however many special functions exist). PSI_CHAR_R is
+				// the OPS "Fn active" glyph only under LCD_MAIN* - OPS_MODE_SCREEN never draws it
+				// (renderBaseScreen() only references OPS_FN_ACTIVE_CHAR when opsScreen is false), so
+				// LCD_OPS* leaves that slot to the pool instead. The _SPEED variants reuse AMPM_CHAR's
+				// slot for the narrow "H" unit glyph instead; the non-speed variants only invalidate
+				// the AM/PM sentinel here, never write a bitmap directly - see invalidateAmPmChar()
+				// (cst-time.h) for why.
 				setupBatteryChar();
-				setupSoftkeyChars();
 				setupAuxChars();
-				setupAirbrakeGlyphChar();
 				if((LCD_MAIN == mode) || (LCD_MAIN_SPEED == mode))
 					setupOpsChars();
 				if((LCD_MAIN_SPEED == mode) || (LCD_OPS_SPEED == mode))

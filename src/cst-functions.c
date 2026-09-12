@@ -30,6 +30,7 @@ LICENSE:
 #define SPECIAL_FUNC     0x02
 #define MENU_FUNC        0x04
 #define LOAD_FUNC        0x08
+#define CLOCK_FUNC       0x10
 
 typedef struct
 {
@@ -64,10 +65,10 @@ static FunctionData functions[] = {
 	[REAR_DIM2_FN]           = {.name = "R.DIM #2", .eeAddr = EE_REAR_DIM2_FUNCTION},
 	[REAR_HEADLIGHT_FN]      = {.name = "R.HEAD",   .eeAddr = EE_REAR_HEADLIGHT_FUNCTION},
 	[REAR_DITCH_FN]          = {.name = "R.DITCH",  .eeAddr = EE_REAR_DITCH_FUNCTION},
-	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
-	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
-	[MENU_FN]                = {.name = "MENU BTN", .eeAddr = EE_MENU_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
-	[SEL_FN]                 = {.name = "SEL BTN",  .eeAddr = EE_SEL_BUTTON_FUNCTION,       .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC},
+	[UP_FN]                  = {.name = "UP BTN",   .eeAddr = EE_UP_BUTTON_FUNCTION,        .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC|CLOCK_FUNC},
+	[DOWN_FN]                = {.name = "DOWN BTN", .eeAddr = EE_DOWN_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC|CLOCK_FUNC},
+	[MENU_FN]                = {.name = "MENU BTN", .eeAddr = EE_MENU_BUTTON_FUNCTION,      .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC|CLOCK_FUNC},
+	[SEL_FN]                 = {.name = "SEL BTN",  .eeAddr = EE_SEL_BUTTON_FUNCTION,       .attributes = SOFTWARE_LATCH|SPECIAL_FUNC|MENU_FUNC|LOAD_FUNC|CLOCK_FUNC},
 	[BK2_FN]                 = {.name = "BRAKE2",   .eeAddr = EE_BK2_FUNCTION},
 	[BK3_FN]                 = {.name = "BRAKE3",   .eeAddr = EE_BK3_FUNCTION},
 };
@@ -94,6 +95,9 @@ void printCurrentFunctionValue(void)
 			break;
 		case FN_AIRBRAKE:
 			lcd_puts("AIRBRAKE");
+			break;
+		case FN_CLOCK:
+			lcd_puts("CLOCK   ");
 			break;
 		case F00_MOM: case F10_MOM: case F20_MOM:
 		case F01_MOM: case F11_MOM: case F21_MOM:
@@ -177,21 +181,20 @@ static uint8_t loadUsedElsewhere(void)
 	return 0;
 }
 
-
 /*
 
                                   +------------------------------------------------------->
                                   |-------------------------->
-   FN_OFF ---> F00_MOM ... F28_MOM --> F00_LAT ... F28_LAT --> FN_EMRG --> FN_LOAD --> FN_AIRBRAKE
-   ^  ^ <-------------------------+                       |-------------->      |            |
-   |  |---------------------------------------------------+           |         |            |
-   |  +----------------------------------------------------------------------------+          |
-   +---------------------------------------------------------------------------------------+
+   FN_OFF ---> F00_MOM ... F28_MOM --> F00_LAT ... F28_LAT --> FN_EMRG --> FN_LOAD --> FN_AIRBRAKE --> FN_CLOCK
+   ^  ^ <-------------------------+                       |-------------->      |            |             |
+   |  |---------------------------------------------------+           |         |            |             |
+   |  +----------------------------------------------------------------------------+          |             |
+   +---------------------------------------------------------------------------------------+---------------+
 
 */
 
 
-void incrementCurrentFunctionValue(uint8_t loadEnabled)
+void incrementCurrentFunctionValue(uint8_t loadEnabled, uint8_t clockEnabled)
 {
 	switch(functions[currentFunction].fn)
 	{
@@ -251,6 +254,16 @@ void incrementCurrentFunctionValue(uint8_t loadEnabled)
 			functions[currentFunction].fn = FN_AIRBRAKE;
 			break;
 		case FN_AIRBRAKE:
+			if((functions[currentFunction].attributes & CLOCK_FUNC) && clockEnabled)
+			{
+				functions[currentFunction].fn = FN_CLOCK;
+			}
+			else
+			{
+				functions[currentFunction].fn = FN_OFF;
+			}
+			break;
+		case FN_CLOCK:
 			functions[currentFunction].fn = FN_OFF;
 			break;
 		case F00_MOM: case F10_MOM: case F20_MOM:
@@ -286,11 +299,11 @@ void incrementCurrentFunctionValue(uint8_t loadEnabled)
 
 /*
 
-   FN_OFF <--- F00_MOM ... F28_MOM <--- F00_LAT ... F28_LAT <--- FN_EMRG <--- FN_LOAD <--- FN_AIRBRAKE
+   FN_OFF <--- F00_MOM ... F28_MOM <--- F00_LAT ... F28_LAT <--- FN_EMRG <--- FN_LOAD <--- FN_AIRBRAKE <--- FN_CLOCK
 
 */
 
-void decrementCurrentFunctionValue(uint8_t loadEnabled)
+void decrementCurrentFunctionValue(uint8_t loadEnabled, uint8_t clockEnabled)
 {
 	switch(functions[currentFunction].fn)
 	{
@@ -334,8 +347,17 @@ void decrementCurrentFunctionValue(uint8_t loadEnabled)
 				functions[currentFunction].fn = F28_MOM;
 			}
 			break;
+		case FN_CLOCK:
+			// Symmetric with FN_LOAD's decrement above: every clock-capable slot also carries
+			// MENU_FUNC, so this always lands on FN_AIRBRAKE - no need to re-test attributes.
+			functions[currentFunction].fn = FN_AIRBRAKE;
+			break;
 		case FN_OFF:
-			if(functions[currentFunction].attributes & MENU_FUNC)
+			if((functions[currentFunction].attributes & CLOCK_FUNC) && clockEnabled)
+			{
+				functions[currentFunction].fn = FN_CLOCK;
+			}
+			else if(functions[currentFunction].attributes & MENU_FUNC)
 			{
 				functions[currentFunction].fn = FN_AIRBRAKE;
 			}
@@ -449,6 +471,32 @@ void clearLoadFunctions(void)
 		{
 			functions[loadSlots[i]].fn = FN_OFF;
 			eeprom_write_byte((uint8_t*)(functions[loadSlots[i]].eeAddr), FN_OFF);
+		}
+	}
+}
+
+uint8_t isFunctionClock(Functions functionName)
+{
+	if(FN_CLOCK == functions[functionName].fn)
+		return 1;
+	else
+		return 0;
+}
+
+// Clears any UP/DOWN/MENU/SEL BTN currently set to FN_CLOCK back to FN_OFF, updating both RAM and
+// EEPROM directly - mirrors clearLoadFunctions() above. Called from mrbw-cst.c's PREFS save whenever
+// the saved DISPLAY no longer shows SPEED: without this, a button already configured to CLOCK would
+// keep showing "CLOCK" in CONFIG FUNC even though there is no SPEED readout left to peek away from.
+void clearClockFunctions(void)
+{
+	static const Functions clockSlots[] = { UP_FN, DOWN_FN, MENU_FN, SEL_FN };
+	uint8_t i;
+	for(i = 0; i < (sizeof(clockSlots)/sizeof(clockSlots[0])); i++)
+	{
+		if(FN_CLOCK == functions[clockSlots[i]].fn)
+		{
+			functions[clockSlots[i]].fn = FN_OFF;
+			eeprom_write_byte((uint8_t*)(functions[clockSlots[i]].eeAddr), FN_OFF);
 		}
 	}
 }
