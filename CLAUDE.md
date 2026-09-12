@@ -1232,11 +1232,14 @@ nothing left for `CLOCK` peek to peek away from.
 No `EEPROM_LAYOUT_VERSION` bump: `FN_CLOCK` is a new value within the existing function-value byte
 range (`0x83`, the next free byte after `FN_LOAD`'s `0x82`) — same precedent as `FN_LOAD`/`FN_AIRBRAKE`.
 
-**Not yet done**: PC tooling — deferred until the firmware side is hardware-confirmed, per the usual
-workflow. Would mirror `FN_LOAD`'s treatment: a `FUNC_CLOCK` mirror bit in `cst_eeprom_layout.py` on the
-same four `FUNCTION_FIELDS` entries as `FUNC_MENU`/`FUNC_LOAD`, and `FN_CLOCK` registered as `"CLOCK"`
-in the function-value maps — no multi-holder rejection needed in `slot_codec.py`, unlike `"LOAD"`, since
-`CLOCK` has no single-owner restriction.
+**PC tooling**: `cst_eeprom_layout.py` mirrors the firmware `CLOCK_FUNC` attribute bit as `FUNC_CLOCK`
+(`0x10`), set on the same four `FUNCTION_FIELDS` entries as `FUNC_MENU`/`FUNC_LOAD`, and registers
+`FN_CLOCK` (`0x83`) as `"CLOCK"` in the function-value maps. `slot_codec.py`'s own `_encode_functions()`
+rejects `"CLOCK"` on any other field, mirroring the `"AIRBRAKE"`/`"LOAD"` field-restriction checks — but
+unlike `"LOAD"`, it needs **no** multi-holder rejection, since `CLOCK` has no single-owner restriction
+(any number of buttons may hold it at once, confirmed by `test_clock_fn_allowed_on_more_than_one_button`
+in `test_slot_codec.py`). No `SLOT_SCHEMA_VERSION` bump, for the same reason `"AIRBRAKE"` never needed
+one: a new legal string within an existing field type, not a JSON shape change.
 
 ## On-device config-screen pattern
 

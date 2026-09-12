@@ -101,6 +101,9 @@ def _encode_functions(d, errors, allow_missing=False):
         if value == layout.FN_AIRBRAKE and not (attrs & layout.FUNC_MENU):
             errors.append("functions.%s: AIRBRAKE is not valid here (only UP_BUTTON, DOWN_BUTTON, "
                            "MENU_BUTTON, SEL_BUTTON support it)" % key)
+        if value == layout.FN_CLOCK and not (attrs & layout.FUNC_CLOCK):
+            errors.append("functions.%s: CLOCK is not valid here (only UP_BUTTON, DOWN_BUTTON, "
+                           "MENU_BUTTON, SEL_BUTTON support it)" % key)
         if value == layout.FN_LOAD:
             if attrs & layout.FUNC_LOAD:
                 load_keys.append(key)

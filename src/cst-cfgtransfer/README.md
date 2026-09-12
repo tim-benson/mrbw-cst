@@ -192,9 +192,11 @@ the objects follow the top-level menu cycle
   (momentary DCC function 0-28), `"F00_LAT"`..`"F28_LAT"` (latching), `"EMRG"` (emergency stop — only
   valid on `AUX`, `ALERTER`, `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`), `"AIRBRAKE"`
   (opens the AIRBRAKE gauge screen — only valid on `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`,
-  `SEL_BUTTON`), or `"LOAD"` (cycles the SPEED CFG `OPLOADFN`/`PRLOADFN` load simulation on each press
+  `SEL_BUTTON`), `"LOAD"` (cycles the SPEED CFG `OPLOADFN`/`PRLOADFN` load simulation on each press
   — only valid on `UP_BUTTON`, `DOWN_BUTTON`, `MENU_BUTTON`, `SEL_BUTTON`, and rejected on more than
-  one of those four at once, mirroring the on-device firmware restriction). `MENU_BUTTON` /
+  one of those four at once, mirroring the on-device firmware restriction), or `"CLOCK"` (while the
+  button is held, temporarily swaps the SPEED readout for the fast clock — only valid on the same four
+  buttons as `LOAD`, but with no such restriction: any number of them may hold it at once). `MENU_BUTTON` /
   `SEL_BUTTON` are the OPS MODE function buttons — only driven while the OPS MODE screen is active (a
   long-press of MENU from the base screen with the `ops_mode` PREFS bit set), but always present in
   the JSON. `COMPRESSOR2` only appears as a selectable value on-device

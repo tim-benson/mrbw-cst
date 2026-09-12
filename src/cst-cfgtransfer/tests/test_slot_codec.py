@@ -149,7 +149,7 @@ class LayoutVersionRegressionTests(unittest.TestCase):
         self.assertEqual(len(layout.FUNCTION_FIELDS), 30)
         self.assertIn(("HORN2", 0x49, 0), layout.FUNCTION_FIELDS)
         # OPS MODE (schema 6): MENU_BUTTON / SEL_BUTTON, same attributes as UP/DOWN_BUTTON.
-        expected_attrs = layout.FUNC_SPECIAL | layout.FUNC_MENU | layout.FUNC_LOAD
+        expected_attrs = layout.FUNC_SPECIAL | layout.FUNC_MENU | layout.FUNC_LOAD | layout.FUNC_CLOCK
         self.assertIn(("MENU_BUTTON", 0x2C, expected_attrs), layout.FUNCTION_FIELDS)
         self.assertIn(("SEL_BUTTON", 0x2D, expected_attrs), layout.FUNCTION_FIELDS)
 
@@ -389,6 +389,34 @@ class SlotRoundTripTests(unittest.TestCase):
         d2["functions"]["AUX"] = "AIRBRAKE"  # SPECIAL but not MENU
         with self.assertRaises(slot_codec.SlotValidationError):
             slot_codec.encode_slot(d2)
+
+    def test_clock_fn_round_trips_on_a_button(self):
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "CLOCK"
+        encoded = slot_codec.encode_slot(d)
+        offsets = {k: off for k, off, _a in layout.FUNCTION_FIELDS}
+        self.assertEqual(encoded[offsets["UP_BUTTON"]], layout.FN_CLOCK)
+        decoded = slot_codec.decode_slot(encoded, source=d["source"])
+        self.assertEqual(decoded["functions"]["UP_BUTTON"], "CLOCK")
+
+    def test_clock_fn_valid_on_clock_func_only(self):
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "CLOCK"
+        slot_codec.encode_slot(d)  # should not raise
+
+        d2 = _valid_slot_dict()
+        d2["functions"]["AUX"] = "CLOCK"  # SPECIAL but not CLOCK-capable
+        with self.assertRaises(slot_codec.SlotValidationError):
+            slot_codec.encode_slot(d2)
+
+    def test_clock_fn_allowed_on_more_than_one_button(self):
+        # Unlike LOAD (test_load_fn_rejected_on_more_than_one_button), CLOCK's corner glyph draws from
+        # the dynamic AIRBRAKE/LOAD/CLOCK pool (see CLAUDE.md's "CLOCK Peek") rather than a single
+        # stateful slot, so any number of buttons may simultaneously hold it.
+        d = _valid_slot_dict()
+        d["functions"]["UP_BUTTON"] = "CLOCK"
+        d["functions"]["DOWN_BUTTON"] = "CLOCK"
+        slot_codec.encode_slot(d)  # should not raise
 
     def test_stack_combo_all_eight_values(self):
         for c1 in ("-", "1"):
