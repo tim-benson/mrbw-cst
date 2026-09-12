@@ -47,6 +47,11 @@ extern uint8_t txHoldoff_centisecs;
 #define CNF_CHUNK_MAX_BYTES            10
 #define CNF_PAYLOAD_SIZE               128
 
+// Sentinel for cnfSendAndWait()'s expectedOffset param on any non-DATA subtype (BEGIN/COMMIT carry no
+// chunk offset to check) - safe since a real DATA offset is always 0..120 (CNF_PAYLOAD_SIZE-8, the last
+// chunk), never 0xFF.
+#define CNF_OFFSET_DONT_CARE           0xFF
+
 #define CNF_POLL_INTERVAL_MS           20
 #define CNF_CHUNK_TIMEOUT_MS           300
 // COMMIT is the one step where cabbus does real EEPROM writes (128-byte payload + 4 metadata bytes)
@@ -140,19 +145,31 @@ static uint8_t cnfPacketIsValid(const uint8_t *rxBuffer)
 	return (UINT16_HIGH_BYTE(crc) == rxBuffer[MRBUS_PKT_CRC_H]) && (UINT16_LOW_BYTE(crc) == rxBuffer[MRBUS_PKT_CRC_L]);
 }
 
-// Sends a request, waits for the matching reply (right type/subtype/entry), retrying (resending) up to
-// CNF_CHUNK_MAX_RETRIES times on a per-attempt `timeoutMs` budget (CNF_CHUNK_TIMEOUT_MS for BEGIN/DATA,
-// the larger CNF_COMMIT_TIMEOUT_MS for COMMIT specifically - see that constant's comment) - bounded
-// overall by CNF_OVERALL_TIMEOUT_MS across the whole push/pull, tracked in cnfOverallElapsedMs. Any
-// packet that arrives but doesn't match (stray traffic, a reply to some earlier retried attempt, etc.)
-// is discarded and polling continues within the same attempt's remaining time. Returns 1 (rxBuffer
-// filled with the matching reply) on success, 0 on exhausted retries/overall timeout.
+// Sends a request, waits for the matching reply (right type/subtype/entry, and - for DATA specifically -
+// the right chunk offset), retrying (resending) up to CNF_CHUNK_MAX_RETRIES times on a per-attempt
+// `timeoutMs` budget (CNF_CHUNK_TIMEOUT_MS for BEGIN/DATA, the larger CNF_COMMIT_TIMEOUT_MS for COMMIT
+// specifically - see that constant's comment) - bounded overall by CNF_OVERALL_TIMEOUT_MS across the whole
+// push/pull, tracked in cnfOverallElapsedMs. Any packet that arrives but doesn't match (stray traffic, a
+// reply to some earlier retried attempt, etc.) is discarded and polling continues within the same attempt's
+// remaining time. Returns 1 (rxBuffer filled with the matching reply) on success, 0 on exhausted retries/
+// overall timeout.
+//
+// expectedOffset guards specifically against a stale/duplicate DATA-ACK from an earlier chunk being
+// mistaken for the reply to whichever chunk is currently being awaited - every DATA exchange within one
+// transfer shares the same type/subtype/entry, so the offset the cabbus echoes back (rxBuffer[8]) is the
+// only thing that actually distinguishes chunk N's reply from chunk N+1's. A transfer-wide condition (e.g.
+// other broadcast traffic sharing the radio channel for the transfer's multi-second duration - a fast-clock
+// broadcast was the case that surfaced this) delaying or duplicating one reply long enough for it to still
+// be sitting in the RX queue once the next chunk is requested used to corrupt the reassembled payload
+// silently, surfacing only as a CRC mismatch at the end. Pass CNF_OFFSET_DONT_CARE for BEGIN/COMMIT, which
+// carry no chunk offset to check.
 //
 // This device isn't running its own PktHandler() dispatch while blocked in here, so any *other* incoming
 // traffic during a sync is silently dropped - matching how the existing local-slot LOAD/SAVE dot-animation
 // already doesn't process incoming packets during its own (much shorter) blocking window.
 static uint8_t cnfSendAndWait(uint8_t reqType, uint8_t replyType, uint8_t subtype, uint8_t entry,
-                               const uint8_t *extra, uint8_t extraLen, uint8_t *rxBuffer, uint16_t timeoutMs)
+                               const uint8_t *extra, uint8_t extraLen, uint8_t *rxBuffer, uint16_t timeoutMs,
+                               uint8_t expectedOffset)
 {
 	uint8_t attempt;
 	for(attempt = 0; attempt < CNF_CHUNK_MAX_RETRIES; attempt++)
@@ -170,7 +187,8 @@ static uint8_t cnfSendAndWait(uint8_t reqType, uint8_t replyType, uint8_t subtyp
 			if(mrbeePktQueuePop(&mrbeeRxQueue, rxBuffer, MRBUS_BUFFER_SIZE, &rssi))
 			{
 				if(cnfPacketIsValid(rxBuffer) && rxBuffer[MRBUS_PKT_TYPE] == replyType &&
-				   rxBuffer[MRBUS_PKT_SUBTYPE] == subtype && rxBuffer[7] == entry)
+				   rxBuffer[MRBUS_PKT_SUBTYPE] == subtype && rxBuffer[7] == entry &&
+				   (CNF_SUBTYPE_DATA != subtype || rxBuffer[8] == expectedOffset))
 					return 1;
 				continue;  // not our reply - keep polling within this attempt's remaining time
 			}
@@ -197,7 +215,7 @@ SyncResult syncPushSharedCnf(uint8_t entry)
 	extra[0] = CNF_PAYLOAD_SIZE;
 	extra[1] = EEPROM_LAYOUT_VERSION;
 	if(!cnfSendAndWait(CNF_PKT_TYPE_PUSH, CNF_PKT_TYPE_PUSH_ACK, CNF_SUBTYPE_BEGIN, entry,
-	                    extra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+	                    extra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS, CNF_OFFSET_DONT_CARE))
 		return SYNC_TIMEOUT_BEGIN;
 	if(rxBuffer[8] != CNF_STATUS_OK)
 	{
@@ -220,7 +238,7 @@ SyncResult syncPushSharedCnf(uint8_t entry)
 		memcpy(&extra[2], &cnfSyncScratch[offset], length);
 
 		if(!cnfSendAndWait(CNF_PKT_TYPE_PUSH, CNF_PKT_TYPE_PUSH_ACK, CNF_SUBTYPE_DATA, entry,
-		                    extra, 2 + length, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+		                    extra, 2 + length, rxBuffer, CNF_CHUNK_TIMEOUT_MS, offset))
 		{
 			cnfLastTimeoutOffset = offset;
 			return SYNC_TIMEOUT_DATA;
@@ -235,7 +253,7 @@ SyncResult syncPushSharedCnf(uint8_t entry)
 	extra[0] = crc & 0xFF;
 	extra[1] = (crc >> 8) & 0xFF;
 	if(!cnfSendAndWait(CNF_PKT_TYPE_PUSH, CNF_PKT_TYPE_PUSH_ACK, CNF_SUBTYPE_COMMIT, entry,
-	                    extra, 2, rxBuffer, CNF_COMMIT_TIMEOUT_MS))
+	                    extra, 2, rxBuffer, CNF_COMMIT_TIMEOUT_MS, CNF_OFFSET_DONT_CARE))
 		return SYNC_TIMEOUT_COMMIT;
 	if(rxBuffer[8] != CNF_STATUS_OK)
 		return SYNC_CHECKSUM_FAIL;
@@ -249,7 +267,7 @@ SyncResult syncPullSharedCnf(uint8_t entry)
 	cnfOverallElapsedMs = 0;
 
 	if(!cnfSendAndWait(CNF_PKT_TYPE_PULL, CNF_PKT_TYPE_PULL_ACK, CNF_SUBTYPE_BEGIN, entry,
-	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS, CNF_OFFSET_DONT_CARE))
 		return SYNC_TIMEOUT_BEGIN;
 	uint8_t status = rxBuffer[8];
 	if(status != CNF_STATUS_OK)
@@ -285,7 +303,7 @@ SyncResult syncPullSharedCnf(uint8_t entry)
 		reqExtra[0] = offset;
 		reqExtra[1] = length;
 		if(!cnfSendAndWait(CNF_PKT_TYPE_PULL, CNF_PKT_TYPE_PULL_ACK, CNF_SUBTYPE_DATA, entry,
-		                    reqExtra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+		                    reqExtra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS, offset))
 		{
 			cnfLastTimeoutOffset = offset;
 			return SYNC_TIMEOUT_DATA;
@@ -317,7 +335,7 @@ SyncResult syncQuerySharedLocoAddress(uint8_t entry, uint16_t *outLocoAddress)
 	cnfOverallElapsedMs = 0;
 
 	if(!cnfSendAndWait(CNF_PKT_TYPE_PULL, CNF_PKT_TYPE_PULL_ACK, CNF_SUBTYPE_BEGIN, entry,
-	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS, CNF_OFFSET_DONT_CARE))
 		return SYNC_TIMEOUT_BEGIN;
 	uint8_t status = rxBuffer[8];
 	if(status != CNF_STATUS_OK)
@@ -333,7 +351,7 @@ SyncResult syncQuerySharedLocoAddress(uint8_t entry, uint16_t *outLocoAddress)
 	// single DATA chunk covers it, no need to walk the whole 128-byte payload like a real pull does.
 	uint8_t reqExtra[2] = {0, 2};
 	uint8_t result = cnfSendAndWait(CNF_PKT_TYPE_PULL, CNF_PKT_TYPE_PULL_ACK, CNF_SUBTYPE_DATA, entry,
-	                                 reqExtra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS);
+	                                 reqExtra, 2, rxBuffer, CNF_CHUNK_TIMEOUT_MS, 0);
 
 	// BEGIN succeeded, so cabbus is holding a snapshot/busy lock for us regardless of how DATA went -
 	// release it promptly rather than leaving it for the 3s busy-timeout to clear.
@@ -357,7 +375,7 @@ SyncResult syncPeekSharedVersion(uint8_t entry, uint8_t *outLayoutVersion)
 	cnfOverallElapsedMs = 0;
 
 	if(!cnfSendAndWait(CNF_PKT_TYPE_PULL, CNF_PKT_TYPE_PULL_ACK, CNF_SUBTYPE_BEGIN, entry,
-	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS))
+	                    NULL, 0, rxBuffer, CNF_CHUNK_TIMEOUT_MS, CNF_OFFSET_DONT_CARE))
 		return SYNC_TIMEOUT_BEGIN;
 
 	uint8_t status = rxBuffer[8];

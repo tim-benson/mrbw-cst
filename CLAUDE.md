@@ -59,10 +59,11 @@ git hash are baked into the build from `git describe` via `src/git-revision.sh` 
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
 The ATmega1284P (128 KB flash, 16 KB SRAM) has no pin-compatible successor with more memory, so this is a
-one-way door. `make size` currently shows ample headroom — roughly 42% flash, 20% static RAM (leaving
-~13 KB for the stack, against a deepest frame of a few hundred bytes) — and the fork has held near there
-across the whole feature set. Check it before adding a large non-`PROGMEM` table, a wide LCD/canvas
-buffer, or another large `switch(screenState)` branch. The `int64` scale-speed math is a latency concern
+one-way door. `make size` currently shows roughly 48% flash, 21% static RAM (leaving ~12.5 KB for the
+stack, against a deepest frame of a few hundred bytes) — still ample headroom, though OPS MODE (its own
+screen mode plus a second CGRAM palette) moved flash up about 6 points in one feature. Check it before
+adding a large non-`PROGMEM` table, a wide LCD/canvas buffer, or another large `switch(screenState)`
+branch. The `int64` scale-speed math is a latency concern
 (hence out of the ISR — see SPEED), not a footprint one.
 
 The automated firmware tests are `make speedtest`, `make pressuretest` and `make eepromtest` - host-compiled
@@ -1374,6 +1375,25 @@ clears busy state so a throttle that loses power/range mid-transfer cannot wedge
 timeout is 300ms/3 retries; COMMIT gets its own larger 800ms budget, since it triggers a real ~132-byte
 EEPROM write (~3.3ms/byte) before it can even queue its reply. These are bench-tuning starting points, not
 precision-measured values.
+
+**DATA-chunk reply matching (throttle side)**: every `DATA` exchange within one transfer shares the same
+packet type, subtype, and entry number, so the offset byte the cabbus echoes back is the only thing
+distinguishing chunk N's reply from chunk N+1's. `cnfSendAndWait()` (`cst-sync.c`) validates that echoed
+offset against the offset actually requested before accepting a reply as a match (`CNF_OFFSET_DONT_CARE`
+for `BEGIN`/`COMMIT`, which carry no chunk offset), discarding anything else exactly as it already
+discards unrelated traffic. Without this check, a stale or duplicate `DATA`-ACK for an earlier chunk —
+most plausible when other traffic shares the radio channel for the several-second span of a multi-chunk
+transfer, delaying or duplicating a reply long enough for it to still be queued once the next chunk is
+requested (a periodically-broadcasting fast-clock source, `cst_fastclock.py`, was the case that surfaced
+this) — could be silently mistaken for the reply to whatever chunk was subsequently requested, misplacing
+that chunk's bytes in the reassembled payload. This surfaces only as a whole-payload CRC mismatch at the
+very end of the transfer (`SYNC_CHECKSUM_FAIL`, on either LOAD or SAVE, since the same reply-matching code
+backs both directions), with nothing pointing at which chunk was actually at fault. The cabbus side needs
+no equivalent check: it never waits on an expected reply to pick out from a queue of candidates — every
+request it receives already carries the offset it should act on directly, so there is nothing to match
+against a prior expectation. Hardware-confirmed by pushing ten fully-populated, uniquely-valued profiles
+through the whole push → shared store → LOAD → SAVE → ISP-export round trip with a fast-clock broadcast
+running throughout.
 
 **Throttle-side UI**: the slot picker of `LOAD_CONFIG_SCREEN`/`SAVE_CONFIG_SCREEN` gained `N01`-`N20` entries
 immediately below local slot 1, using a disjoint internal range decoupled from on-screen order — a
