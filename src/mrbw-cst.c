@@ -561,6 +561,20 @@ static uint8_t speedItemIsWatchFn(uint8_t item)
 	    || (SPEED_ITEM_OPLOAD_FN == item) || (SPEED_ITEM_PRLOAD_FN == item);
 }
 
+// SPEED_CONFIG_SCREEN: cycle a watched-DCC-function byte (0-28, or the SPEED_STOP_WATCH_FN_OFF
+// sentinel) up or down with wraparound at both ends - OFF -> F00 -> ... -> F28 -> OFF - the same
+// convention CONFIG FUNC's F00..F28 cycle uses for a Functions-enum slot with no extra attributes
+// (no momentary/latching axis applies here, so this is that cycle's single-loop shape).
+static uint8_t speedAdvanceWatchFn(uint8_t value, uint8_t up)
+{
+	if(up)
+		return (SPEED_STOP_WATCH_FN_OFF == value) ? 0
+		     : (28 == value) ? SPEED_STOP_WATCH_FN_OFF : value + 1;
+	else
+		return (0 == value) ? SPEED_STOP_WATCH_FN_OFF
+		     : (SPEED_STOP_WATCH_FN_OFF == value) ? 28 : value - 1;
+}
+
 // SPEED_CONFIG_SCREEN: ACCELADJ/DECELADJ (CV23/CV24) are shown and edited as a signed value; the stored
 // byte carries the ESU sign-bit encoding (bit 7 = subtract, bits 0-6 = magnitude).
 static uint8_t speedItemIsSignedAdjust(uint8_t item)
@@ -3963,14 +3977,7 @@ int main(void)
 							if((UP_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
 								if(speedItemIsWatchFn(speedItem))
-								{
-									// OFF/255 sentinel below 0; step up 0..28, then hold at 28.
-									if(SPEED_STOP_WATCH_FN_OFF == speedVal)
-										speedVal = 0;
-									else if(speedVal < 28)
-										speedVal++;
-									speedSet(speedItem, speedVal);
-								}
+									speedSet(speedItem, speedAdvanceWatchFn(speedVal, 1));
 								else if(SPEED_ITEM_TYPE == speedItem)
 								{
 									// Cycle 0..SPEED_TYPE_COUNT-1; a TYPE change re-inits the model params.
@@ -4002,14 +4009,7 @@ int main(void)
 							if((DOWN_BUTTON != previousButton) || (ticks_autoincrement >= button_autoincrement_10ms_ticks))
 							{
 								if(speedItemIsWatchFn(speedItem))
-								{
-									// Step down 28..0, then wrap to the OFF/255 sentinel and hold there.
-									if(0 == speedVal)
-										speedVal = SPEED_STOP_WATCH_FN_OFF;
-									else if(SPEED_STOP_WATCH_FN_OFF != speedVal)
-										speedVal--;
-									speedSet(speedItem, speedVal);
-								}
+									speedSet(speedItem, speedAdvanceWatchFn(speedVal, 0));
 								else if(SPEED_ITEM_TYPE == speedItem)
 								{
 									if(speedVal > 0)

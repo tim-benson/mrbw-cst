@@ -401,7 +401,10 @@ the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL` are genuine **0-255** 
 itself be 255): `readConfig()` reads `0x28`/`0x2E` raw, and the `EEPROM_LAYOUT_VERSION` → 4
 migration seeds any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
 setting it to `OFF` persists (its `readByteOrDefault` default is F09, which would otherwise revert a
-user-set OFF). `MAXSPEED` is **1-254** (0 is a divisor in the standing-start ramp — `updateSpeed10Hz()`
+user-set OFF). UP/DOWN on all four watched-function items (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`)
+wrap circularly at both ends (`OFF <-> F00 ... F28 <-> OFF`) rather than clamping, matching CONFIG
+FUNC's `F00..F28` cycle convention for a plain function slot with no momentary/latching axis.
+`MAXSPEED` is **1-254** (0 is a divisor in the standing-start ramp — `updateSpeed10Hz()`
 also guards it). `ACCELADJ`/`DECELADJ` are a signed `-127..+127` (the full ESU CV23/CV24 magnitude
 range) shown as a fixed 4-char field `   0` / `+063` / `-127`; the stored byte uses the decoder
 sign-magnitude encoding (bit 7 = subtract), so `-127` is byte `0xFF` and `0x61`/`0x62` are read raw
