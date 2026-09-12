@@ -891,6 +891,18 @@ upgrade, so a configured throttle should be exported with `cst_cfgtransfer.py` b
 `AIRBRAKE`-layout upgrade and re-imported afterward — the later SPEED 2 -> 3 migration, by contrast,
 relocates rather than resets (see the SPEED section).
 
+**Reseed on save/load.** `initAirBrake()` — the same boot-time seed of `bpMilliPsi`/`mrMilliPsi` (with
+its settling jitter) — also runs on an `AIRBRAKE CFG` SELECT-save and on a successful LOAD CNF (local
+slot or shared network entry), so a changed `BPCHARGE`/`MR HIGH` or a newly loaded profile's air-brake
+config takes effect on the gauge immediately rather than only through the model own vent/recharge
+dynamics drifting toward it over the following minutes. Gated to LOAD, not SAVE, on the local-slot and
+network paths — a SAVE also calls `readConfig()`, a redundant reload of the config just written, but
+never reseeds the sim; a cancelled or failed network pull (anything other than `SYNC_OK`) likewise does
+not reseed, matching the gate `readConfig()` itself already uses there. The long-press-Menu cancel out
+of an in-progress, unsaved `AIRBRAKE CFG` edit deliberately does not reseed either — it discards a value
+that was never committed rather than applying a new one, so the sim keeps drifting from wherever it
+already was mid-edit, back toward the last-saved config.
+
 **AIRBRAKE screen** (`AIRBRAKE_SCREEN`; reached from the top-level menu when `AIRBRAKE` is on, or any
 time via a control set to `FN_AIRBRAKE`): a read-only viewport into the always-running model — it
 blocks nothing, so the brake lever drives real decoder braking and the real e-stop from here exactly

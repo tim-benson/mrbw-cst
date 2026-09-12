@@ -3358,6 +3358,8 @@ int main(void)
 										if(SYNC_OK == result)
 										{
 											readConfig();  // locoAddress is now the pulled loco; engineState is left alone
+											// Reseed the airbrake sim from the pulled profile's config, same as at boot.
+											initAirBrake();
 											// Same hand-off the local LOAD path does: look up the incoming
 											// loco first, then save the outgoing one (so the save can't
 											// evict the lookup - see the local path's comment).
@@ -3398,6 +3400,10 @@ int main(void)
 
 									// Refresh.  Needed for load, not for save
 									readConfig();
+
+									if(LOAD_CONFIG_SCREEN == screenState)
+										// Reseed the airbrake sim from the just-loaded profile's config, same as at boot.
+										initAirBrake();
 
 									lcd_gotoxy(0,1);
 									for(i=0; i<8; i++)
@@ -4336,6 +4342,9 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_DISPLAY,     airbrakeGet(AIRBRAKE_DISPLAY));
 								eeprom_write_byte((uint8_t*)EE_AIRBRAKE_COMP_MODE,   airbrakeGet(AIRBRAKE_COMP_MODE));
 								readConfig();
+								// Reseed the airbrake sim from the values just saved, same as at boot,
+								// instead of leaving bpMilliPsi/mrMilliPsi to drift toward them.
+								initAirBrake();
 								lcd_clrscr();
 								lcd_gotoxy(1,0);
 								lcd_puts("SAVED!");
