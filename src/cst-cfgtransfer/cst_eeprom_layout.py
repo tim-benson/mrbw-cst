@@ -74,6 +74,8 @@ EE_CONFIGBITS = 0x13
 EE_BATTERY_OKAY = 0x14
 EE_BATTERY_WARN = 0x15
 EE_BATTERY_CRITICAL = 0x16
+EE_MENU_VIS_1 = 0x17  # menu-visibility bits, low byte (SYSTEM menu HIDE toggles) - layout 5->6
+EE_MENU_VIS_2 = 0x18  # menu-visibility bits, high byte
 EE_TX_HOLDOFF = 0x1D
 EE_TIME_SOURCE_ADDRESS = 0x1E
 EE_BASE_ADDR = 0x1F
@@ -106,6 +108,21 @@ CONFIGBITS_AIRBRAKE = 2  # bit clear = AIRBRAKE off (default); set = drives air 
 CONFIGBITS_OPS_MODE = 3  # bit clear = OPS MODE off (default); set = long-press MENU on the base screen enters the OPS MODE screen
 CONFIGBITS_REVERSER_LOCK = 4
 CONFIGBITS_STRICT_SLEEP = 5
+
+# menuVisBits bitfield (mrbw-cst.c MENUVISBITS_*) - a 16-bit value split across EE_MENU_VIS_1 (low
+# byte, bits 0-7) / EE_MENU_VIS_2 (high byte, bit 8 used, bits 9-15 reserved for future menus). Bit
+# SET = the menu is shown in the top-level MENU cycle (the default - a fresh/upgrading throttle shows
+# every menu), bit CLEAR = hidden via the SYSTEM menu's HIDE toggles. SYSTEM_SCREEN has no bit here -
+# it can never be hidden.
+MENUVISBITS_FORCE_FUNC = 0
+MENUVISBITS_CONFIG_FUNC = 1
+MENUVISBITS_NOTCH = 2
+MENUVISBITS_SPEED = 3
+MENUVISBITS_AIRBRAKE = 4
+MENUVISBITS_OPTIONS = 5
+MENUVISBITS_COMM = 6
+MENUVISBITS_PREFS = 7
+MENUVISBITS_DIAGS = 8
 
 # --- Per-slot fields (offsets relative to config_offset(n)) ---
 EE_LOCO_ADDRESS = 0x00  # word

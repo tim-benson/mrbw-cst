@@ -255,9 +255,15 @@ safe and expected; the firmware fills in its real default the next time that slo
 Grouped one object per config menu, in top-level-menu-cycle order (`SYSTEM` → `COMM` → `PREFS` →
 `THRESHOLD CAL`):
 
-- **`system`**: `battery_okay_decivolts`, `battery_warn_decivolts`, `battery_critical_decivolts` — the
+- **`system`**: `menu_visibility` (the nine booleans `force_func`, `config_func`, `notch_cfg`,
+  `speed_cfg`, `airbrake_cfg`, `options`, `comm_cfg`, `prefs`, `diags`, in SYSTEM menu order — each
+  `true` (the default) means that top-level menu is shown in the MENU cycle, `false` means it is
+  hidden via the SYSTEM menu HIDE toggles; SYSTEM itself has no entry here, since it can never be
+  hidden), then `battery_okay_decivolts`, `battery_warn_decivolts`, `battery_critical_decivolts` — the
   low-battery thresholds (`BAT OKAY` / `BAT WARN` / `BAT CRIT` in the SYSTEM menu, only shown when
-  `ADV FUNC` is on).
+  `ADV FUNC` is on). Unlike every other field in `device.json`, an omitted `menu_visibility` sub-field
+  defaults to `true` (shown) rather than `false` on import — hiding a menu by accident from a mistyped
+  or hand-edited file would be a worse surprise than the reverse.
 - **`comm`**: `mrbus_device_address`, `mrbus_base_address`, `time_source_address`,
   `mrbus_update_interval_decisecs`, `tx_holdoff_centisecs` (`10`-`254` — the firmware heals a stored
   `0xFF` to the default).

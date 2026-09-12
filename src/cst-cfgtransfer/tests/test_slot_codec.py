@@ -96,6 +96,9 @@ def _valid_global_dict():
         "schema_version": slot_codec.SLOT_SCHEMA_VERSION,
         "source": {"scope": "device", "device_fw_version": "1.0", "exported_at": "2026-01-01T00:00:00"},
         "system": {
+            "menu_visibility": {"force_func": True, "config_func": True, "notch_cfg": True,
+                                "speed_cfg": True, "airbrake_cfg": True, "options": True,
+                                "comm_cfg": True, "prefs": True, "diags": True},
             "battery_okay_decivolts": 90,
             "battery_warn_decivolts": 80,
             "battery_critical_decivolts": 70,
@@ -227,6 +230,13 @@ class MenuOrderTests(unittest.TestCase):
                          ["main_screen_speed", "ops_mode", "airbrake", "led_blink", "reverser_lock",
                           "strict_sleep"])
 
+    def test_menu_visibility_match_system_menu_order(self):
+        # = the SYSTEM menu's HIDE toggles, in top-level-menu-cycle order (MENU LCK/ADV FUNC aren't
+        # EEPROM-backed and aren't exported; the battery thresholds follow, not shown here).
+        self.assertEqual(list(slot_codec.MENUVISBITS_NAMED),
+                         ["force_func", "config_func", "notch_cfg", "speed_cfg", "airbrake_cfg",
+                          "options", "comm_cfg", "prefs", "diags"])
+
     def test_slot_top_level_sections_in_menu_order(self):
         # One object per menu: LOCO -> FORCE FUNC -> CONFIG FUNC -> NOTCH -> SPEED CFG -> AIRBRAKE CFG
         # -> OPTIONS.
@@ -240,8 +250,8 @@ class MenuOrderTests(unittest.TestCase):
         g = slot_codec.decode_global(bytes(64) + bytes(b"\xff" * 64), source={})
         # Top-level = config-menu cycle order.
         self.assertEqual(list(g), ["schema_version", "source", "system", "comm", "prefs", "calibration"])
-        self.assertEqual(list(g["system"]), ["battery_okay_decivolts", "battery_warn_decivolts",
-                                              "battery_critical_decivolts"])
+        self.assertEqual(list(g["system"]), ["menu_visibility", "battery_okay_decivolts",
+                                              "battery_warn_decivolts", "battery_critical_decivolts"])
         self.assertEqual(list(g["comm"]), ["mrbus_device_address", "mrbus_base_address",
                                             "time_source_address", "mrbus_update_interval_decisecs",
                                             "tx_holdoff_centisecs"])
@@ -685,6 +695,26 @@ class GlobalRoundTripTests(unittest.TestCase):
         self.assertIn("raw_unknown_bits", decoded["prefs"]["config_bits"])
         re_encoded = slot_codec.encode_global(decoded)
         self.assertEqual(re_encoded[layout.EE_CONFIGBITS], 0xFF)
+
+    def test_unknown_menu_visibility_bits_preserved(self):
+        raw = bytearray(slot_codec.encode_global(_valid_global_dict()))
+        raw[layout.EE_MENU_VIS_1] = 0xFF
+        raw[layout.EE_MENU_VIS_2] = 0xFF  # every bit set, including the 7 reserved ones
+        decoded = slot_codec.decode_global(bytes(raw), source={})
+        self.assertIn("raw_unknown_bits", decoded["system"]["menu_visibility"])
+        re_encoded = slot_codec.encode_global(decoded)
+        self.assertEqual(re_encoded[layout.EE_MENU_VIS_1], 0xFF)
+        self.assertEqual(re_encoded[layout.EE_MENU_VIS_2], 0xFF)
+
+    def test_menu_visibility_missing_field_defaults_shown(self):
+        # Unlike config_bits (missing = False), an omitted menu_visibility field defaults to True
+        # (shown) - hiding a menu by accident on a typo'd/old import would be a worse surprise than
+        # any config_bits field defaulting off.
+        d = _valid_global_dict()
+        del d["system"]["menu_visibility"]["diags"]
+        encoded = slot_codec.encode_global(d)
+        decoded = slot_codec.decode_global(bytes(encoded), source={})
+        self.assertTrue(decoded["system"]["menu_visibility"]["diags"])
 
     def test_out_of_range_device_address_rejected(self):
         d = _valid_global_dict()

@@ -13,7 +13,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          5
+#define EEPROM_LAYOUT_VERSION          6
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -22,6 +22,8 @@
 #define EE_BATTERY_OKAY               0x14
 #define EE_BATTERY_WARN               0x15
 #define EE_BATTERY_CRITICAL           0x16
+#define EE_MENU_VIS_1                 0x17  // menu-visibility bits, low byte (SYSTEM menu HIDE toggles)
+#define EE_MENU_VIS_2                 0x18  // menu-visibility bits, high byte
 #define EE_TX_HOLDOFF                 0x1D
 #define EE_TIME_SOURCE_ADDRESS        0x1E
 #define EE_BASE_ADDR                  0x1F

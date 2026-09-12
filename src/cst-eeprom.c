@@ -169,10 +169,14 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 	// and on a blank/wiped chip 0xFF - none of which is a valid Functions value. Seed both to FN_OFF
 	// unconditionally in every profile slot + the working config. readFunctionConfiguration() reads
 	// function bytes raw (no readByteOrDefault self-heal), so this seed is the only thing standing
-	// between an upgraded throttle and a garbage MENU BTN / SEL BTN assignment. Gated != (not <) so it
-	// also runs on a blank/wiped chip (oldLayoutVersion 0xFF), like the -> 4 block. Non-destructive:
-	// no layout-5 chip triggers this, and 0x2C/0x2D carry nothing meaningful on any pre-5 layout.
-	if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)
+	// between an upgraded throttle and a garbage MENU BTN / SEL BTN assignment. Gated `< 5` (matching
+	// the -> 4 block's own idiom just above), NOT `!= EEPROM_LAYOUT_VERSION` - an earlier version of
+	// this gate compared against the live EEPROM_LAYOUT_VERSION macro directly, which happened to work
+	// only because 5 was still "current" at the time; the first later bump of that macro (menu
+	// customisation, -> 6) made a layout-5 chip satisfy `5 != 6` again and silently re-wipe its real,
+	// already-migrated MENU BTN / SEL BTN assignments back to FN_OFF on an unrelated upgrade. `< 5`
+	// fixes that by only ever matching a genuinely pre-5 chip, same as the 0xFF blank-chip case below.
+	if((oldLayoutVersion < 5) || (0xFF == oldLayoutVersion))
 	{
 		uint8_t s;
 		for(s = 1; s <= MAX_CONFIGS + 1; s++)

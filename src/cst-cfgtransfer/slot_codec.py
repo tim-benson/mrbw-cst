@@ -42,7 +42,14 @@ UNSET = "UNSET"
 # UP_BUTTON / DOWN_BUTTON); prefs.config_bits gains ops_mode (bit 3). EEPROM_LAYOUT_VERSION -> 5 (the
 # firmware seeds 0x2C/0x2D to FN_OFF on upgrade). A pre-6 backup missing the two function keys needs
 # --import-old (they default to RAW:0xFF, same as any never-written function slot).
-SLOT_SCHEMA_VERSION = 6
+# 7: Menu Customisation. device.json's `system` object gains `menu_visibility` (9 booleans, EEPROM
+# 0x17/0x18 - new global bytes, EEPROM_LAYOUT_VERSION -> 6), listed before the battery fields to match
+# the on-device SYSTEM menu order. Unlike every other global field, encode_global() has no
+# allow_missing/--import-old relaxation at all (see cst_cfgtransfer.py's _encode_target() comment), so
+# a pre-7 device.json backup must have `menu_visibility` added by hand (all fields true - "shown" - is
+# the safe/default choice) before it can be re-imported; a decode of a genuinely never-written pair of
+# bytes already gives all-true regardless, so this only matters for hand-restoring an old backup file.
+SLOT_SCHEMA_VERSION = 7
 
 
 class SlotValidationError(ValueError):
@@ -778,7 +785,7 @@ GLOBAL_FIELD_KEYS = {
     "dead_reckoning_time", "time_source_address", "tx_holdoff_centisecs",
     "battery_okay_decivolts", "battery_warn_decivolts", "battery_critical_decivolts",
     "horn_threshold", "horn_threshold2", "brake_threshold", "brake_low_threshold",
-    "brake_high_threshold", "config_bits",
+    "brake_high_threshold", "config_bits", "menu_visibility",
 }
 
 
@@ -846,20 +853,80 @@ def _encode_config_bits(d, errors):
     return raw
 
 
+# Order = on-device SYSTEM menu order (the HIDE toggles, which follow MENU LCK/ADV FUNC - not
+# EEPROM-backed and not exported - and precede the battery thresholds). Both decode and encode
+# iterate this dict; encode keys off the explicit bit number, so the order only sets how the JSON
+# reads. Bit SET = shown (the default - see MENUVISBITS_1_DEFAULT/_2_DEFAULT in mrbw-cst.c).
+MENUVISBITS_NAMED = {
+    "force_func": layout.MENUVISBITS_FORCE_FUNC,
+    "config_func": layout.MENUVISBITS_CONFIG_FUNC,
+    "notch_cfg": layout.MENUVISBITS_NOTCH,
+    "speed_cfg": layout.MENUVISBITS_SPEED,
+    "airbrake_cfg": layout.MENUVISBITS_AIRBRAKE,
+    "options": layout.MENUVISBITS_OPTIONS,
+    "comm_cfg": layout.MENUVISBITS_COMM,
+    "prefs": layout.MENUVISBITS_PREFS,
+    "diags": layout.MENUVISBITS_DIAGS,
+}
+
+
+def _decode_menu_visibility(raw16):
+    out = {name: bool(raw16 & (1 << bit)) for name, bit in MENUVISBITS_NAMED.items()}
+    known_mask = 0
+    for bit in MENUVISBITS_NAMED.values():
+        known_mask |= (1 << bit)
+    unknown_bits = raw16 & ~known_mask & 0xFFFF
+    if unknown_bits:
+        # No currently-named meaning for these bits (7 of 16 reserved for future menus), but
+        # preserved losslessly rather than silently dropped.
+        out["raw_unknown_bits"] = "0x%04X" % unknown_bits
+    return out
+
+
+def _encode_menu_visibility(d, errors):
+    if not isinstance(d, dict):
+        errors.append("menu_visibility: must be an object")
+        return 0
+    unknown = set(d.keys()) - set(MENUVISBITS_NAMED.keys()) - {"raw_unknown_bits"}
+    for key in unknown:
+        errors.append("menu_visibility.%s: unknown field" % key)
+    raw = 0
+    for name, bit in MENUVISBITS_NAMED.items():
+        # Missing defaults to True (shown), not False - unlike _encode_config_bits's False default,
+        # since a bit CLEAR here actually hides a menu on the throttle. Defaulting a typo'd or
+        # omitted field to "hidden" would be a much more surprising/consequential mistake than any
+        # config_bits field defaulting off, and "shown" is also the firmware's own real default.
+        val = d.get(name, True)
+        if not isinstance(val, bool):
+            errors.append("menu_visibility.%s: must be true/false" % name)
+            continue
+        if val:
+            raw |= (1 << bit)
+    if "raw_unknown_bits" in d:
+        try:
+            raw |= int(d["raw_unknown_bits"], 16) & 0xFFFF
+        except (TypeError, ValueError):
+            errors.append("menu_visibility.raw_unknown_bits: must be a hex string like \"0x0000\"")
+    return raw
+
+
 def decode_global(raw_128_bytes, source):
     if len(raw_128_bytes) != layout.CONFIG_START:
         raise ValueError("expected %d bytes, got %d" % (layout.CONFIG_START, len(raw_128_bytes)))
     raw = raw_128_bytes
     update_decisecs = struct.unpack_from(">H", raw, layout.EE_MRBUS_DEVICE_UPDATE_H)[0]
-    # One object per config menu, in top-level-menu-cycle order: SYSTEM (BAT OKAY/WARN/CRIT, ADV-FUNC
-    # gated) -> COMM (THRTL ID, BASE ADR, TIME ADR, TX INTVL, TX HLDOF) -> PREFS (DISPLAY+LED BLNK/REV
-    # LOCK/STRICT SLP = config_bits, then SLEEP, ALERTER, TIMEOUT=dead_reckoning) -> THRESHOLD CAL
-    # (HORN, HORN2, BRAKE, BRAKE LOW, BRAKE HIGH). Keys within each object are in that menu's item
-    # order. encode_global() accepts this shape or the older flat one (via _flatten_global).
+    menu_vis_raw = raw[layout.EE_MENU_VIS_1] | (raw[layout.EE_MENU_VIS_2] << 8)
+    # One object per config menu, in top-level-menu-cycle order: SYSTEM (menu_visibility HIDE toggles,
+    # then BAT OKAY/WARN/CRIT, ADV-FUNC gated - matching the on-device item order, HIDE toggles before
+    # the battery thresholds) -> COMM (THRTL ID, BASE ADR, TIME ADR, TX INTVL, TX HLDOF) -> PREFS
+    # (DISPLAY+LED BLNK/REV LOCK/STRICT SLP = config_bits, then SLEEP, ALERTER, TIMEOUT=dead_reckoning)
+    # -> THRESHOLD CAL (HORN, HORN2, BRAKE, BRAKE LOW, BRAKE HIGH). Keys within each object are in that
+    # menu's item order. encode_global() accepts this shape or the older flat one (via _flatten_global).
     return {
         "schema_version": SLOT_SCHEMA_VERSION,
         "source": source,
         "system": {
+            "menu_visibility": _decode_menu_visibility(menu_vis_raw),
             "battery_okay_decivolts": raw[layout.EE_BATTERY_OKAY],
             "battery_warn_decivolts": raw[layout.EE_BATTERY_WARN],
             "battery_critical_decivolts": raw[layout.EE_BATTERY_CRITICAL],
@@ -956,6 +1023,13 @@ def encode_global(d, base=None):
         out[layout.EE_CONFIGBITS] = _encode_config_bits(d["config_bits"], errors)
     else:
         errors.append("config_bits: missing")
+
+    if "menu_visibility" in d:
+        menu_vis_raw = _encode_menu_visibility(d["menu_visibility"], errors)
+        out[layout.EE_MENU_VIS_1] = menu_vis_raw & 0xFF
+        out[layout.EE_MENU_VIS_2] = (menu_vis_raw >> 8) & 0xFF
+    else:
+        errors.append("menu_visibility: missing")
 
     if errors:
         raise SlotValidationError(errors)

@@ -59,7 +59,7 @@ git hash are baked into the build from `git describe` via `src/git-revision.sh` 
 a git checkout (not a tarball) for `make hex` to compute a correct version.
 
 The ATmega1284P (128 KB flash, 16 KB SRAM) has no pin-compatible successor with more memory, so this is a
-one-way door. `make size` currently shows roughly 48% flash, 21% static RAM (leaving ~12.5 KB for the
+one-way door. `make size` currently shows roughly 49% flash, 21% static RAM (leaving ~12.5 KB for the
 stack, against a deepest frame of a few hundred bytes) — still ample headroom, though OPS MODE (its own
 screen mode plus a second CGRAM palette) moved flash up about 6 points in one feature. Check it before
 adding a large non-`PROGMEM` table, a wide LCD/canvas buffer, or another large `switch(screenState)`
@@ -157,7 +157,7 @@ fields are read through `readByteOrDefault()`, which detects that sentinel and s
 default rather than trusting a plainly-invalid raw byte.
 
 **EEPROM layout migrations (`cst-eeprom.c`)**: one bespoke per-slot byte-remapping transform per
-`EEPROM_LAYOUT_VERSION` bump (currently 5), factored out of `readConfig()` into
+`EEPROM_LAYOUT_VERSION` bump (currently 6), factored out of `readConfig()` into
 `applyEepromMigrations(uint8_t oldLayoutVersion)` — the highest-risk, least-verifiable firmware code (a
 wrong offset silently corrupts every stored profile on upgrade). It touches only the EEPROM (no globals,
 no LCD, no radio) via the byte-at-a-time `eeprom_*` API and is self-limiting: `readConfig()` calls it once
@@ -167,6 +167,17 @@ synthetic layout-N images and diffs the 4096-byte result — the only coverage o
 newer firmware", since `slot_codec.py` does not model migrations. The migration *comments* (in
 `cst-eeprom.c`) and the per-version narrative in the SPEED and AIRBRAKE sections are the authoritative
 description of each transform.
+
+**A migration block must gate on a fixed version number, never on the live `EEPROM_LAYOUT_VERSION`
+macro.** The layout 4→5 migration (OPS MODE) originally read `if(oldLayoutVersion != EEPROM_LAYOUT_VERSION)`,
+correct only for as long as that macro happened to equal 5 — the value "current" when it was written. The
+first later bump (Menu Customisation, → 6) made a layout-5 chip satisfy `5 != 6` again, silently re-seeding
+its already-migrated `MENU BTN` / `SEL BTN` function slots back to `FN_OFF` on an unrelated upgrade, wiping
+real user configuration. Fixed to `(oldLayoutVersion < 5) || (0xFF == oldLayoutVersion)`, the same idiom the
+layout →4 block already used. The `make eepromtest` `sc_from_current_noop` scenario (built from the live
+macro, not a hardcoded number) exists specifically to keep catching this class of bug on every future
+version bump; a per-version scenario like `sc_from_layout5` is a frozen historical fixture and is
+intentionally never rewritten to track the macro.
 
 `cst-eeprom.c` also holds **`eepromResetProfileModel(uint16_t configBase)`** — the factory-default writer
 for the per-profile SPEED/AIRBRAKE/STACK "model" bytes (`0x28-0x62` minus the function slots), called by
@@ -687,9 +698,16 @@ The decoder-type-specific model parameters live in one contiguous block, `EE_SPE
   function buttons — see "OPS MODE screen"). The migration seeds both to `FN_OFF` across all 20
   profiles plus the working config. Function bytes are read raw, so this seed is the only thing
   between an upgraded throttle and a garbage `MENU BTN` / `SEL BTN` assignment. Gated
-  `!= EEPROM_LAYOUT_VERSION` so it also runs on a blank/wiped chip; non-destructive, since `0x2C`/
-  `0x2D` carry nothing meaningful on any pre-5 layout (on a layout-2 chip the 2 → 3 block already
-  relocated the real `BRK2`/`BRK3` values out of them earlier in the same call).
+  `(oldLayoutVersion < 5) || (0xFF == oldLayoutVersion)` so it also runs on a blank/wiped chip;
+  non-destructive, since `0x2C`/`0x2D` carry nothing meaningful on any pre-5 layout (on a layout-2 chip
+  the 2 → 3 block already relocated the real `BRK2`/`BRK3` values out of them earlier in the same
+  call). Originally gated `!= EEPROM_LAYOUT_VERSION` instead of `< 5` — see "EEPROM layout migrations"
+  in Architecture for why that was a live bug once a later bump moved the macro past 5.
+- **5 → 6** (Menu Customisation) — two new global (not per-profile) bytes, `EE_MENU_VIS_1`/
+  `EE_MENU_VIS_2` at `0x17`/`0x18`, holding the `menuVisBits` SYSTEM-menu hide toggles (see "Menu
+  Customisation"). Both self-heal via `readByteOrDefault()` exactly like `EE_CONFIGBITS`, so no
+  migration block was needed for this bump — the version still had to move because any new `EE_*`
+  `#define` requires it (see the pre-commit hook in the maintenance checklist).
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
@@ -1278,6 +1296,78 @@ unlike `"LOAD"`, it needs **no** multi-holder rejection, since `CLOCK` has no si
 in `test_slot_codec.py`). No `SLOT_SCHEMA_VERSION` bump, for the same reason `"AIRBRAKE"` never needed
 one: a new legal string within an existing field type, not a JSON shape change.
 
+## Menu Customisation
+
+Extends `SYSTEM_SCREEN` with 9 boolean HIDE toggles, one for each of `FORCE_FUNC_SCREEN`,
+`CONFIG_FUNC_SCREEN`, `NOTCH_CONFIG_SCREEN`, `SPEED_CONFIG_SCREEN`, `AIRBRAKE_CONFIG_SCREEN`,
+`OPTION_SCREEN`, `COMM_SCREEN`, `PREFS_SCREEN`, and `DIAG_SCREEN`, letting an owner remove menus they
+never touch from the top-level `MENU` cycle. `SYSTEM_SCREEN` has no toggle of its own and can never be
+hidden, so a hide can always be undone.
+
+**Storage.** `menuVisBits`, a 16-bit RAM global backed by two new global (not per-profile) EEPROM bytes
+(`EE_MENU_VIS_1`/`EE_MENU_VIS_2`, `EEPROM_LAYOUT_VERSION` 5→6), following the exact `configBits`/
+`EE_CONFIGBITS` shape — loaded via two `readByteOrDefault()` calls in `readConfig()`, force-written to
+defaults in `resetConfig()`, no `applyEepromMigrations()` block needed since a never-written byte
+self-heals. Bit polarity is deliberately "1 = shown," not "1 = hidden": every other plain boolean toggle
+in this codebase has UP set the bit / DOWN clear it, meaning "the positive/on state," and keeping that
+convention means UP = visible, DOWN = hidden, with an all-1s default (`MENUVISBITS_1_DEFAULT`/
+`_2_DEFAULT`) so a stock or upgrading throttle sees every menu with no behaviour change. Only 9 of 16
+bits are used; 7 are reserved for future menus.
+
+**`SYSTEM_SCREEN` item list**, extended from a fixed 5-item enum to 14 (2 conditional), resolved through
+a new `systemItemAt()` — the same variable-length-item-list shape `optionItemAt()`/`speedItemAt()`
+already solve (see "On-device config-screen pattern" below), since `HIDE_SPEED`/`HIDE_AIRBRAKE` are each
+offered only while their own feature (`CONFIGBITS_MAIN_SCREEN_SPEED`/`CONFIGBITS_AIRBRAKE`) is on — a
+toggle for an already-unreachable screen would be moot. Item order: `MENU LCK`, `ADV FUNC` (`systemBits`,
+unchanged), the 9 HIDE toggles in top-level-menu-cycle order, then `BAT OKAY`/`BAT WARN`/`BAT CRIT`
+last — moved from their original position directly after `ADV FUNC` so the two `systemBits` toggles are
+immediately followed by the HIDE toggles. Because the 9 new items are EEPROM-backed and loaded by
+`readConfig()`, the existing generic long-press-Menu cancel handler already reverts an unsaved edit to
+them for free — unlike `systemBits` own two items, no bespoke snapshot/restore is needed (see
+"Long-press Menu to cancel a subscreen edit").
+
+Row-0 labels reuse the single-word landing-page title of each target screen (`FORCE`, `CONFIG`, `NOTCH`,
+`SPEED`, `AIRBRAKE`, `OPTIONS`, `COMM`, `PREFS`, `DIAGS`) — already ≤8 characters and unambiguous side
+by side. `FORCE` and `CONFIG` additionally show a left-justified `FN` qualifier on row 1, and `NOTCH`/
+`SPEED`/`AIRBRAKE` show `CFG`; `OPTIONS`/`COMM`/`PREFS`/`DIAGS` need none. The `ON`/`HIDE` state itself
+is a 4-character field at columns 4-7 (`" ON "`/`"HIDE"`), the same column constraint every other
+boolean item on this screen already respects (see "The LCD is only 8 columns × 2 rows" in Architecture).
+
+**Menu-cycle skip logic.** The `doAdvance` block of the top-level `MENU` handler already had one
+`if(THIS_SCREEN == screenState) { if(<condition>) screenState++; }` block per conditionally-skippable
+screen (`SPEED_CONFIG_SCREEN`/`AIRBRAKE_SCREEN`/`AIRBRAKE_CONFIG_SCREEN`, gated on the matching
+`configBits` feature bit). This feature adds 7 new such blocks (`FORCE_FUNC_SCREEN`, `CONFIG_FUNC_SCREEN`,
+`NOTCH_CONFIG_SCREEN`, `OPTION_SCREEN`, `COMM_SCREEN`, `PREFS_SCREEN`, `DIAG_SCREEN`) and extends the two
+existing SPEED/AIRBRAKE CFG blocks with an additional `||` condition, rather than a new mechanism.
+Because each block is a single non-looping `if`, a run of adjacent conditionally-skipped screens only
+collapses in one `MENU` press if the blocks appear in increasing `Screens`-enum-value order in the
+source — this is why the pre-existing `THRESHOLD_CAL_SCREEN` block (previously first in the chain,
+harmless while nothing adjacent to it was conditionally skippable) had to move to sit between the
+newly-hideable `PREFS_SCREEN` and `DIAG_SCREEN` blocks, its correct numeric position.
+
+The stock `SYSTEMBITS_MENU_LOCK` feature (an on/off toggle on `SYSTEM_SCREEN`, no dedicated write-up of
+its own elsewhere in this document) already collapses the `MENU` cycle to an allow-list of a few screens
+via a `while` loop placed after this whole skip-block chain; it tests raw `screenState` identity only; it
+never reads `menuVisBits`. Composition is correct without any change to that loop: a hidden screen is
+already advanced past by its own block before the lock own `while` loop ever runs, so a hidden screen can
+never be selected as a lock landing point, and a screen already excluded from the lock own allow-list
+(everything except `ENGINE_SCREEN`/`AIRBRAKE_SCREEN`/`LOAD_CONFIG_SCREEN`/`LOCO_SCREEN`/
+`FORCE_FUNC_SCREEN`/`SYSTEM_SCREEN`) is unaffected by hiding it, since it was already unreachable under
+lock regardless.
+
+**PC tooling**: `cst_eeprom_layout.py` mirrors `EE_MENU_VIS_1`/`EE_MENU_VIS_2` and the 9
+`MENUVISBITS_*` bit positions; `slot_codec.py` adds a `MENUVISBITS_NAMED` dict +
+`_decode_menu_visibility()`/`_encode_menu_visibility()` pair (mirroring `CONFIGBITS_NAMED`/
+`_decode_config_bits()`/`_encode_config_bits()`), exposed in `device.json` as `system.menu_visibility`
+(9 booleans, listed before the battery fields to match the on-device order) — `SLOT_SCHEMA_VERSION`
+6→7. Unlike `config_bits`, an omitted `menu_visibility` sub-field defaults to `true` (shown) rather than
+`false` on import: hiding a menu by accident from a mistyped or hand-edited file would be a far more
+consequential surprise than the reverse, and "shown" is also the firmware own real default.
+`encode_global()` has no `allow_missing`/`--import-old` relaxation for any global field (device-level
+settings have no natural "not configured yet" sentinel the way a per-loco slot own function/speed fields
+do), so a device.json backup taken before this schema bump needs `menu_visibility` added by hand before
+it can be re-imported — see `_encode_target()` in `cst_cfgtransfer.py`.
+
 ## On-device config-screen pattern
 
 Every editable config menu (`SPEED CFG`, `AIRBRAKE CFG`, `OPTIONS`, `SYSTEM`, `COMM CFG`, `PREFS`,
@@ -1307,13 +1397,16 @@ Two item-dispatch styles are in use:
 2. **Named-item enum + switch** (`SPEED_CONFIG_SCREEN`, `PREFS_SCREEN`, `COMM_SCREEN`,
    `SYSTEM_SCREEN`, `OPTION_SCREEN`): a local `enum { X_ITEM_… }` (or `SPEED_ITEM_*` in the module
    header) in on-screen order, resolved from `subscreenState` — `item = subscreenState - 1` for the
-   fixed-layout screens (`PREFS`/`COMM`/`SYSTEM`), or a resolver where the layout is not fixed:
-   `optionItemAt()` for `OPTION_SCREEN` (STACK inserts N band-editor items, and it also yields the
-   band number), `speedItemAt()` for `SPEED_CONFIG_SCREEN` (the item set after the five agnostic ones
-   depends on `TYPE`, and `ACCELADJ`/`DECELADJ` are spliced into the agnostic run after `ACCEL`/`DECEL`).
-   `switch(item)` blocks handle label, display, and per-kind edit behaviour, with
-   small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where
-   the values are heterogeneous — bits of `configBits`/`optionBits`/`systemBits`, a 3-way field
+   fixed-layout screens (`PREFS`/`COMM`), or a resolver where the layout is not fixed: `optionItemAt()`
+   for `OPTION_SCREEN` (STACK inserts N band-editor items, and it also yields the band number),
+   `speedItemAt()` for `SPEED_CONFIG_SCREEN` (the item set after the five agnostic ones depends on
+   `TYPE`, and `ACCELADJ`/`DECELADJ` are spliced into the agnostic run after `ACCEL`/`DECEL`), or
+   `systemItemAt()` for `SYSTEM_SCREEN` (the `HIDE_SPEED`/`HIDE_AIRBRAKE` menu-visibility toggles are
+   each present only while their own feature is on — see "Menu Customisation"). Each resolver returns a
+   `..._ITEM_NONE` sentinel past the last visible item, which the `MENU`-advance wraparound checks
+   instead of a fixed count. `switch(item)` blocks handle label, display, and per-kind edit behaviour,
+   with small `xItemIsBit()` / `xItemIsAdvGated()` / `optionBitFor()` helpers. Used where the values are
+   heterogeneous — bits of `configBits`/`optionBits`/`systemBits`/`menuVisBits`, a 3-way field
    (`GET`/`SET_BRK_TYPE`), deterministic toggles (STEPS, HORNTYPE), the STACK band→combo cycle,
    `new*` staging locals whose on-screen format differs from storage, or values reached only through
    `cst-*.c` accessors (`getMaxDeadReckoningTime()`, `setBatteryLevels()`).

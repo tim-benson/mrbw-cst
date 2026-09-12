@@ -221,6 +221,28 @@ uint8_t brakePulseWidth = BRAKE_PULSE_WIDTH_DEFAULT;
 #define CONFIGBITS_DEFAULT                 (_BV(CONFIGBITS_LED_BLINK) | _BV(CONFIGBITS_REVERSER_LOCK) | _BV(CONFIGBITS_STRICT_SLEEP))
 uint8_t configBits = CONFIGBITS_DEFAULT;
 
+// Menu-visibility bits (EEPROM, global, 2 bytes) - which top-level menus SYSTEM_SCREEN's MENU CFG
+// items let the user hide from the top-level MENU cycle. 1 = shown (default), 0 = hidden - this
+// polarity, not "1 = hidden", keeps UP=set-bit/DOWN=clear-bit consistent with every other plain
+// boolean toggle in this codebase. SYSTEM_SCREEN itself has no bit here and can never be hidden, so
+// the user can always reach SYSTEM to undo a hide - see systemItemAt() / the doAdvance skip chain.
+#define MENUVISBITS_FORCE_FUNC    0
+#define MENUVISBITS_CONFIG_FUNC   1
+#define MENUVISBITS_NOTCH         2
+#define MENUVISBITS_SPEED         3
+#define MENUVISBITS_AIRBRAKE      4
+#define MENUVISBITS_OPTIONS       5
+#define MENUVISBITS_COMM          6
+#define MENUVISBITS_PREFS         7
+#define MENUVISBITS_DIAGS         8
+// menuVisBits is 16 bits, not 8 - _BV() is defined in terms of int and is fine for bits 0-7, but
+// spell out a widened version so bit 8 (MENUVISBITS_DIAGS) can't silently truncate.
+#define MENUVIS_BV(bit)           ((uint16_t)1 << (bit))
+
+#define MENUVISBITS_1_DEFAULT     0xFF   // low byte:  FORCE_FUNC..PREFS (bits 0-7), all shown
+#define MENUVISBITS_2_DEFAULT     0x01   // high byte: bit0 = DIAGS, all shown
+uint16_t menuVisBits = ((uint16_t)MENUVISBITS_2_DEFAULT << 8) | MENUVISBITS_1_DEFAULT;
+
 // Boolean option bits (EEPROM, per config)
 #define OPTIONBITS_ESTOP_ON_BRAKE    0
 #define OPTIONBITS_REVERSER_SWAP     1
@@ -374,16 +396,32 @@ enum
 	COMM_ITEM_COUNT
 };
 
-// SYSTEM_SCREEN items, in on-screen order: two systemBits toggles then the three battery
-// thresholds (decivolts, view-only unless ADV FUNC, applied live through setBatteryLevels()).
+// SYSTEM_SCREEN items, in on-screen order: two systemBits toggles, then the 9 menu-visibility HIDE
+// toggles (menuVisBits) in top-level-menu-cycle order (matching the convention CLAUDE.md's
+// PC-tooling section documents for these JSON objects), then the three battery thresholds
+// (decivolts, view-only unless ADV FUNC, applied live through setBatteryLevels()) last. HIDE_SPEED
+// and HIDE_AIRBRAKE are each only present while their own feature is on - see systemItemAt(). There
+// is no HIDE_SYSTEM: SYSTEM_SCREEN must always stay reachable so a hide can be undone. The item
+// count is no longer fixed once those two conditional items exist, so subscreenState is resolved
+// through systemItemAt() (mirroring optionItemAt()) rather than a plain subtraction, and
+// SYSTEM_ITEM_NONE (not a SYSTEM_ITEM_COUNT constant) marks "past the last item, wrap".
 enum
 {
-	SYSTEM_ITEM_MENU_LOCK = 0,  // systemBits
-	SYSTEM_ITEM_ADV_FUNC,       // systemBits
-	SYSTEM_ITEM_BAT_OKAY,       // decivolts
-	SYSTEM_ITEM_BAT_WARN,       // decivolts
-	SYSTEM_ITEM_BAT_CRIT,       // decivolts
-	SYSTEM_ITEM_COUNT
+	SYSTEM_ITEM_MENU_LOCK = 0,     // systemBits
+	SYSTEM_ITEM_ADV_FUNC,          // systemBits
+	SYSTEM_ITEM_HIDE_FORCE_FUNC,   // menuVisBits - FORCE_FUNC_SCREEN
+	SYSTEM_ITEM_HIDE_CONFIG_FUNC,  // menuVisBits - CONFIG_FUNC_SCREEN
+	SYSTEM_ITEM_HIDE_NOTCH,        // menuVisBits - NOTCH_CONFIG_SCREEN
+	SYSTEM_ITEM_HIDE_SPEED,        // menuVisBits - SPEED_CONFIG_SCREEN, shown only if CONFIGBITS_MAIN_SCREEN_SPEED
+	SYSTEM_ITEM_HIDE_AIRBRAKE,     // menuVisBits - AIRBRAKE_CONFIG_SCREEN, shown only if CONFIGBITS_AIRBRAKE
+	SYSTEM_ITEM_HIDE_OPTIONS,      // menuVisBits - OPTION_SCREEN
+	SYSTEM_ITEM_HIDE_COMM,         // menuVisBits - COMM_SCREEN
+	SYSTEM_ITEM_HIDE_PREFS,        // menuVisBits - PREFS_SCREEN
+	SYSTEM_ITEM_HIDE_DIAGS,        // menuVisBits - DIAG_SCREEN
+	SYSTEM_ITEM_BAT_OKAY,          // decivolts
+	SYSTEM_ITEM_BAT_WARN,          // decivolts
+	SYSTEM_ITEM_BAT_CRIT,          // decivolts
+	SYSTEM_ITEM_NONE               // subscreenState past the last item -> wrap to 1
 };
 
 // OPTION_SCREEN logical items. Unlike the other config screens, the item at a given
@@ -632,14 +670,75 @@ static uint8_t commItemIsAdvGated(uint8_t item)
 	return (COMM_ITEM_TX_INTVL == item) || (COMM_ITEM_TX_HLDOF == item);
 }
 
-// SYSTEM_SCREEN: the two systemBits toggles vs. the three battery-threshold values.
+// SYSTEM_SCREEN: the two systemBits toggles vs. everything else. Both are items 0-1, ahead of every
+// other category regardless of reordering below them.
 static uint8_t systemItemIsBit(uint8_t item)
 {
-	return (item < SYSTEM_ITEM_BAT_OKAY);
+	return (item <= SYSTEM_ITEM_ADV_FUNC);
 }
 static uint8_t systemItemBit(uint8_t item)
 {
 	return (SYSTEM_ITEM_ADV_FUNC == item) ? SYSTEMBITS_ADV_FUNC : SYSTEMBITS_MENU_LOCK;
+}
+
+// SYSTEM_SCREEN: the 9 menuVisBits HIDE toggles, the third item category - a bounded range, since
+// the three battery-threshold items now follow after SYSTEM_ITEM_HIDE_DIAGS rather than preceding
+// SYSTEM_ITEM_HIDE_FORCE_FUNC.
+static uint8_t systemItemIsMenuVisBit(uint8_t item)
+{
+	return (item >= SYSTEM_ITEM_HIDE_FORCE_FUNC) && (item <= SYSTEM_ITEM_HIDE_DIAGS);
+}
+static uint8_t systemItemVisBit(uint8_t item)
+{
+	switch(item)
+	{
+		case SYSTEM_ITEM_HIDE_FORCE_FUNC:   return MENUVISBITS_FORCE_FUNC;
+		case SYSTEM_ITEM_HIDE_CONFIG_FUNC:  return MENUVISBITS_CONFIG_FUNC;
+		case SYSTEM_ITEM_HIDE_NOTCH:        return MENUVISBITS_NOTCH;
+		case SYSTEM_ITEM_HIDE_SPEED:        return MENUVISBITS_SPEED;
+		case SYSTEM_ITEM_HIDE_AIRBRAKE:     return MENUVISBITS_AIRBRAKE;
+		case SYSTEM_ITEM_HIDE_OPTIONS:      return MENUVISBITS_OPTIONS;
+		case SYSTEM_ITEM_HIDE_COMM:         return MENUVISBITS_COMM;
+		case SYSTEM_ITEM_HIDE_PREFS:        return MENUVISBITS_PREFS;
+		default:                            return MENUVISBITS_DIAGS;  // SYSTEM_ITEM_HIDE_DIAGS
+	}
+}
+
+// SYSTEM_SCREEN: resolve a 1-based subscreenState to its SYSTEM_ITEM_*. Items 1-5 (MENU_LOCK
+// through HIDE_NOTCH) are always present in fixed order. HIDE_SPEED and HIDE_AIRBRAKE are each
+// present only when their own feature is on (CONFIGBITS_MAIN_SCREEN_SPEED / CONFIGBITS_AIRBRAKE) -
+// a hide toggle for an already-inactive feature would just be on-screen clutter with no effect, the
+// same reasoning as the doAdvance skip chain's own SPEED_CONFIG_SCREEN / AIRBRAKE_CONFIG_SCREEN
+// gating. HIDE_OPTIONS through BAT_CRIT are always present in fixed order, last.
+static uint8_t systemItemAt(uint8_t ss)
+{
+	if(ss <= SYSTEM_ITEM_HIDE_NOTCH + 1)
+		return ss - 1;
+
+	uint8_t ssRemaining = ss - (SYSTEM_ITEM_HIDE_NOTCH + 1);  // 1-based count past HIDE_NOTCH
+
+	if(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED))
+	{
+		if(1 == ssRemaining) return SYSTEM_ITEM_HIDE_SPEED;
+		ssRemaining--;
+	}
+	if(configBits & _BV(CONFIGBITS_AIRBRAKE))
+	{
+		if(1 == ssRemaining) return SYSTEM_ITEM_HIDE_AIRBRAKE;
+		ssRemaining--;
+	}
+
+	switch(ssRemaining)
+	{
+		case 1:  return SYSTEM_ITEM_HIDE_OPTIONS;
+		case 2:  return SYSTEM_ITEM_HIDE_COMM;
+		case 3:  return SYSTEM_ITEM_HIDE_PREFS;
+		case 4:  return SYSTEM_ITEM_HIDE_DIAGS;
+		case 5:  return SYSTEM_ITEM_BAT_OKAY;
+		case 6:  return SYSTEM_ITEM_BAT_WARN;
+		case 7:  return SYSTEM_ITEM_BAT_CRIT;
+		default: return SYSTEM_ITEM_NONE;
+	}
 }
 
 // OPTION_SCREEN: resolve a 1-based subscreenState to its OPTION_ITEM_*, given the live brake mode.
@@ -1246,6 +1345,8 @@ void readConfig(void)
 	timeSourceAddress = eeprom_read_byte((uint8_t*)EE_TIME_SOURCE_ADDRESS);
 
 	configBits = readByteOrDefault((uint8_t*)EE_CONFIGBITS, CONFIGBITS_DEFAULT);
+	menuVisBits = ((uint16_t)readByteOrDefault((uint8_t*)EE_MENU_VIS_2, MENUVISBITS_2_DEFAULT) << 8) |
+	               readByteOrDefault((uint8_t*)EE_MENU_VIS_1, MENUVISBITS_1_DEFAULT);
 
 	// Initialize MRBus address from EEPROM
 	mrbus_dev_addr = eeprom_read_byte((uint8_t*)MRBUS_EE_DEVICE_ADDR);
@@ -1470,6 +1571,8 @@ void resetConfig(void)
 	eeprom_write_byte((uint8_t*)EE_ALERTER_TIMEOUT, ALERTER_TMR_RESET_VALUE_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_DEAD_RECKONING_TIME, DEAD_RECKONING_TIME_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_CONFIGBITS, CONFIGBITS_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MENU_VIS_1, MENUVISBITS_1_DEFAULT);
+	eeprom_write_byte((uint8_t*)EE_MENU_VIS_2, MENUVISBITS_2_DEFAULT);
 
 	eeprom_write_byte((uint8_t*)MRBUS_EE_DEVICE_ADDR, MRBUS_DEV_ADDR_DEFAULT);
 	eeprom_write_byte((uint8_t*)EE_BASE_ADDR, MRBUS_BASE_ADDR_DEFAULT);
@@ -5072,7 +5175,15 @@ int main(void)
 				}
 				else
 				{
-					uint8_t systemItem = subscreenState - 1;
+					uint8_t systemItem = systemItemAt(subscreenState);
+					if(SYSTEM_ITEM_NONE == systemItem)
+					{
+						// configBits (SPEED/AIRBRAKE) can change out from under this screen between
+						// visits - e.g. the user flips DISPLAY in PREFS, then re-enters SYSTEM - so
+						// re-resolve from the top rather than trusting a stale subscreenState.
+						subscreenState = 1;
+						systemItem = systemItemAt(subscreenState);
+					}
 					enableLCDBacklight();
 
 					// Battery thresholds are edited as a set (setBatteryLevels() takes all three), so
@@ -5082,17 +5193,50 @@ int main(void)
 					lcd_gotoxy(0,0);
 					switch(systemItem)
 					{
-						case SYSTEM_ITEM_MENU_LOCK: lcd_puts("MENU LCK"); break;
-						case SYSTEM_ITEM_ADV_FUNC:  lcd_puts("ADV FUNC"); break;
-						case SYSTEM_ITEM_BAT_OKAY:  lcd_puts("BAT OKAY"); break;
-						case SYSTEM_ITEM_BAT_WARN:  lcd_puts("BAT WARN"); break;
-						case SYSTEM_ITEM_BAT_CRIT:  lcd_puts("BAT CRIT"); break;
+						case SYSTEM_ITEM_MENU_LOCK:        lcd_puts("MENU LCK"); break;
+						case SYSTEM_ITEM_ADV_FUNC:         lcd_puts("ADV FUNC"); break;
+						case SYSTEM_ITEM_HIDE_FORCE_FUNC:  lcd_puts("FORCE"); break;
+						case SYSTEM_ITEM_HIDE_CONFIG_FUNC: lcd_puts("CONFIG"); break;
+						case SYSTEM_ITEM_HIDE_NOTCH:       lcd_puts("NOTCH"); break;
+						case SYSTEM_ITEM_HIDE_SPEED:       lcd_puts("SPEED"); break;
+						case SYSTEM_ITEM_HIDE_AIRBRAKE:    lcd_puts("AIRBRAKE"); break;
+						case SYSTEM_ITEM_HIDE_OPTIONS:     lcd_puts("OPTIONS"); break;
+						case SYSTEM_ITEM_HIDE_COMM:        lcd_puts("COMM"); break;
+						case SYSTEM_ITEM_HIDE_PREFS:       lcd_puts("PREFS"); break;
+						case SYSTEM_ITEM_HIDE_DIAGS:       lcd_puts("DIAGS"); break;
+						case SYSTEM_ITEM_BAT_OKAY:         lcd_puts("BAT OKAY"); break;
+						case SYSTEM_ITEM_BAT_WARN:         lcd_puts("BAT WARN"); break;
+						case SYSTEM_ITEM_BAT_CRIT:         lcd_puts("BAT CRIT"); break;
 					}
 
 					if(systemItemIsBit(systemItem))
 					{
 						lcd_gotoxy(4,1);
 						lcd_puts((systemBits & _BV(systemItemBit(systemItem))) ? " ON " : " OFF");
+					}
+					else if(systemItemIsMenuVisBit(systemItem))
+					{
+						// A left-justified qualifier on row 1 for the 5 items whose row-0 label
+						// alone is ambiguous about which screen it hides; OPTIONS/COMM/PREFS/DIAGS
+						// need none.
+						switch(systemItem)
+						{
+							case SYSTEM_ITEM_HIDE_FORCE_FUNC:
+							case SYSTEM_ITEM_HIDE_CONFIG_FUNC:
+								lcd_gotoxy(0,1);
+								lcd_puts("FN");
+								break;
+							case SYSTEM_ITEM_HIDE_NOTCH:
+							case SYSTEM_ITEM_HIDE_SPEED:
+							case SYSTEM_ITEM_HIDE_AIRBRAKE:
+								lcd_gotoxy(0,1);
+								lcd_puts("CFG");
+								break;
+							default:
+								break;
+						}
+						lcd_gotoxy(4,1);
+						lcd_puts((menuVisBits & MENUVIS_BV(systemItemVisBit(systemItem))) ? " ON " : "HIDE");
 					}
 					else
 					{
@@ -5114,6 +5258,10 @@ int main(void)
 								{
 									systemBits |= _BV(systemItemBit(systemItem));
 								}
+								else if(systemItemIsMenuVisBit(systemItem))
+								{
+									menuVisBits |= MENUVIS_BV(systemItemVisBit(systemItem));
+								}
 								else if(systemBits & _BV(SYSTEMBITS_ADV_FUNC))
 								{
 									uint8_t idx = systemItem - SYSTEM_ITEM_BAT_OKAY;
@@ -5131,6 +5279,10 @@ int main(void)
 								{
 									systemBits &= ~_BV(systemItemBit(systemItem));
 								}
+								else if(systemItemIsMenuVisBit(systemItem))
+								{
+									menuVisBits &= ~MENUVIS_BV(systemItemVisBit(systemItem));
+								}
 								else if(systemBits & _BV(SYSTEMBITS_ADV_FUNC))
 								{
 									uint8_t idx = systemItem - SYSTEM_ITEM_BAT_OKAY;
@@ -5147,6 +5299,8 @@ int main(void)
 								eeprom_write_byte((uint8_t*)EE_BATTERY_OKAY, getBatteryOkay());
 								eeprom_write_byte((uint8_t*)EE_BATTERY_WARN, getBatteryWarn());
 								eeprom_write_byte((uint8_t*)EE_BATTERY_CRITICAL, getBatteryCritical());
+								eeprom_write_byte((uint8_t*)EE_MENU_VIS_1, menuVisBits & 0xFF);
+								eeprom_write_byte((uint8_t*)EE_MENU_VIS_2, menuVisBits >> 8);
 								readConfig();
 								lcd_clrscr();
 								lcd_gotoxy(1,0);
@@ -5161,7 +5315,7 @@ int main(void)
 							{
 								// Menu pressed, advance menu
 								subscreenState++;
-								if(subscreenState > SYSTEM_ITEM_COUNT)
+								if(SYSTEM_ITEM_NONE == systemItemAt(subscreenState))
 									subscreenState = 1;
 								lcd_clrscr();
 							}
@@ -5767,7 +5921,97 @@ int main(void)
 				screenState++;  // No range checking needed since LAST_SCREEN will reset the counter
 				ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
 
-				// Check for conditional menus
+				// Check for conditional menus. Each block below is a single non-looping if, so a run
+				// of adjacent conditionally-skipped screens only collapses in one MENU press if the
+				// blocks appear in increasing Screens-enum-value order here - see CLAUDE.md "Menu
+				// Customisation" for why THRESHOLD_CAL_SCREEN's check had to move down from the top
+				// of this chain once PREFS/DIAG (numerically adjacent to it) became hideable.
+
+				// Skip FORCE FUNC / CONFIG FUNC / NOTCH CFG when hidden via SYSTEM's menu-visibility
+				// toggles (menuVisBits) - see "Menu Customisation".
+				if(FORCE_FUNC_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_FORCE_FUNC)))
+					{
+						screenState++;
+					}
+				}
+				if(CONFIG_FUNC_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_CONFIG_FUNC)))
+					{
+						screenState++;
+					}
+				}
+				if(NOTCH_CONFIG_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_NOTCH)))
+					{
+						screenState++;
+					}
+				}
+
+				// Skip SPEED CFG screen when the main screen is showing the clock, not speed -
+				// tuning these settings is meaningless if the throttle isn't displaying speed at all
+				// - or when hidden via SYSTEM's menu-visibility toggle.
+				if(SPEED_CONFIG_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) || !(menuVisBits & MENUVIS_BV(MENUVISBITS_SPEED)))
+					{
+						screenState++;
+					}
+				}
+
+				// Skip AIRBRAKE when AIRBRAKE is off - the model still ticks but drives nothing.
+				// (AIRBRAKE is still reachable via an AIRBRAKE-bound button.) The live gauge has no
+				// menu-visibility toggle of its own - only AIRBRAKE CFG does, below.
+				if(AIRBRAKE_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+					{
+						screenState++;
+					}
+				}
+				// Skip AIRBRAKE CFG when AIRBRAKE is off, or when hidden via SYSTEM's menu-visibility
+				// toggle.
+				if(AIRBRAKE_CONFIG_SCREEN == screenState)
+				{
+					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)) || !(menuVisBits & MENUVIS_BV(MENUVISBITS_AIRBRAKE)))
+					{
+						screenState++;
+					}
+				}
+
+				// Skip OPTIONS when hidden via SYSTEM's menu-visibility toggle. (SYSTEM_SCREEN
+				// itself, between OPTION_SCREEN and COMM_SCREEN in the enum, has no such toggle - it
+				// must always stay reachable so a hide can be undone.)
+				if(OPTION_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_OPTIONS)))
+					{
+						screenState++;
+					}
+				}
+
+				// Skip COMM CFG / PREFS when hidden via SYSTEM's menu-visibility toggles.
+				if(COMM_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_COMM)))
+					{
+						screenState++;
+					}
+				}
+				if(PREFS_SCREEN == screenState)
+				{
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_PREFS)))
+					{
+						screenState++;
+					}
+				}
+
+				// Relocated here (content unchanged) from the top of this chain, so it sits in its
+				// correct numeric position now that PREFS_SCREEN and DIAG_SCREEN - numerically
+				// adjacent to THRESHOLD_CAL_SCREEN - are independently hideable above/below it.
 				if(!(systemBits & _BV(SYSTEMBITS_ADV_FUNC)))
 				{
 					// Advanced functions NOT active
@@ -5788,28 +6032,10 @@ int main(void)
 					}
 				}
 
-				// Skip SPEED CFG screen when the main screen is showing the clock, not speed -
-				// tuning these settings is meaningless if the throttle isn't displaying speed at all.
-				if(SPEED_CONFIG_SCREEN == screenState)
+				// Skip DIAGS when hidden via SYSTEM's menu-visibility toggle.
+				if(DIAG_SCREEN == screenState)
 				{
-					if(!(configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)))
-					{
-						screenState++;
-					}
-				}
-
-				// Skip AIRBRAKE / AIRBRAKE CFG when AIRBRAKE is off - the model still ticks but
-				// drives nothing. (AIRBRAKE is still reachable via an AIRBRAKE-bound button.)
-				if(AIRBRAKE_SCREEN == screenState)
-				{
-					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
-					{
-						screenState++;
-					}
-				}
-				if(AIRBRAKE_CONFIG_SCREEN == screenState)
-				{
-					if(!(configBits & _BV(CONFIGBITS_AIRBRAKE)))
+					if(!(menuVisBits & MENUVIS_BV(MENUVISBITS_DIAGS)))
 					{
 						screenState++;
 					}

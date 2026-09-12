@@ -29,12 +29,18 @@ blobs):
   byte each migrated byte came from.
 
 For each starting version (`from_blank`, `from_layout1`, `from_layout2`,
-`from_layout3`, `from_layout4`, `from_layout5_noop`) it dumps the post-migration
-4096-byte image (16 bytes/row, all-`0xFF` rows elided) to a plain-text **trace**,
-one file per scenario, compared byte-for-byte against the checked-in copies under
-`reference/`. A further scenario, `reset_model`, does the same for
-`eepromResetProfileModel()` (the factory-default writer `resetConfig()` uses)
-run over a sentinel-filled working-config slot.
+`from_layout3`, `from_layout4`, `from_layout5`, `from_current_noop`) it dumps the
+post-migration 4096-byte image (16 bytes/row, all-`0xFF` rows elided) to a
+plain-text **trace**, one file per scenario, compared byte-for-byte against the
+checked-in copies under `reference/`. `from_layout5` is a frozen historical
+fixture (built from the literal value `5`, the layout this scenario has always
+tested from) and is never rewritten to track later bumps; `from_current_noop` is
+the opposite - built from the live `EEPROM_LAYOUT_VERSION` macro, so it keeps
+meaning "a chip already on the current layout must see zero writes" across every
+future version bump without needing to be hand-updated itself (see "Scope and
+fidelity" below for why this distinction matters). A further scenario,
+`reset_model`, does the same for `eepromResetProfileModel()` (the factory-default
+writer `resetConfig()` uses) run over a sentinel-filled working-config slot.
 
 `main()` also asserts seven invariants it prints as `PASS`/`FAIL` lines, exiting
 non-zero if any fails:
@@ -111,13 +117,25 @@ AVR, where `int` and pointer are both 16-bit).
 The harness passes the pre-stamp `EE_LAYOUT_VERSION` byte to
 `applyEepromMigrations()` exactly as `readConfig()` does, so the version-gate
 behaviour (stamp-then-no-op, `!= VERSION` vs `< N`) is exercised as shipped.
+**A per-transform gate must always compare against a fixed number (`< N`), never
+against the live `EEPROM_LAYOUT_VERSION` macro** - the layout 4->5 migration
+originally used `!= EEPROM_LAYOUT_VERSION`, which happened to work only for as
+long as that macro equalled 5; the first later bump (Menu Customisation, -> 6)
+made a layout-5 chip satisfy `5 != 6` again and silently re-wipe its already-
+migrated `MENU BTN` / `SEL BTN` function slots. `from_layout5`/`from_current_noop`
+(above) exist specifically to keep catching this class of bug on every future
+bump - only the top-level version-stamp write is correct to compare against the
+live macro, since it is unconditionally "did the version actually change."
 
 It covers `applyEepromMigrations()` and `eepromResetProfileModel()`. The rest of
 `readConfig()` / `resetConfig()` - decoding the *current* layout into RAM
 globals, and the non-model per-profile / global-config writes - is out of scope.
 
-Adding a migration block: add it to `applyEepromMigrations()`, add a
-`sc_from_layoutN()` scenario and any invariant that locks the new transform, run
+Adding a migration block: gate it on a fixed `oldLayoutVersion < N` (plus
+`|| (0xFF == oldLayoutVersion)` for the blank-chip case), never on
+`!= EEPROM_LAYOUT_VERSION` - see "Scope and fidelity" above for why. Add it to
+`applyEepromMigrations()`, add a `sc_from_layoutN()` scenario and any invariant
+that locks the new transform, run
 `make eepromtest-accept`, review every changed `reference/` file, commit.
 
 Adding a per-profile SPEED/AIRBRAKE/STACK model field: add its offset to

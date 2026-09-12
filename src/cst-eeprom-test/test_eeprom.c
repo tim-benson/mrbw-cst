@@ -219,14 +219,29 @@ static void sc_from_layout4(void)
 	dumpImage("from_layout4", "layout 4, every slot byte = 0x40 + offset");
 }
 
-/* Already on the current layout: applyEepromMigrations(5) must be a complete
- * no-op - not even the version stamp is rewritten. The trace is byte-identical
- * to the (sentinel-filled) input; invariant 1 also checks this by memcmp. */
-static void sc_from_layout5_noop(void)
+/* Layout 5 -> current: the -> 5 block's own gate (`< 5`, not `!= EEPROM_LAYOUT_VERSION`) is what is
+ * under test here - a layout-5 chip must NOT have its already-migrated MENU BTN / SEL BTN function
+ * slots (0x2C/0x2D) re-wiped to FN_OFF just because a later, unrelated bump moved
+ * EEPROM_LAYOUT_VERSION past 5. All the 1->2/2->3/->4/->5 blocks skip (5 is not < 2/2==5 is false/
+ * not < 4/not < 5), so only the version stamp at EE_LAYOUT_VERSION moves - every sentinel, including
+ * 0x2C/0x2D, survives untouched. */
+static void sc_from_layout5(void)
 {
 	buildLayout(5);
 	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
-	dumpImage("from_layout5_noop", "layout 5 (current), every slot byte = 0x40 + offset");
+	dumpImage("from_layout5", "layout 5, every slot byte = 0x40 + offset");
+}
+
+/* Already on the current layout: applyEepromMigrations(EEPROM_LAYOUT_VERSION) must be a complete
+ * no-op - not even the version stamp is rewritten. Uses the live macro (not a hardcoded number) so
+ * this scenario, and the golden trace it produces, automatically stays meaningful across every future
+ * version bump instead of silently starting to test the wrong thing the way sc_from_layout5 (above)
+ * did the moment EEPROM_LAYOUT_VERSION first moved past 5 - see that scenario and invariant 1. */
+static void sc_from_current_noop(void)
+{
+	buildLayout(EEPROM_LAYOUT_VERSION);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	dumpImage("from_current_noop", "current layout, every slot byte = 0x40 + offset");
 }
 
 /* Fill one 128-byte slot with the 0x40 + offset sentinel (only that slot, so
@@ -484,7 +499,8 @@ int main(int argc, char **argv)
 	sc_from_layout2();
 	sc_from_layout3();
 	sc_from_layout4();
-	sc_from_layout5_noop();
+	sc_from_layout5();
+	sc_from_current_noop();
 	sc_reset_model();
 
 	printf("wrote %d reference traces to %s/\n", g_traceCount, g_outdir);
