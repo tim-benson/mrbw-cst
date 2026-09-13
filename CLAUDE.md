@@ -1097,6 +1097,16 @@ immediately tripping the exit long-press. A `MENU BTN` set to `AIRBRAKE` opens t
 trailing edge of a short tap, so a long `MENU` hold still exits OPS MODE first. Every other screen, and
 the whole OPS-disabled build, keep the stock press-edge advance.
 
+**Long-press threshold.** Both the entry and exit long-press are timed against
+`OPS_MODE_LONGPRESS_10MS_TICKS` (~1s — double the ordinary ~500ms long-press) via a dedicated
+`opsModeMenuHoldTicks` counter, reset at the same fresh-`MENU`-press edges as every other timer here.
+It does not reuse the shared `ticks_autoincrement`/`button_autoincrement_10ms_ticks` pair that every
+other long-press in this file is timed against (`UP`/`DOWN` autorepeat, the `SELECT` power-down
+long-press, and the generic long-press-`MENU` screen-reset/subscreen-cancel, all still ~500ms) — that
+pair is capped at the shorter threshold for its own uses, and the entry check in particular shares its
+`if` block with the unrelated screen-reset long-press, so a dedicated counter was needed to raise one
+without also doubling the other. Hardware-confirmed at the current ~1s value.
+
 **AIRBRAKE from OPS MODE / the base screen.** Two parallel `main()` flags distinguish the three ways
 the `AIRBRAKE` gauge is reached and how it is dismissed — see the "AIRBRAKE screen" list under
 AIRBRAKE. `airbrakeReturnToOps` (a `MENU` / `SEL` / `UP` / `DOWN` button set to `AIRBRAKE`, pressed in

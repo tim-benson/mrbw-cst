@@ -58,6 +58,14 @@ LICENSE:
 #define BUTTON_AUTOINCREMENT_ACCEL         10
 #define BUTTON_AUTOINCREMENT_MINIMUM        5
 
+// Long-press MENU to enter/exit OPS MODE uses its own, longer threshold - double the ordinary
+// ~500ms long-press (button_autoincrement_10ms_ticks) shared by every other long-press in this
+// file (UP/DOWN autorepeat, SELECT power-down, the generic long-press-Menu-cancel/reset), so a
+// routine hold near that boundary can never accidentally trip OPS MODE. Timed by its own counter
+// (opsModeMenuHoldTicks) rather than the shared ticks_autoincrement/button_autoincrement_10ms_ticks
+// pair, since that pair is capped at the shorter threshold for its own (unrelated) uses.
+#define OPS_MODE_LONGPRESS_10MS_TICKS     100
+
 #define BACKLIGHT_HOLD_DECISECS           30   // ~3s the LCD backlight lingers after the last MENU
                                                // press / return from a menu screen
 
@@ -304,6 +312,7 @@ uint8_t notchSpeedStep[8];
 
 volatile uint16_t button_autoincrement_10ms_ticks = BUTTON_AUTOINCREMENT_10MS_TICKS;
 volatile uint16_t ticks_autoincrement = BUTTON_AUTOINCREMENT_10MS_TICKS;
+volatile uint8_t opsModeMenuHoldTicks = 0;  // OPS MODE entry/exit's own long-press timer - see OPS_MODE_LONGPRESS_10MS_TICKS
 volatile uint8_t sharedQuerySettleTicks = SHARED_QUERY_SETTLE_10MS_TICKS;
 
 volatile uint8_t ticks;
@@ -1114,6 +1123,7 @@ void processButtons(uint8_t inputButtons)
 		// Reset the counters
 		button_autoincrement_10ms_ticks = BUTTON_AUTOINCREMENT_10MS_TICKS;
 		ticks_autoincrement = 0;
+		opsModeMenuHoldTicks = 0;
 	}
 }
 
@@ -1209,6 +1219,9 @@ ISR(TIMER0_COMPA_vect)
 
 	if(ticks_autoincrement < button_autoincrement_10ms_ticks)
 			ticks_autoincrement++;
+
+	if(opsModeMenuHoldTicks < OPS_MODE_LONGPRESS_10MS_TICKS)
+		opsModeMenuHoldTicks++;
 
 	if(sharedQuerySettleTicks < SHARED_QUERY_SETTLE_10MS_TICKS)
 		sharedQuerySettleTicks++;
@@ -2819,6 +2832,7 @@ int main(void)
 							if(MENU_BUTTON != previousButton)
 							{
 								ticks_autoincrement = 0;  // so the exit long-press can be timed
+								opsModeMenuHoldTicks = 0;  // exit uses its own, longer threshold - below
 								// AIRBRAKE is a screen, not a DCC function - opening it on the press
 								// edge would leave OPS MODE before the exit long-press below could ever
 								// run, trapping the operator. It is opened on release of a short tap
@@ -2838,7 +2852,7 @@ int main(void)
 										optionButtonState |= MENU_OPTION_BUTTON;
 								}
 							}
-							if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
+							if(opsModeMenuHoldTicks >= OPS_MODE_LONGPRESS_10MS_TICKS)
 							{
 								// Long-press MENU -> leave OPS MODE for the base screen. A long-press
 								// is "exit", not "toggle": undo this same press's latch toggle so a
@@ -5870,6 +5884,7 @@ int main(void)
 				if(MENU_BUTTON != previousButton)
 				{
 					ticks_autoincrement = 0;  // Reset to zero so a long press can be detected
+					opsModeMenuHoldTicks = 0;  // OPS MODE entry is timed separately - see below
 					// A fresh MENU press from the base screen with OPS MODE enabled is deferred - it
 					// may become the long-press that enters OPS MODE, and advancing to ENGINE first
 					// would flash that screen. menuAdvancePending is a one-shot: it resolves either
@@ -5886,9 +5901,12 @@ int main(void)
 						doAdvance = 1;
 					}
 				}
-				if(ticks_autoincrement >= button_autoincrement_10ms_ticks)
+				if(menuAdvancePending)
 				{
-					if(menuAdvancePending)
+					// Entering OPS MODE uses its own, longer threshold (OPS_MODE_LONGPRESS_10MS_TICKS,
+					// double the ordinary ~500ms long-press below) so a routine top-level MENU hold can
+					// never accidentally trip it.
+					if(opsModeMenuHoldTicks >= OPS_MODE_LONGPRESS_10MS_TICKS)
 					{
 						// Long-press MENU from the base screen -> enter OPS MODE directly, without
 						// ever advancing (no ENGINE flash). opsMenuIgnoreUntilRelease keeps this same
@@ -5898,16 +5916,16 @@ int main(void)
 						opsMenuIgnoreUntilRelease = 1;
 						lcd_clrscr();
 					}
-					// (MAIN_SCREEN != screenState): once a long-press has already landed back on the
-					// main screen, stop re-firing every pass while MENU stays held - otherwise the
-					// screen bounces main -> LAST_SCREEN -> main (a visible CGRAM reload flicker,
-					// since the base screen uses its own LCD_MAIN / LCD_MAIN_SPEED CGRAM set, distinct
-					// from LAST_SCREEN's LCD_DEFAULT).
-					else if(MAIN_SCREEN != screenState)
-					{
-						// Reset menu on long press
-						screenState = LAST_SCREEN;
-					}
+				}
+				// (MAIN_SCREEN != screenState): once a long-press has already landed back on the
+				// main screen, stop re-firing every pass while MENU stays held - otherwise the
+				// screen bounces main -> LAST_SCREEN -> main (a visible CGRAM reload flicker,
+				// since the base screen uses its own LCD_MAIN / LCD_MAIN_SPEED CGRAM set, distinct
+				// from LAST_SCREEN's LCD_DEFAULT).
+				else if((MAIN_SCREEN != screenState) && (ticks_autoincrement >= button_autoincrement_10ms_ticks))
+				{
+					// Reset menu on long press
+					screenState = LAST_SCREEN;
 				}
 			}
 			else if((NO_BUTTON == button) && (MENU_BUTTON == previousButton) && menuAdvancePending)
