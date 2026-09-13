@@ -438,6 +438,47 @@ def _gather_import_items(args):
     return items
 
 
+def _check_push_safe_version_or_exit(link, entry0):
+    """Peeks the table-wide version pin (via entry0, any one target entry - the pin isn't per-entry) and
+    refuses outright unless it's already at this tool's own SUPPORTED_LAYOUT_VERSION. Used by every
+    command that pushes (import, wipe-entry) - NOT the lenient _check_table_version_or_exit() that
+    export/list use, since a push is the one thing that can advance the pin.
+
+    Only real throttle firmware is allowed to establish or advance the pin - see CLAUDE.md's "Shared
+    network CNF store" section ("Only real throttle firmware may advance the pin") for why. This tool's
+    own SUPPORTED_LAYOUT_VERSION can drift ahead of every physical throttle from nothing more than a
+    `git pull`, so letting it advance the pin risks locking every real throttle out of N01-N20 (both push
+    and pull refused) until every one of them is individually reflashed to catch up - a bad failure mode
+    for a PC tool to be able to trigger by accident."""
+    try:
+        pinned_version = link.peek_pinned_version(entry0)
+    except radio.CnfRadioError as e:
+        if _is_cabbus_level_failure(e):
+            sys.exit(_explain_error(link, e))
+        sys.exit("ERROR: could not check the CNF format version pinned on the ProtoThrottle Receiver: "
+                  "%s" % e)
+
+    if pinned_version == radio.CNF_VERSION_UNSET:
+        sys.exit(
+            "ERROR: ProtoThrottle Receiver has not yet been provisioned with the new Locomotive "
+            "Configuration Version system.\n\n"
+            "Please save a Loco Configuration to the ProtoThrottle Receiver from a ProtoThrottle "
+            "running the newer ProtoThrottle X firmware first (SAVE CNF, choose an N01-N20 "
+            "entry).\n\n"
+            "Then re-run this - it will succeed once the Locomotive Configuration versions match."
+        )
+    if pinned_version < layout.SUPPORTED_LAYOUT_VERSION:
+        sys.exit(
+            "ERROR: ProtoThrottle Receiver has Locomotive Configuration Version %d and this tool "
+            "expects Version %d.\n\n"
+            "Please save a Loco Configuration to the ProtoThrottle Receiver from a ProtoThrottle "
+            "running the newer ProtoThrottle X firmware first (SAVE CNF, choose an N01-N20 "
+            "entry).\n\n"
+            "Then re-run this - it will succeed once the Locomotive Configuration versions match." %
+            (pinned_version, layout.SUPPORTED_LAYOUT_VERSION)
+        )
+
+
 def cmd_import(args):
     if bool(args.dir) == bool(args.file):
         sys.exit("ERROR: pass exactly one of a JSON file or --dir")
@@ -448,42 +489,7 @@ def cmd_import(args):
     items = _gather_import_items(args)
     link = _open_link(args)
     try:
-        # A table-wide fact, not per-entry - peeked once via any one of this run's target entries, before
-        # doing anything else. Only real throttle firmware is allowed to establish or advance the pin -
-        # see CLAUDE.md's "Shared network CNF store" section ("Only real throttle firmware may advance the pin") for why.
-        # This tool's own SUPPORTED_LAYOUT_VERSION can drift ahead of every physical throttle from nothing
-        # more than a `git pull`, so letting it advance the pin risks locking every real throttle out of
-        # N01-N20 (both push and pull refused) until every one of them is individually reflashed to catch
-        # up - a bad failure mode for a PC tool to be able to trigger by accident.
-        try:
-            pinned_version = link.peek_pinned_version(items[0][0] - 1)
-        except radio.CnfRadioError as e:
-            if _is_cabbus_level_failure(e):
-                sys.exit(_explain_error(link, e))
-            sys.exit("ERROR: could not check the CNF format version pinned on the ProtoThrottle Receiver: "
-                      "%s" % e)
-
-        if pinned_version == radio.CNF_VERSION_UNSET:
-            sys.exit(
-                "ERROR: ProtoThrottle Receiver has not yet been provisioned with the new Locomotive "
-                "Configuration Version system.\n\n"
-                "Please save a Loco Configuration to the ProtoThrottle Receiver from a ProtoThrottle "
-                "running the newer ProtoThrottle X firmware first (SAVE CNF, choose an N01-N20 "
-                "entry).\n\n"
-                "Then re-run this import - it will succeed once the Locomotive Configuration versions "
-                "match."
-            )
-        if pinned_version < layout.SUPPORTED_LAYOUT_VERSION:
-            sys.exit(
-                "ERROR: ProtoThrottle Receiver has Locomotive Configuration Version %d and this tool "
-                "expects Version %d.\n\n"
-                "Please save a Loco Configuration to the ProtoThrottle Receiver from a ProtoThrottle "
-                "running the newer ProtoThrottle X firmware first (SAVE CNF, choose an N01-N20 "
-                "entry).\n\n"
-                "Then re-run this import - it will succeed once the Locomotive Configuration versions "
-                "match." %
-                (pinned_version, layout.SUPPORTED_LAYOUT_VERSION)
-            )
+        _check_push_safe_version_or_exit(link, items[0][0] - 1)
 
         if args.import_old:
             notices = []
@@ -559,6 +565,86 @@ def cmd_import(args):
                 ok = False
             else:
                 print("  PASS: %s (%s)" % (path, _entry_label(entry)))
+        if not ok:
+            sys.exit(1)
+        print("Done.")
+    finally:
+        link.close()
+
+
+# --- wipe-entry ---
+
+def cmd_wipe_entry(args):
+    """Blanks one or more shared network entries (N01-N20) to raw 0xFF, via the same push_entry() an
+    import uses - just with a fixed all-0xFF payload instead of an encoded JSON file. The cabbus wire
+    protocol has no per-entry delete (only a whole-table CNF_SUBTYPE_RESET), so the wiped entry stays
+    "occupied" in the cabbus's own key bookkeeping - a pull right after this succeeds and returns the
+    all-0xFF bytes rather than raising CnfEmptyError. That's not a problem in practice: every place this
+    tool displays loco content already collapses an all-0xFF payload to "NONE", the same string used for
+    a truly-never-occupied entry (see _addr_str_for_filename()/cmd_export()'s is_empty flag) - so a wiped
+    entry reads identically to one that was never configured everywhere except the cabbus's internal
+    bookkeeping."""
+    entries = sorted(set(args.entry))
+    for n in entries:
+        _validate_cli_entry(n)
+
+    link = _open_link(args)
+    try:
+        _check_push_safe_version_or_exit(link, entries[0] - 1)
+
+        blank = bytes([0xFF] * layout.CONFIG_SIZE)
+        targets = []  # (entry, old_summary)
+        for n in entries:
+            label = _entry_label(n)
+            old_bytes = _pull_or_none(link, n)
+            old_summary = _addr_str_for_filename(old_bytes) if old_bytes is not None else "NONE"
+            print("  %-5s loco %-10s -> %-10s" % (label, old_summary, "NONE"))
+            targets.append(n)
+
+        if args.dry_run:
+            print()
+            print("--dry-run: nothing sent over the radio.")
+            return
+
+        if not args.yes:
+            print()
+            print("Back up first, e.g.:  python3 cst_cfgnetwork.py export --entry N --out-dir "
+                  "~/protothrottle-backups/")
+            answer = input("\nWipe the above entry/entries now? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted, nothing sent.")
+                return
+
+        print("\nPushing...")
+        for n in targets:
+            try:
+                link.push_entry(n - 1, blank, layout.SUPPORTED_LAYOUT_VERSION)
+            except radio.CnfVersionMismatchError as e:
+                sys.exit("ERROR: wipe failed for %s: %s\nThe CNF format version of this source checkout "
+                          "(%d) is older than the version pinned on the table - check out the mrbw-cst "
+                          "revision matching the firmware that pinned it before wiping here."
+                          % (_entry_label(n), e, layout.SUPPORTED_LAYOUT_VERSION))
+            except radio.CnfRadioError as e:
+                if _is_cabbus_level_failure(e):
+                    sys.exit(_explain_error(link, e))
+                sys.exit("ERROR: wipe failed for %s: %s\n(any entries wiped earlier in this run stayed "
+                          "wiped; this one and any after it were not - re-run for the rest once the "
+                          "problem is resolved)" % (_entry_label(n), e))
+            print("  %s: wiped" % _entry_label(n))
+
+        if not args.verify:
+            print("Done.")
+            return
+
+        print("Verifying...")
+        ok = True
+        for n in targets:
+            reread = _pull_or_none(link, n)
+            if reread != blank:
+                print("  FAIL: %s did not verify" % _entry_label(n))
+                ok = False
+            else:
+                print("  PASS: %s" % _entry_label(n))
         if not ok:
             sys.exit(1)
         print("Done.")
@@ -709,6 +795,26 @@ def build_parser():
                            "field that is present but invalid is still always rejected, and a whole "
                            "missing category (e.g. no \"functions\" object at all) still always fails.")
     imp.set_defaults(func=cmd_import)
+
+    wpe = sub.add_parser(
+        "wipe-entry",
+        help="Blank one or more shared network entries (N01-N20) to raw 0xFF",
+        description="Blanks one or more shared network entries to raw 0xFF - the same state as an entry "
+                     "that was never configured. The cabbus wire protocol has no per-entry delete, so "
+                     "this pushes an all-0xFF payload via the same mechanism as import; every listing/"
+                     "export in this tool already shows an all-0xFF entry as NONE, same as a truly-empty "
+                     "one. Refuses outright under the same version-pin conditions as import (see "
+                     "README) - only real throttle firmware may establish or advance the pin.")
+    _add_common_radio_args(wpe)
+    wpe.add_argument("--entry", type=int, action="append", required=True,
+                      help="Numbered shared network entry (%d-%d, i.e. N%02d-N%02d) to wipe; repeatable"
+                           % (CNF_ENTRY_MIN, CNF_ENTRY_MAX, CNF_ENTRY_MIN, CNF_ENTRY_MAX))
+    wpe.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    wpe.add_argument("--dry-run", action="store_true",
+                      help="Show what would change without pushing anything over the radio")
+    wpe.add_argument("--verify", action="store_true",
+                      help="Pull each entry back and confirm it reads all-0xFF after wiping")
+    wpe.set_defaults(func=cmd_wipe_entry)
 
     rst = sub.add_parser(
         "reset-cabbus",

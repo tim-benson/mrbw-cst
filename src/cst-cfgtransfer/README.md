@@ -57,9 +57,12 @@ python3 cst_cfgtransfer.py dump --out throttle-42-raw.bin
 
 # Factory-blank the throttle (erases EEPROM AND flash - back up first!)
 python3 cst_cfgtransfer.py wipe
+
+# Blank just slot 5, nothing else on the chip
+python3 cst_cfgtransfer.py wipe-slot --slot 5 --yes
 ```
 
-Run `cst_cfgtransfer.py -h`, `export -h`, or `import -h` for full flag reference.
+Run `cst_cfgtransfer.py -h`, `export -h`, `import -h`, or `wipe-slot -h` for full flag reference.
 
 ## Safety workflow (read this before writing to a live throttle)
 
@@ -81,14 +84,21 @@ actually targeted, and writes the full image back — every other slot and the g
 byte-for-byte unchanged — then, unless `--no-verify`, reads the chip back afterward to confirm the write
 actually took. Use `--dry-run` to see a field-level before/after diff without writing anything.
 
-Writes retry automatically (up to 3 times) if the connection hiccups — this is a known, structural
+Writes retry automatically (up to 5 times) if the connection hiccups — this is a known, structural
 reliability quirk of the EEPROM-write path of the ISP programmer (see the PC tooling section of
 `CLAUDE.md` for why), not a sign anything is wrong with your throttle or cable. A printed retry message is normal; only a
-failure across all 3 attempts needs your attention, at which point `import` re-reads the chip and tells you
-exactly which item(s), if any, may now be inconsistent. Occasionally (rare, but possible after several
-failed writes in a row) the connection can hang rather than fail cleanly — every command, including that
-re-read, has a 90-second timeout so this always ends in a clean error instead of hanging forever. No
-power-cycle needed to recover from it; just retry.
+failure across all 5 attempts needs your attention, at which point `import`/`wipe-slot` re-read the chip
+and tell you exactly which item(s), if any, may now be inconsistent. Occasionally (rare, but possible
+after several failed writes in a row) the connection can hang rather than fail cleanly — every command,
+including that re-read, has a 90-second timeout so this always ends in a clean error instead of hanging
+forever. No power-cycle needed to recover from it; just retry.
+
+**A reported failure across all attempts does not guarantee the chip was left untouched** — real-hardware
+testing found a genuine partial write can still land on the chip even when every attempt reports complete
+failure. The re-read comparison that follows a failed write is what actually proves whether anything
+changed; a reported mismatch there is real, not a false alarm — re-run the operation, or restore from a
+backup, rather than assuming the reported failure means nothing happened. See the "EEPROM write
+reliability" section of `CLAUDE.md` for the full finding.
 
 ### Restoring a pre-upgrade backup: `--import-old`
 
@@ -129,6 +139,28 @@ fails, `wipe` stops with a loud error and the exact `avrdude … -U hfuse:w:0xD1
 until you do, an ordinary `make flash` would itself wipe the throttle config, since a cleared `EESAVE`
 means "erase EEPROM on every chip erase". Always `export` a backup first — the stored configs of a wiped
 throttle are unrecoverable.
+
+## Wiping a single slot: `wipe-slot`
+
+`wipe-slot --slot N` (repeatable) blanks one or more numbered slots to raw `0xFF` without touching
+anything else on the chip — the same state as a slot that was never configured, not the whole-chip erase
+`wipe` above performs. It deliberately does **not** write the values a factory reset would use:
+`readByteOrDefault()` already self-heals every field to its real default the moment that slot is loaded
+(`LOAD CNF` on-device, or promoted to the working profile on boot), so there is nothing here to duplicate
+or keep in sync with the firmware own factory-reset defaults.
+
+```bash
+python3 cst_cfgtransfer.py wipe-slot --slot 5 --dry-run     # preview, no hardware write
+python3 cst_cfgtransfer.py wipe-slot --slot 5 --yes         # blank slot 5
+python3 cst_cfgtransfer.py wipe-slot --slot 5 --slot 6      # blank several slots in one run
+```
+
+`wipe-slot` is version-gated like `export`/`import` (it decodes the current loco address of each
+targeted slot to show in the confirmation/`--dry-run` summary), reuses `import` own byte-splice-and-
+verify machinery, and retries/reports write failures the same way. `--active`/`--device` are not offered
+as targets — wiping the live working profile would take effect on the next boot without ever going
+through a `LOAD`, a different and riskier operation than this command is meant for. As always, `export
+--slot N` first for a backup before wiping.
 
 ## Scoping flags
 

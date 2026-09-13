@@ -73,6 +73,10 @@ python3 cst_cfgnetwork.py import --port /dev/tty.usbserial-XXXX --my-addr 0x48 -
 # Restore a whole exported folder in one shot
 python3 cst_cfgnetwork.py import --port /dev/tty.usbserial-XXXX --my-addr 0x48 --cabbus-addr 0xD0 \
     --dir ~/protothrottle-backups/cabbus-208/ --yes
+
+# Blank just entry N05, nothing else in the table
+python3 cst_cfgnetwork.py wipe-entry --port /dev/tty.usbserial-XXXX --my-addr 0x48 --cabbus-addr 0xD0 \
+    --entry 5 --yes
 ```
 
 Run `cst_cfgnetwork.py -h`, or `<subcommand> -h`, for the full flag reference.
@@ -205,6 +209,28 @@ python3 cst_cfgnetwork.py import --port ... --my-addr ... --cabbus-addr ... \
 every file in the given directory (there is no partial-directory flag - point it at a folder containing
 only the files that need to be touched if a subset is needed).
 
+## Wiping a single entry: `wipe-entry`
+
+`wipe-entry --entry N` (repeatable) blanks one or more shared network entries to raw `0xFF` via the same
+`push_entry()` path `import` uses, just with a fixed all-`0xFF` payload instead of an encoded JSON file -
+no `mrbw-cabbus` firmware change involved. The cabbus wire protocol has no per-entry delete (only the
+whole-table wipe `reset-cabbus` drives, see the layout-version guard section below), so a wiped entry
+stays "occupied" in the cabbus own bookkeeping rather than reverting to a genuinely-never-pushed state -
+a pull right after a wipe succeeds and returns the all-`0xFF` bytes instead of the empty-entry error.
+This has no visible effect anywhere this tool shows loco content: an all-`0xFF` payload already displays
+as `NONE` everywhere (see the folder/filename convention above), the same string used for a genuinely
+never-pushed entry.
+
+```bash
+python3 cst_cfgnetwork.py wipe-entry --port ... --my-addr ... --cabbus-addr ... --entry 5 --dry-run
+python3 cst_cfgnetwork.py wipe-entry --port ... --my-addr ... --cabbus-addr ... --entry 5 --yes
+```
+
+Because it pushes, `wipe-entry` is gated by the identical version-pin refusal `import` already enforces
+(see "Layout-version guard" below) - only real throttle firmware may establish or advance the pin, so a
+`wipe-entry` run refuses outright under the same unset/behind-pin conditions `import` does. `--verify`
+re-pulls each wiped entry afterward and confirms it reads all-`0xFF`.
+
 ## JSON field reference
 
 Identical to [the field reference for `cst-cfgtransfer`](../cst-cfgtransfer/README.md#json-field-reference)
@@ -227,15 +253,16 @@ rejected intermediate shapes.
 - **`export`/`list`** compare the version pinned on the table against `SUPPORTED_LAYOUT_VERSION` from
   `cst_eeprom_layout.py`, built into this tool, and refuse (export) or flag per-row (list) on a real
   mismatch - `export` aborts before pulling anything, since the pin is a table-wide fact.
-- **`import`** peeks the pin before pushing. A same-version push proceeds normally. **A push that would
-  establish the first pin on the table, or advance it past an older existing one, is refused outright** -
-  this tool never establishes or advances the pin itself, only real throttle firmware may. A strictly
-  *lower* version than what is pinned is also refused, before any DATA traffic, with a message reporting
-  that `cst_eeprom_layout.py` (or the firmware that pinned the table) needs updating first.
+- **`import`/`wipe-entry`** peek the pin before pushing (both share the same
+  `_check_push_safe_version_or_exit()` helper). A same-version push proceeds normally. **A push that
+  would establish the first pin on the table, or advance it past an older existing one, is refused
+  outright** - this tool never establishes or advances the pin itself, only real throttle firmware may. A
+  strictly *lower* version than what is pinned is also refused, before any DATA traffic, with a message
+  reporting that `cst_eeprom_layout.py` (or the firmware that pinned the table) needs updating first.
 - **`reset-cabbus`** deliberately wipes the whole table and clears the pin, independent of any version
-  comparison - for recovering from a bad state, or a clean slate. Backs up first by default (`--out-dir`
-  required unless `--skip-backup`). This still works regardless of the restriction above, since it does
-  not push a versioned payload at all.
+  comparison - for recovering from a bad state, or a clean slate; for a single entry instead, see
+  `wipe-entry` above. Backs up first by default (`--out-dir` required unless `--skip-backup`). This still
+  works regardless of the restriction above, since it does not push a versioned payload at all.
 
 **Why only a real throttle may advance the pin**: the `SUPPORTED_LAYOUT_VERSION` built into this tool
 tracks the same source tree as the firmware, so it can drift ahead of every physical throttle from

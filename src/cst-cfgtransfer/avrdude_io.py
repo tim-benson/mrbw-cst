@@ -105,7 +105,10 @@ AVRDUDE_TIMEOUT_SECONDS = 90
 
 # How many whole-write attempts to make before giving up, and the delay between them (only between
 # attempts, never before the first - a pre-write settle delay showed no meaningful effect in testing).
-WRITE_MAX_ATTEMPTS = 3
+# Raised from 3 to 5 after real-hardware testing hit a flaky connection needing more than 3 attempts
+# within a single run (requiring a manual re-invocation) - cheap to raise, since a failing attempt fails
+# within a couple of seconds rather than running anywhere near AVRDUDE_TIMEOUT_SECONDS.
+WRITE_MAX_ATTEMPTS = 5
 WRITE_RETRY_DELAY_SECONDS = 1.0
 
 

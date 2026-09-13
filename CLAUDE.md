@@ -1596,6 +1596,7 @@ python3 cst_cfgtransfer.py export --out-dir ~/protothrottle-backups/          # 
 python3 cst_cfgtransfer.py import --slot 5 --dry-run edited-slot05.json       # preview, no hardware write
 python3 cst_cfgtransfer.py import --slot 5 edited-slot05.json                 # write it
 python3 cst_cfgtransfer.py import --dir ~/protothrottle-backups/throttle-42/ --yes  # restore a whole folder
+python3 cst_cfgtransfer.py wipe-slot --slot 5 --yes                           # blank slot 5, nothing else
 ```
 
 `export --out-dir <dir>` creates/reuses `<dir>/throttle-<mrbus-addr>/` (the MRBus device address is the
@@ -1654,21 +1655,49 @@ un-gated (a wipe is *how* you recover from a version mismatch). It deliberately 
 `EESAVE` would make an ordinary `make flash` wipe the throttle config too. `wipe` erases flash as well —
 the throttle needs re-flashing afterward.
 
-**EEPROM write reliability**: `import` retries the whole write up to 3 times on failure — see the module
+**`wipe-slot`**: blanks one or more numbered slots (`--slot N`, repeatable) to raw `0xFF` — the same
+state as a slot that was never configured — without touching anything else on the chip, unlike the
+whole-chip `wipe` above. Deliberately writes `0xFF` rather than the values a factory reset would use:
+`readByteOrDefault()` already self-heals every field to its real default the moment that slot is loaded
+(`LOAD CNF`, or promoted to the working profile on boot), so there is no separate default-value table
+here that could drift out of sync with `resetConfig()`/`eepromResetProfileModel()`. Version-gated like
+`export`/`import` (not un-gated like `dump`/`wipe`), since it decodes the current loco address of each
+targeted slot for the confirmation/`--dry-run` summary. Reuses `import` own byte-splice-and-safety-
+assertion, retry-on-failure, and post-write verify machinery directly — the only difference is the
+encoded payload is a fixed `0xFF * 128` instead of something decoded from a JSON file. Scoped to
+numbered slots 1-20 only; `--active`/`--device` are not offered as targets, since blanking the live
+working profile would take effect on the next boot without ever going through a `LOAD` — a different,
+riskier operation than this command is meant for.
+
+**EEPROM write reliability**: `import` and `wipe-slot` both retry the whole write up to 5 times on failure
+(`WRITE_MAX_ATTEMPTS` in `avrdude_io.py`, raised from 3 after real-hardware testing hit a flaky connection
+that needed more than 3 attempts within a single run — cheap to raise, since a failing attempt fails
+within a couple of seconds rather than running anywhere near the full write time) — see the module
 docstring of `avrdude_io.py` for the full story, including a confirmed driver-level mechanism (the EEPROM
 write path of `iseavrprog`/`usbtiny` has a much narrower timing margin than flash, with no retry on
 a dropped USB transfer) and a real-hardware finding that a marginal ISP USB cable was a major contributor
 too — a cable swap took one machine from 3 retries in 4 writes down to 0 in 8. The mitigations here stay in
 place regardless, since this tool has no way to know the cable/port/programmer quality of another user in
-advance. A printed `attempt N/3 failed, retrying...` during a write is expected, not a sign of broken
-hardware; only a failure across all 3 attempts is worth investigating. If every attempt fails, `import`
-reads the chip back and reports exactly which targeted item(s), if any, ended up inconsistent, rather than
-leaving the state ambiguous. A run of failed writes can also make the *next* `avrdude` call hang
-indefinitely (confirmed on real hardware); every `avrdude` call therefore has a 90-second hard timeout, so
-this always surfaces as a clean, immediate error instead of an unbounded hang. This is not a lasting
-hardware fault — no physical power-cycle is needed to recover, just retry the operation (confirmed on real
-hardware: a flash write and a plain EEPROM read both succeeded immediately right after a timeout, with
-nothing unplugged in between).
+advance. A printed `attempt N/5 failed, retrying...` during a write is expected, not a sign of broken
+hardware; only a failure across all 5 attempts is worth investigating. If every attempt fails, `import`/
+`wipe-slot` read the chip back and report exactly which targeted item(s), if any, ended up inconsistent,
+rather than leaving the state ambiguous. A run of failed writes can also make the *next* `avrdude` call
+hang indefinitely (confirmed on real hardware); every `avrdude` call therefore has a 90-second hard
+timeout, so this always surfaces as a clean, immediate error instead of an unbounded hang. This is not a
+lasting hardware fault — no physical power-cycle is needed to recover, just retry the operation (confirmed
+on real hardware: a flash write and a plain EEPROM read both succeeded immediately right after a timeout,
+with nothing unplugged in between).
+
+**A reported write failure is not proof the chip was left untouched.** Real-hardware testing of
+`wipe-slot` found that even a run where every single attempt reports complete failure (`avrdude` exiting
+non-zero at 0% progress each time) can still leave a genuine partial write on the chip — a striped pattern
+where roughly every third byte lands and the rest do not, repeatable across independent failed runs. What
+actually catches this is the post-write readback comparison against the intended bytes
+(`_report_torn_write_and_exit()` in `cst_cfgtransfer.py`), never `avrdude` own exit code or progress
+output — a reported "do NOT match what was intended" mismatch is real and must be treated as such (re-run
+the same operation, or restore from a backup), not dismissed as a false alarm from an otherwise-failed
+write. Conversely, the post-write verify step passing (a fresh readback comparing byte-for-byte equal to
+what was intended) is trustworthy ground truth regardless of how many attempts it took internally.
 
 ### `cst_cfgnetwork.py` — wireless PC access to the shared network CNF store
 
@@ -1694,6 +1723,7 @@ python3 cst_cfgnetwork.py sniff --my-addr 0x3F --changes
 python3 cst_cfgnetwork.py list --cabbus-addr 0xD0
 python3 cst_cfgnetwork.py export --entry 1 --out-dir ~/protothrottle-backups/
 python3 cst_cfgnetwork.py import --entry 20 --dry-run edited.json
+python3 cst_cfgnetwork.py wipe-entry --entry 5 --yes
 python3 cst_cfgnetwork.py reset-cabbus --out-dir ~/protothrottle-backups/pre-reset/
 ```
 
@@ -1732,10 +1762,24 @@ may (see "Shared network CNF store" above for the full policy and why).
 `cst_cfgtransfer.py` above — restores a backup exported under an older schema by defaulting any field
 absent from the file rather than rejecting it.
 
+**`wipe-entry`**: the single-entry counterpart to `reset-cabbus` below — blanks one or more shared
+network entries (`--entry N`, repeatable) to raw `0xFF` via the same `push_entry()` path `import` uses,
+just with a fixed all-`0xFF` payload instead of an encoded JSON file. The cabbus wire protocol has no
+per-entry delete (only the whole-table `SUBTYPE_RESET` that `reset-cabbus` drives), so a wiped entry
+stays "occupied" in the cabbus own key bookkeeping rather than reverting to a genuine `CNF_STATUS_EMPTY`
+— a pull right after a wipe succeeds and returns the all-`0xFF` bytes rather than raising the empty-entry
+error. This has no visible effect anywhere this tool displays loco content: `_addr_str_for_filename()`
+and `export` own `is_empty` flag already collapse an all-`0xFF` payload to `NONE`, the same string used
+for a truly-never-occupied entry. Since it pushes, `wipe-entry` is gated by the identical version-pin
+refusal `import` already enforces (`_check_push_safe_version_or_exit()`, factored out of `cmd_import` for
+reuse by both) — only real throttle firmware may establish or advance the pin, for the same reason given
+under `import` above.
+
 **`reset-cabbus`**: wipes the whole shared network CNF table and clears the version pin via the wire
 protocol `SUBTYPE_RESET` (see "Shared network CNF store" above) — a deliberate, human-triggered reset,
-not something any version mismatch triggers automatically. Backs up all 20 entries by default (`--out-dir`
-required unless `--skip-backup`), reusing the same output-folder convention `export` already uses.
+not something any version mismatch triggers automatically; for a single entry instead, see `wipe-entry`
+above. Backs up all 20 entries by default (`--out-dir` required unless `--skip-backup`), reusing the same
+output-folder convention `export` already uses.
 
 ### `cst_fastclock.py` — XBee-broadcast software fast clock
 

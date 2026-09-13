@@ -372,6 +372,90 @@ def cmd_import(args):
     print("Done.")
 
 
+# --- wipe-slot ---
+
+def cmd_wipe_slot(args):
+    """Blanks one or more numbered slots (1-20) to raw 0xFF - the same state as a slot that was never
+    configured. Deliberately does NOT write factory-default values: readByteOrDefault() already
+    self-heals every field to its real default the moment the slot is loaded (LOAD CNF, or promoted to
+    the working profile on boot), so there is no separate default table here to drift out of sync with
+    resetConfig()/eepromResetProfileModel(). Scoped to numbered slots only - wiping --active would take
+    immediate effect on next boot without ever going through a LOAD, which is a different, riskier
+    operation this command does not offer."""
+    slots = sorted(set(args.slot))
+    for n in slots:
+        if not (1 <= n <= layout.MAX_CONFIGS):
+            sys.exit("ERROR: --slot %d is out of range (must be 1-%d)" % (n, layout.MAX_CONFIGS))
+
+    print("Reading current EEPROM from throttle...")
+    raw = avrdude_io.read_full_eeprom()
+    _check_layout_version(raw)
+    print("Throttle MRBus address: %d" % _mrbus_addr(raw))
+    print()
+
+    blank = bytes([0xFF] * layout.CONFIG_SIZE)
+    spliced = bytearray(raw)
+    changed_ranges = []
+    encoded_items = []  # (key, path, d, encoded) - path/d are placeholders, matching _report_torn_write_
+                         # and_exit()'s tuple shape, since there's no JSON source file behind a wipe
+    for n in slots:
+        key = ("slot", n)
+        start, end = _target_byte_range(key)
+        old_summary = _addr_str_for_filename(raw[start:end])
+        print("  %-8s loco %-10s -> %-10s" % (_target_label(key), old_summary, "OFF"))
+        spliced[start:end] = blank
+        changed_ranges.append((start, end))
+        encoded_items.append((key, "(wipe)", None, blank))
+
+    for i in range(layout.EEPROM_SIZE):
+        if raw[i] != spliced[i] and not any(start <= i < end for start, end in changed_ranges):
+            sys.exit("INTERNAL ERROR: byte 0x%04X changed outside any targeted range - aborting before "
+                     "writing anything to hardware. This is a bug in cst_cfgtransfer.py, not your JSON."
+                     % i)
+
+    if args.dry_run:
+        print()
+        print("--dry-run: nothing written to hardware.")
+        return
+
+    if not args.yes:
+        print()
+        print("Back up first, e.g.:  python3 cst_cfgtransfer.py export --out-dir "
+              "~/protothrottle-backups/")
+        answer = input("\nWipe the above slot(s) now? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Aborted, nothing written.")
+            return
+
+    print("\nWriting EEPROM...")
+
+    def _report_retry(attempt, max_attempts, exc):
+        print("  attempt %d/%d failed, retrying: %s" % (attempt, max_attempts, str(exc).splitlines()[0]))
+
+    try:
+        avrdude_io.write_full_eeprom(bytes(spliced), on_retry=_report_retry)
+    except avrdude_io.AvrdudeWriteFailedError as e:
+        _report_torn_write_and_exit(e, encoded_items)
+
+    if args.no_verify:
+        print("Done (--no-verify: skipped post-write verification).")
+        return
+
+    print("Verifying...")
+    reread = avrdude_io.read_full_eeprom()
+    ok = True
+    for key, _path, _d, encoded in encoded_items:
+        start, end = _target_byte_range(key)
+        if reread[start:end] != encoded:
+            print("  FAIL: %s did not verify" % _target_label(key))
+            ok = False
+        else:
+            print("  PASS: %s" % _target_label(key))
+    if not ok:
+        sys.exit(1)
+    print("Done.")
+
+
 # --- dump ---
 
 def cmd_dump(args):
@@ -465,6 +549,16 @@ def build_parser():
                            "field that's present but invalid is still always rejected, and a whole "
                            "missing category (e.g. no \"functions\" object at all) still always fails.")
     imp.set_defaults(func=cmd_import)
+
+    wps = sub.add_parser("wipe-slot", help="Blank one or more numbered slots (1-20) to raw 0xFF - the "
+                                            "same state as a slot that was never configured")
+    wps.add_argument("--slot", type=int, action="append", required=True,
+                      help="Numbered slot (1-20) to wipe; repeatable")
+    wps.add_argument("--yes", action="store_true", help="Skip the confirmation prompt")
+    wps.add_argument("--dry-run", action="store_true",
+                      help="Show what would change without writing to hardware")
+    wps.add_argument("--no-verify", action="store_true", help="Skip post-write verification")
+    wps.set_defaults(func=cmd_wipe_slot)
 
     dmp = sub.add_parser("dump", help="Read the raw EEPROM to a file, or print a hex summary "
                                        "(no decode, no version check)")
