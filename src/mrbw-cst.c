@@ -1819,17 +1819,29 @@ static uint8_t clockEligible(void)
 	return (configBits & _BV(CONFIGBITS_MAIN_SCREEN_SPEED)) ? 1 : 0;
 }
 
+// True if fn's configured DCC function number equals STOPFN's - not a dedicated special-value
+// sentinel like FN_AIRBRAKE/FN_LOAD/FN_CLOCK (there is no FN_STOP), since a STOP-matching button is
+// an ordinary F00-F28 assignment that just happens to coincide with the SPEED sim's watched
+// stop-function number. Mirrors auxIndicatorChar()'s AUX-vs-HOLDFN comparison, generalized to any
+// button. Reads STOPFN live via speedGet() - unlike OPLOADFN/PRLOADFN, STOPFN is never force-reset
+// by a live TYPE edit (cst-speed.c's droppable[] list omits it), so it has no committed-copy hazard.
+static uint8_t isFunctionStop(Functions fn)
+{
+	uint8_t stopFn = speedGet(SPEED_ITEM_STOP_FN);   // 0-28 = F##, > 28 = OFF
+	return (stopFn <= 28) && (getFunctionMask(fn) == ((uint32_t)1 << stopFn));
+}
+
 // Tracks which CGRAM slot (if any) currently represents each concept a button corner can show -
 // 0xFF means "not needed this render pass". Set by allocateSpecialGlyphSlots(), read by
 // buttonCornerGlyph(). See cst-common.h for the architecture this implements.
-static uint8_t hollowGlyphSlot, filledGlyphSlot, airbrakeGlyphSlot, loadGlyphSlot, clockGlyphSlot;
+static uint8_t hollowGlyphSlot, filledGlyphSlot, airbrakeGlyphSlot, loadGlyphSlot, clockGlyphSlot, stopGlyphSlot;
 
 // True if fn drives the ordinary hollow/filled softkey circle rather than one of the icon-bearing
 // special functions - mirrors buttonCornerGlyph()'s own fallthrough condition exactly, since that is
 // the definition being used here.
 static uint8_t isButtonPlain(Functions fn)
 {
-	return !isFunctionAirBrake(fn) && !loadActive(fn) && !isFunctionClock(fn);
+	return !isFunctionAirBrake(fn) && !loadActive(fn) && !isFunctionClock(fn) && !isFunctionStop(fn);
 }
 
 // True if a plain button (isButtonPlain(fn) already true) is in the "filled" state - mirrors
@@ -1873,8 +1885,10 @@ static void allocateSpecialGlyphSlots(uint8_t opsScreen, uint8_t optionButtonSta
 	                   (opsScreen && (loadActive(MENU_FN) || loadActive(SEL_FN)));
 	uint8_t needClock = isFunctionClock(UP_FN) || isFunctionClock(DOWN_FN) ||
 	                    (opsScreen && (isFunctionClock(MENU_FN) || isFunctionClock(SEL_FN)));
+	uint8_t needStop = isFunctionStop(UP_FN) || isFunctionStop(DOWN_FN) ||
+	                   (opsScreen && (isFunctionStop(MENU_FN) || isFunctionStop(SEL_FN)));
 
-	airbrakeGlyphSlot = loadGlyphSlot = clockGlyphSlot = 0xFF;
+	airbrakeGlyphSlot = loadGlyphSlot = clockGlyphSlot = stopGlyphSlot = 0xFF;
 
 	if(needAirbrake && (next < poolSize))
 	{
@@ -1893,6 +1907,11 @@ static void allocateSpecialGlyphSlots(uint8_t opsScreen, uint8_t optionButtonSta
 	{
 		clockGlyphSlot = pool[next++];
 		setupClockPeekGlyphChar(clockGlyphSlot);
+	}
+	if(needStop && (next < poolSize))
+	{
+		stopGlyphSlot = pool[next++];
+		setupStopGlyphChar(stopGlyphSlot);
 	}
 
 	// MAIN_SCREEN never reallocates the softkey circle - its 2-slot pool above already covers its
@@ -1934,12 +1953,14 @@ static void allocateSpecialGlyphSlots(uint8_t opsScreen, uint8_t optionButtonSta
 // assignment exists, not gated on the button being held (only the readout swap in renderBaseScreen()
 // is momentary), or the LOAD glyph if the button is LOAD and currently eligible - loadActive(), not
 // the bare isFunctionLoad(), so a now-ineligible stale LOAD assignment falls back to the ordinary
-// circle. Otherwise the filled/hollow circle - filled while the function is asserting and configured,
-// hollow otherwise (shown even when the function is OFF, matching the stock UP/DOWN glyphs). Which
-// physical CGRAM slot each of these resolves to was decided by allocateSpecialGlyphSlots() earlier
-// this render pass (see cst-common.h) - the 0xFF guards and the final hardcoded fallback are a
-// defensive backstop that should be unreachable given the pool-sizing proof there, not a normally
-// exercised path.
+// circle, or the STOP glyph if the button's configured DCC function number matches STOPFN - also
+// shown for as long as that match holds, not gated on the button being held, a static configuration
+// reminder like AIRBRAKE/CLOCK rather than live press-state feedback. Otherwise the filled/hollow
+// circle - filled while the function is asserting and configured, hollow otherwise (shown even when
+// the function is OFF, matching the stock UP/DOWN glyphs). Which physical CGRAM slot each of these
+// resolves to was decided by allocateSpecialGlyphSlots() earlier this render pass (see
+// cst-common.h) - the 0xFF guards and the final hardcoded fallback are a defensive backstop that
+// should be unreachable given the pool-sizing proof there, not a normally exercised path.
 static char buttonCornerGlyph(Functions fn, uint8_t asserting)
 {
 	if(isFunctionAirBrake(fn) && (0xFF != airbrakeGlyphSlot))
@@ -1948,6 +1969,8 @@ static char buttonCornerGlyph(Functions fn, uint8_t asserting)
 		return loadGlyphSlot;
 	if(isFunctionClock(fn) && (0xFF != clockGlyphSlot))
 		return clockGlyphSlot;
+	if(isFunctionStop(fn) && (0xFF != stopGlyphSlot))
+		return stopGlyphSlot;
 	if(asserting && !isFunctionOff(fn) && (0xFF != filledGlyphSlot))
 		return filledGlyphSlot;
 	if(0xFF != hollowGlyphSlot)

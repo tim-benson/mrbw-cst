@@ -1318,6 +1318,28 @@ unlike `"LOAD"`, it needs **no** multi-holder rejection, since `CLOCK` has no si
 in `test_slot_codec.py`). No `SLOT_SCHEMA_VERSION` bump, for the same reason `"AIRBRAKE"` never needed
 one: a new legal string within an existing field type, not a JSON shape change.
 
+## STOP FN corner glyph
+
+A button corner (`UP BTN`/`DOWN BTN`/`MENU BTN`/`SEL BTN`) draws a coupler glyph whenever its configured
+DCC function number equals SPEED's `STOPFN` (see "Watched-function e-stop and Drive Hold" under SPEED
+above) — a static reminder that pressing it also snaps the speed readout to zero, shown for as long as
+the match holds regardless of press state, the same convention `AIRBRAKE`/`CLOCK` use above.
+
+Unlike `AIRBRAKE`/`LOAD`/`CLOCK`, this is not a new special `FunctionValues` sentinel — a STOP-matching
+button is an ordinary `F00`-`F28` assignment whose number happens to coincide with `STOPFN`.
+`isFunctionStop(fn)` (`mrbw-cst.c`) mirrors `auxIndicatorChar()`'s live `AUX`-vs-`HOLDFN` comparison,
+generalized to any of the four buttons, and reads `STOPFN` directly via `speedGet()` rather than a
+committed snapshot: unlike `OPLOADFN`/`PRLOADFN`, `STOPFN` is never force-reset by a live `TYPE` edit (it
+is outside `cst-speed.c`'s `droppable[]` list), so none of the live-edit-before-save hazard that motivates
+`committedOploadFn`/`committedPrloadFn` applies here — see "Committed, not live, config state" under
+"On-device config-screen pattern" below.
+
+The glyph itself (`StopGlyph`, `cst-lcd.c`) draws from the same dynamic CGRAM pool as `AIRBRAKE`/`LOAD`/
+`CLOCK` (see "OPS MODE screen" CGRAM above) — no pool growth was needed, since each button still resolves
+to exactly one concept at a time regardless of how many concept types exist. No `EEPROM_LAYOUT_VERSION` or
+`SLOT_SCHEMA_VERSION` bump, and no PC-tooling change, since this is rendering logic layered on an
+already-stored value.
+
 ## Menu Customisation
 
 Extends `SYSTEM_SCREEN` with 9 boolean HIDE toggles, one for each of `FORCE_FUNC_SCREEN`,
@@ -1585,11 +1607,14 @@ throttle.
 
 ## PC tooling
 
-Two Python 3, stdlib-only tools manipulate stored loco configurations from a PC rather than the on-device
-menu. Both share `cst_eeprom_layout.py` (offset/enum constants) and `slot_codec.py` (pure decode/encode/
-validate, no hardware dependency) — a **hand-maintained mirror** of `src/cst-eeprom.h` and the decode
-logic in `readConfig()` inside `mrbw-cst.c`, not generated from them, since the C headers only give byte
-offsets, not the bitfield/enum/multi-byte-array semantics that live in the firmware control flow. The
+Two Python 3 tools manipulate stored loco configurations from a PC rather than the on-device menu —
+`cst_cfgtransfer.py` is stdlib-only; `cst_cfgnetwork.py` additionally needs `pyserial` (`pip install
+pyserial`) for its real USB-XBee radio link, lazily imported so its framing/CRC/protocol-state-machine
+logic stays testable without it installed. Both share `cst_eeprom_layout.py` (offset/enum constants) and
+`slot_codec.py` (pure decode/encode/validate, no hardware dependency) — a **hand-maintained mirror** of
+`src/cst-eeprom.h` and the decode logic in `readConfig()` inside `mrbw-cst.c`, not generated from them,
+since the C headers only give byte offsets, not the bitfield/enum/multi-byte-array semantics that live in
+the firmware control flow. The
 `-h`/`--help` output of both tools — including per-subcommand help, e.g. `cst_cfgtransfer.py import -h` —
 documents every flag in more detail than covered below; check there for the exact current option set. A
 third tool, `cst_fastclock.py`, also lives in this section but is unrelated to loco configuration — it

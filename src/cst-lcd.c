@@ -238,6 +238,28 @@ void setupClockPeekGlyphChar(uint8_t slot)
 	lcd_setup_custom(slot, ClockPeekGlyph);
 }
 
+// Shown on a button corner whenever that button's configured DCC function number equals STOPFN's -
+// a static reminder that pressing it will also snap the speed readout to zero, not a live press-state
+// indicator (shown regardless of whether the button is currently asserting). Written into whichever
+// pool slot allocateSpecialGlyphSlots() assigns it this render pass - see setupAirbrakeGlyphChar()
+// above.
+const uint8_t StopGlyph[8] =
+{
+	0b00000000,
+	0b00000000,
+	0b00000111,
+	0b00011101,
+	0b00011100,
+	0b00000111,
+	0b00000000,
+	0b00000000
+};
+
+void setupStopGlyphChar(uint8_t slot)
+{
+	lcd_setup_custom(slot, StopGlyph);
+}
+
 // Narrow "H" for the MPH/KMH unit in the running SPEED readout (printSpeed()), tighter than the
 // font-ROM 'H' so the 6-char readout field reads less cramped. Occupies the AMPM_CHAR slot under
 // LCD_MAIN_SPEED / LCD_OPS_SPEED - only loaded when the DISPLAY pref shows SPEED, so it never
