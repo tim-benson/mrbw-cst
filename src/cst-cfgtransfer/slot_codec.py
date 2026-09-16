@@ -49,7 +49,11 @@ UNSET = "UNSET"
 # a pre-7 device.json backup must have `menu_visibility` added by hand (all fields true - "shown" - is
 # the safe/default choice) before it can be re-imported; a decode of a genuinely never-written pair of
 # bytes already gives all-true regardless, so this only matters for hand-restoring an old backup file.
-SLOT_SCHEMA_VERSION = 7
+# 8: options gains `ditch_type` (optionBits bit 7, OPTIONBITS_DITCH_TYPE - the OPTIONS menu's DITCHLTS
+# item, right after HORNTYPE), same ADDITIVE/EXCLUSIVE vocabulary and no-EEPROM_LAYOUT_VERSION-bump
+# shape as horn_type above. A pre-8 backup missing it needs --import-old (defaults to ADDITIVE, the
+# bit-clear/current-behavior value).
+SLOT_SCHEMA_VERSION = 8
 
 
 class SlotValidationError(ValueError):
@@ -215,8 +219,8 @@ def _encode_stack_combo_list(values, expected_len, errors, field_label, allow_mi
 
 def _decode_options(raw_option_bits, pulse_width, stack5_bytes, stack3_bytes):
     # Key order below follows the on-device OPTIONS menu: VAR BRK, BRK TYPE, BRK RATE | (STEPS + STEP1..n),
-    # BRK ESTP, REV SWAP, HORNTYPE. `unset` is a meta-flag ("the option byte has never been written")
-    # and stays first.
+    # BRK ESTP, REV SWAP, HORNTYPE, DITCHLTS. `unset` is a meta-flag ("the option byte has never been
+    # written") and stays first.
     if raw_option_bits == 0xFF:
         unset = True
         variable_brake = False
@@ -225,6 +229,7 @@ def _decode_options(raw_option_bits, pulse_width, stack5_bytes, stack3_bytes):
         estop_on_full_brake = True
         reverser_swap = False
         horn_type = layout.HORN_TYPE_TO_NAME[layout.HORN_TYPE_ADDITIVE]
+        ditch_type = layout.DITCH_TYPE_TO_NAME[layout.DITCH_TYPE_ADDITIVE]
     else:
         unset = False
         variable_brake = bool(raw_option_bits & (1 << layout.OPTIONBITS_VARIABLE_BRAKE))
@@ -234,6 +239,7 @@ def _decode_options(raw_option_bits, pulse_width, stack5_bytes, stack3_bytes):
         estop_on_full_brake = bool(raw_option_bits & (1 << layout.OPTIONBITS_ESTOP_ON_BRAKE))
         reverser_swap = bool(raw_option_bits & (1 << layout.OPTIONBITS_REVERSER_SWAP))
         horn_type = layout.HORN_TYPE_TO_NAME[(raw_option_bits >> layout.OPTIONBITS_HORN_TYPE) & 1]
+        ditch_type = layout.DITCH_TYPE_TO_NAME[(raw_option_bits >> layout.OPTIONBITS_DITCH_TYPE) & 1]
     return {
         "unset": unset,
         "variable_brake": variable_brake,
@@ -245,6 +251,7 @@ def _decode_options(raw_option_bits, pulse_width, stack5_bytes, stack3_bytes):
         "estop_on_full_brake": estop_on_full_brake,
         "reverser_swap": reverser_swap,
         "horn_type": horn_type,
+        "ditch_type": ditch_type,
     }
 
 
@@ -256,7 +263,7 @@ def _encode_options(d, errors, allow_missing=False):
     is still a hard error regardless of this flag."""
     required = {"unset", "type", "estop_on_full_brake", "reverser_swap", "variable_brake",
                 "stack_5step", "pulse_width", "stack_band_combos_5step", "stack_band_combos_3step",
-                "horn_type"}
+                "horn_type", "ditch_type"}
     if not isinstance(d, dict):
         errors.append("options: must be an object")
         return 0xFF, layout.BRAKE_PULSE_WIDTH_MIN, [0] * 5, [0] * 3
@@ -296,6 +303,12 @@ def _encode_options(d, errors, allow_missing=False):
                 errors.append("options.horn_type: must be one of %s" % sorted(layout.HORN_TYPE_FROM_NAME))
         elif layout.HORN_TYPE_FROM_NAME[horn_type_name] == layout.HORN_TYPE_EXCLUSIVE:
             option_bits |= (1 << layout.OPTIONBITS_HORN_TYPE)
+        ditch_type_name = d.get("ditch_type")
+        if ditch_type_name not in layout.DITCH_TYPE_FROM_NAME:
+            if "ditch_type" in d or not allow_missing:
+                errors.append("options.ditch_type: must be one of %s" % sorted(layout.DITCH_TYPE_FROM_NAME))
+        elif layout.DITCH_TYPE_FROM_NAME[ditch_type_name] == layout.DITCH_TYPE_EXCLUSIVE:
+            option_bits |= (1 << layout.OPTIONBITS_DITCH_TYPE)
         option_bits |= (brk_type << layout.OPTIONBITS_BRK_TYPE_LSB)
 
     pulse_width = d.get("pulse_width")
@@ -598,7 +611,7 @@ def _encode_notch(values, errors):
 
 _OPTIONS_FIELDS = ("unset", "variable_brake", "type", "pulse_width", "stack_5step",
                     "stack_band_combos_5step", "stack_band_combos_3step", "estop_on_full_brake",
-                    "reverser_swap", "horn_type")
+                    "reverser_swap", "horn_type", "ditch_type")
 
 
 def describe_missing_fields(d):
@@ -657,8 +670,8 @@ def decode_slot(raw_128_bytes, source):
     # Top-level key order follows the top-level menu cycle: LOCO -> FORCE FUNC -> CONFIG FUNC ->
     # NOTCH -> SPEED CFG -> AIRBRAKE CFG -> OPTIONS (schema_version/source are file metadata and lead).
     # One object per menu - FORCE FUNC is `force_functions` (distinct from CONFIG FUNC's `functions`),
-    # and the OPTIONS menu is `options` (its object holds `reverser_swap`/`horn_type` too, not just
-    # brake).
+    # and the OPTIONS menu is `options` (its object holds `reverser_swap`/`horn_type`/`ditch_type` too,
+    # not just brake).
     return {
         "schema_version": SLOT_SCHEMA_VERSION,
         "source": source,

@@ -274,6 +274,10 @@ uint16_t menuVisBits = ((uint16_t)MENUVISBITS_2_DEFAULT << 8) | MENUVISBITS_1_DE
 // 1 = Exclusive (Horn2 replaces Horn1 past its own threshold). See evaluation near HORN2_CONTROL's use.
 #define OPTIONBITS_HORN_TYPE         6
 
+// Ditch-light mode: 0 = Additive (default - F.DITCH stacks on F.HEAD at the bright+ditch detent),
+// 1 = Exclusive (F.DITCH replaces F.HEAD at that detent). See the frontLight/rearLight switch blocks.
+#define OPTIONBITS_DITCH_TYPE        7
+
 #define OPTIONBITS_DEFAULT                 (_BV(OPTIONBITS_ESTOP_ON_BRAKE))
 uint8_t optionBits = OPTIONBITS_DEFAULT;
 
@@ -449,6 +453,7 @@ enum
 	OPTION_ITEM_BRK_ESTP,     // optionBits OPTIONBITS_ESTOP_ON_BRAKE
 	OPTION_ITEM_REV_SWAP,     // optionBits OPTIONBITS_REVERSER_SWAP
 	OPTION_ITEM_HORNTYPE,     // optionBits OPTIONBITS_HORN_TYPE, deterministic set
+	OPTION_ITEM_DITCHTYPE,    // optionBits OPTIONBITS_DITCH_TYPE, deterministic set
 	OPTION_ITEM_NONE          // subscreenState past the last item -> wrap to 1
 };
 
@@ -766,6 +771,7 @@ static uint8_t optionItemAt(uint8_t ss, uint8_t *band)
 	if(ss == estopItem)     return OPTION_ITEM_BRK_ESTP;
 	if(ss == estopItem + 1) return OPTION_ITEM_REV_SWAP;
 	if(ss == estopItem + 2) return OPTION_ITEM_HORNTYPE;
+	if(ss == estopItem + 3) return OPTION_ITEM_DITCHTYPE;
 	return OPTION_ITEM_NONE;
 }
 // The optionBits bit for the three plain toggle items.
@@ -4452,6 +4458,7 @@ int main(void)
 						case OPTION_ITEM_BRK_ESTP:   lcd_puts("BRK ESTP"); break;
 						case OPTION_ITEM_REV_SWAP:   lcd_puts("REV SWAP"); break;
 						case OPTION_ITEM_HORNTYPE:   lcd_puts("HORNTYPE"); break;
+						case OPTION_ITEM_DITCHTYPE:  lcd_puts("DITCHLTS"); break;
 					}
 
 					switch(optionItem)
@@ -4507,6 +4514,16 @@ int main(void)
 							lcd_putc(' ');
 							lcd_puts((optionBits & _BV(OPTIONBITS_HORN_TYPE)) ? "2  " : "1+2");
 							break;
+						case OPTION_ITEM_DITCHTYPE:
+							// Same fixed 8-char shape as OPTION_ITEM_HORNTYPE above.
+							lcd_gotoxy(0,1);
+							lcd_putc('H');
+							lcd_putc(' ');
+							lcd_putc(0x7F);
+							lcd_putc(0x7E);
+							lcd_putc(' ');
+							lcd_puts((optionBits & _BV(OPTIONBITS_DITCH_TYPE)) ? "D  " : "H+D");
+							break;
 					}
 
 					switch(button)
@@ -4543,6 +4560,10 @@ int main(void)
 										break;
 									case OPTION_ITEM_HORNTYPE:
 										optionBits |= _BV(OPTIONBITS_HORN_TYPE);  // Exclusive
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_DITCHTYPE:
+										optionBits |= _BV(OPTIONBITS_DITCH_TYPE);  // Exclusive
 										ticks_autoincrement = 0;
 										break;
 									case OPTION_ITEM_BRK_RATE:
@@ -4585,6 +4606,10 @@ int main(void)
 										break;
 									case OPTION_ITEM_HORNTYPE:
 										optionBits &= ~_BV(OPTIONBITS_HORN_TYPE);  // Additive, default
+										ticks_autoincrement = 0;
+										break;
+									case OPTION_ITEM_DITCHTYPE:
+										optionBits &= ~_BV(OPTIONBITS_DITCH_TYPE);  // Additive, default
 										ticks_autoincrement = 0;
 										break;
 									case OPTION_ITEM_BRK_RATE:
@@ -4630,7 +4655,7 @@ int main(void)
 									subscreenState++;
 								}
 
-								// Wrap once past the last item (HORNTYPE - its position shifts with the
+								// Wrap once past the last item (DITCHTYPE - its position shifts with the
 								// STACK band count, so ask the resolver rather than hardcode it).
 								if(OPTION_ITEM_NONE == optionItemAt(subscreenState, &optionBand))
 									subscreenState = 1;
@@ -6383,7 +6408,10 @@ int main(void)
 					frontLightNewMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
 					break;
 				case LIGHT_BRIGHT_DITCH:
-					frontLightNewMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
+					// DITCHLTS (OPTIONBITS_DITCH_TYPE): Additive (default) asserts both; Exclusive
+					// asserts F.DITCH alone, matching the ESU-specific behavior some locos want.
+					if(!(optionBits & _BV(OPTIONBITS_DITCH_TYPE)))
+						frontLightNewMask |= getFunctionMask(FRONT_HEADLIGHT_FN);
 					frontLightNewMask |= getFunctionMask(FRONT_DITCH_FN);
 					break;
 			}
@@ -6424,7 +6452,9 @@ int main(void)
 					rearLightNewMask |= getFunctionMask(REAR_HEADLIGHT_FN);
 					break;
 				case LIGHT_BRIGHT_DITCH:
-					rearLightNewMask |= getFunctionMask(REAR_HEADLIGHT_FN);
+					// See the matching DITCHLTS comment in the frontLight switch above.
+					if(!(optionBits & _BV(OPTIONBITS_DITCH_TYPE)))
+						rearLightNewMask |= getFunctionMask(REAR_HEADLIGHT_FN);
 					rearLightNewMask |= getFunctionMask(REAR_DITCH_FN);
 					break;
 			}

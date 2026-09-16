@@ -38,6 +38,7 @@ def _valid_options(brk_type="PULSE"):
         "stack_band_combos_5step": ["BRAKE1--", "BRAKE-23", "BRAKE1-3", "BRAKE12-", "BRAKE123"],
         "stack_band_combos_3step": ["BRAKE1--", "BRAKE-2-", "BRAKE--3"],
         "horn_type": "ADDITIVE",
+        "ditch_type": "ADDITIVE",
     }
 
 
@@ -146,6 +147,9 @@ class LayoutVersionRegressionTests(unittest.TestCase):
     test_function_fields_includes_horn2 / test_horn_threshold2_is_mirrored / test_horn_type_is_mirrored
     pin those three fields; test_layout_version_derive_path checks the one thing left to verify about
     SUPPORTED_LAYOUT_VERSION now that it is parsed from cst-eeprom.h rather than hand-copied.
+
+    test_ditch_type_is_mirrored is the same class of check for OPTIONBITS_DITCH_TYPE (bit 7, the
+    OPTIONS menu's DITCHLTS item, added right after HORNTYPE with the same shape).
     """
 
     def test_function_fields_includes_horn2(self):
@@ -173,6 +177,15 @@ class LayoutVersionRegressionTests(unittest.TestCase):
             decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
             self.assertEqual(decoded["options"]["horn_type"], name)
 
+    def test_ditch_type_is_mirrored(self):
+        # OPTIONBITS_DITCH_TYPE (bit 7 of optionBits) drives the OPTIONS menu's DITCHLTS item.
+        self.assertEqual(layout.OPTIONBITS_DITCH_TYPE, 7)
+        for name in ("ADDITIVE", "EXCLUSIVE"):
+            d = _valid_slot_dict("PULSE")
+            d["options"]["ditch_type"] = name
+            decoded = slot_codec.decode_slot(slot_codec.encode_slot(d), source=d["source"])
+            self.assertEqual(decoded["options"]["ditch_type"], name)
+
     def test_layout_version_derive_path(self):
         parsed = layout._read_firmware_layout_version()
         self.assertIsInstance(parsed, int)
@@ -199,7 +212,7 @@ class MenuOrderTests(unittest.TestCase):
     def test_options_keys_match_options_menu_order(self):
         expected = ["unset", "variable_brake", "type", "pulse_width", "stack_5step",
                     "stack_band_combos_5step", "stack_band_combos_3step", "estop_on_full_brake",
-                    "reverser_swap", "horn_type"]
+                    "reverser_swap", "horn_type", "ditch_type"]
         self.assertEqual(list(slot_codec.decode_slot(bytes(128), source={})["options"]), expected)
 
     def test_speed_keys_match_speed_cfg_menu_order(self):

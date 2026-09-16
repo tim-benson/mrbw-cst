@@ -289,6 +289,32 @@ the FORCE FUNC landing page (`subscreenState == 0`, not yet SELECT-ed in) the ho
 `&& subscreenState` guard keeps a stale `functionNumber` from firing, which the original `screenState`-only
 check did not.
 
+## Ditch-light mode ("DITCHLTS")
+
+A per-profile `OPTION_SCREEN` toggle, modeled directly on `HORNTYPE` above, for ESU decoder
+configurations where the ditch lights are driven independently of the headlight rather than on top of
+it. Governs how `F.HEAD` and `F.DITCH` combine at the light knob bright+ditch detent
+(`LIGHT_BRIGHT_DITCH`, front and rear each have their own knob but share this one option): Additive,
+default (both functions assert together, the behavior of every prior firmware version) or Exclusive
+(`F.DITCH` alone; `F.HEAD` is dropped). On-screen the option reads `H ←→ H+D` (Additive) or `H ←→ D`
+(Exclusive) — the same base-letter/arrows/result layout `HORNTYPE` uses. `DITCHLTS` is `optionBits`
+bit 7 (per-profile, the last bit free in that byte — no new EEPROM byte, no
+`EEPROM_LAYOUT_VERSION` bump); it round-trips through `cst_cfgtransfer.py` / `cst_cfgnetwork.py` as
+`options.ditch_type` (`"ADDITIVE"`/`"EXCLUSIVE"`).
+
+Unlike Horn2, front/rear head+ditch are not independent tracked `controls` bits needing a
+suppress-after-both-checks override — they already come from one classified
+`switch(frontLight)`/`switch(rearLight)` (see "Light-knob debounce" above), so Exclusive mode is just
+a one-line conditional on the `LIGHT_BRIGHT_DITCH` case deciding whether the headlight arm also fires.
+The light-function trailing lag (see "Light-function trailing lag" above) is unaffected either way — it
+operates on the already-resolved `frontLightNewMask`/`rearLightNewMask`, so it correctly holds whichever
+bits a mode switch or knob change actually dropped, the same as any other knob-position transition.
+
+**Known limitation, not guarded.** If `FRONT_DITCH_FN`/`REAR_DITCH_FN` is left `FN_OFF` while Exclusive
+is selected, the bright+ditch detent asserts nothing at all (headlight suppressed, ditch not
+configured) — a misconfiguration, not a crash, and with no on-screen cue (unlike the non-blocking
+`<H1` threshold-ordering cue Horn2 shows above for its own misconfiguration case).
+
 ## Brake logic
 
 `brakeState` (`BrakeStates` enum: `BRAKE_LOW_BEGIN` ... `BRAKE_FULL_WAIT`, `mrbw-cst.c`) drives two
@@ -1482,9 +1508,10 @@ of the live one — `loadEligible()`, LOAD own `functionMask` assembly, the brak
 `evaluateStackBrake()`, the `TIMER0_COMPA_vect` pulse-width wrap, AIRBRAKE own `independentBrakeAtRest`
 classification, and SPEED own `stepBrakeMode` exclusion — while the screen own display/edit code keeps
 reading the live global, so on-screen browsing stays fully reactive with no visible change in behavior;
-only the real, transmitted effect is deferred to save time. `HORNTYPE`/`REV SWAP` (`OPTION_SCREEN`),
-`AIRBRAKE_CONFIG_SCREEN` own fields, and `CONFIG_FUNC_SCREEN` own function assignments have the same
-live-edit-live-effect characteristic and are not (yet) covered by this pattern.
+only the real, transmitted effect is deferred to save time. `HORNTYPE`/`DITCHLTS`/`REV SWAP`
+(`OPTION_SCREEN`), `AIRBRAKE_CONFIG_SCREEN` own fields, and `CONFIG_FUNC_SCREEN` own function
+assignments have the same live-edit-live-effect characteristic and are not (yet) covered by this
+pattern.
 
 ## Shared network CNF store
 
@@ -1656,8 +1683,9 @@ encoder writes inert values to the slots a `V4` drops so the image byte-matches 
 sign-magnitude), so the codec decodes `0xFF` to that rather than `"UNSET"`, accepts `ACCEL`/`DECEL`
 `0-255` and `ACCELADJ`/`DECELADJ` `-127..127`, and maps a bare `"UNSET"` for one of these to its
 default value; `SPEED_FULL_RANGE_FIELDS` / `SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
-`SLOT_SCHEMA_VERSION` is 6 (`functions` gained `MENU_BUTTON` / `SEL_BUTTON`, `prefs.config_bits`
-gained `ops_mode` — see "OPS MODE screen"). `encode_slot` / `encode_global` also accept the older
+`SLOT_SCHEMA_VERSION` is 8 (most recently, `options` gained `ditch_type` — see "Ditch-light mode";
+earlier bumps added `functions.MENU_BUTTON`/`SEL_BUTTON` and `prefs.config_bits.ops_mode` — see "OPS
+MODE screen" — and `system.menu_visibility` — see "Menu Customisation"). `encode_slot` / `encode_global` also accept the older
 pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`,
 and — via `--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is `V4`, a pre-5 `speed`
 object missing `ACCELADJ`/`DECELADJ`, or a pre-6 backup missing the `MENU_BUTTON` / `SEL_BUTTON`

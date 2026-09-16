@@ -264,15 +264,18 @@ the objects follow the top-level menu cycle
   exactly — an out-of-range value is rejected rather than silently clamped. A pre-v3 backup lacking the
   whole `airbrake` object, or one whose `airbrake` object predates `DISPLAY`, restores fine with
   `--import-old` (missing fields default to `"UNSET"`).
-- **`options`** (the `OPTIONS` menu — mostly brake, plus reverser/horn), in menu order: `variable_brake`,
+- **`options`** (the `OPTIONS` menu — mostly brake, plus reverser/horn/ditch-light), in menu order: `variable_brake`,
   `type` (`"PULSE"`/`"STEP"`/`"STACK"`), `pulse_width` (2-10), `stack_5step`, then
   `stack_band_combos_5step` (5 entries) / `stack_band_combos_3step` (3 entries) — both always present
   regardless of which variant is selected, each entry a string like `"BRAKE1--"`..`"BRAKE123"` (digit =
   that brake asserted, dash = not), matching the `STEP1`..`STEPn` editor display exactly — then
-  `estop_on_full_brake`, `reverser_swap` (booleans), and `horn_type` (`"ADDITIVE"` = Horn2 stacks on top
+  `estop_on_full_brake`, `reverser_swap` (booleans), `horn_type` (`"ADDITIVE"` = Horn2 stacks on top
   of Horn1, the default; `"EXCLUSIVE"` = Horn2 replaces Horn1 — the `HORNTYPE` / `1 ←→ 1+2` vs `1 ←→ 2`
-  menu item). `unset: true` means the option byte has never been written on this device (the throttle
-  fills in its own defaults on next boot) — when true, every `options.*` field besides `pulse_width` and
+  menu item), and `ditch_type` (`"ADDITIVE"` = F.DITCH stacks on top of F.HEAD at the bright+ditch
+  light-knob detent, the default; `"EXCLUSIVE"` = F.DITCH replaces F.HEAD there — the `DITCHLTS` /
+  `H ←→ H+D` vs `H ←→ D` menu item, front and rear both). `unset: true` means the option byte has
+  never been written on this device (the throttle fills in its own defaults on next boot) — when
+  true, every `options.*` field besides `pulse_width` and
   the combo arrays is ignored on import. (Backups written before this rename used `brake` /
   `options_unset` — still accepted on import.)
 
