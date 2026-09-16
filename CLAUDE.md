@@ -1934,6 +1934,20 @@ of the outgoing MRBus `'v'` status-query response packet — past 255 commits si
 byte wraps. Neither this repo nor `mrbw-cabbus` reads/consumes that field from a `'v'` packet today, so
 this is a low-priority, wire-protocol-only quirk rather than a live bug.
 
+**Automatic per-commit pre-releases**: the `commit-release` job in `.github/workflows/ci.yml` runs on
+every push to `main`/`master` (excluded for pull requests, `workflow_dispatch` runs, and tag pushes, via
+`if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref ==
+'refs/heads/master')`). It computes the version string with the same `src/git-revision.sh` invocation the
+build itself uses, then publishes a GitHub pre-release tagged with that exact three-part version (e.g.
+`X1.0.1`) with the built `.hex` attached, via `gh release create ... --prerelease --target
+"$GITHUB_SHA"`. A three-component tag never matches the `X[0-9].[0-9]` glob `git-revision.sh` and `git
+describe` use for milestone detection, so these per-commit tags cannot affect milestone-based version
+computation now or in the future. Tags and releases created through the default `GITHUB_TOKEN` do not
+trigger new `push`-event workflow runs, a built-in Actions anti-recursion behavior, so this job never
+re-triggers itself or the milestone `release` job above. This mechanism is independent of the manual
+milestone tagging described above, which remains unchanged. `FIRMWARE.md` at the repo root covers the
+end-user-facing side: hardware needed, step-by-step flashing, and the recommended backup process.
+
 ## Compatibility: mixing stock ISE firmware with this fork on the same layout
 
 A real deployment will often have a mix of throttles/receivers on different firmware vintages during a

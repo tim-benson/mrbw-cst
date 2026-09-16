@@ -86,6 +86,22 @@ The SPEED and AIRBRAKE simulation models and the EEPROM layout migrations each h
 golden-master test — `make speedtest`, `make pressuretest`, `make eepromtest` (run automatically by a
 pre-commit hook) — that locks their behaviour against a set of reference traces.
 
+## Releases
+
+This repo publishes two kinds of GitHub release, both on the repo's
+[Releases page](https://github.com/tim-benson/mrbw-cst/releases), each with a prebuilt `.hex` attached:
+
+- **Milestone releases** (`X<major>.<minor>`, e.g. `X1.0`) — full releases, tagged by hand only at
+  meaningful milestones. These are the maintainer-vetted versions to prefer for stable firmware.
+- **Per-commit pre-releases** (`X<major>.<minor>.<n>`, e.g. `X1.0.1`) — published automatically by CI on
+  every push to `main`, marked "Pre-release" on GitHub, and always reflect the exact firmware version
+  string that build embeds (see `CLAUDE.md`, "Firmware versioning"). These track the latest firmware
+  between milestones and receive no testing beyond CI passing.
+
+For a physical ProtoThrottle and prebuilt firmware with no compiler required, see
+**[FIRMWARE.md](FIRMWARE.md)** — plain-English hardware requirements, step-by-step flashing instructions,
+and the recommended backup process.
+
 ## Documentation
 
 `CLAUDE.md` at the repo root is the full technical reference — architecture, every feature's design

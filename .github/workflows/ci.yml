@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['X*']
   pull_request:
   workflow_dispatch:
 
@@ -58,3 +59,93 @@ jobs:
       - name: cst-fastclock
         working-directory: src/cst-fastclock
         run: python3 -m unittest discover tests
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [firmware-build, model-tests, python-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history + tags so src/git-revision.sh embeds the real tagged
+          # VERSION_STRING in the build, matching a local `make hex` at this tag.
+          fetch-depth: 0
+      - name: Install AVR toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-avr binutils-avr avr-libc
+      - name: Compile
+        working-directory: src
+        run: make hex
+      - name: Name the release artifact
+        working-directory: src
+        run: cp mrbw-cst.hex "mrbw-cst-${{ github.ref_name }}.hex"
+      - name: Publish GitHub release
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > /tmp/release-notes.md <<'EOF'
+          Prebuilt firmware for ProtoThrottle X, built automatically by CI from this tag.
+
+          **Target:** ATmega1284P @ 11.0592 MHz / 3.3V.
+
+          Flash with an AVR ISP programmer wired to the board's ISP header — see the repo README for
+          full instructions (`make fuse` once per chip, then `make flash`, or point `avrdude` at this
+          file directly). If your throttle already has loco profiles configured, back them up first
+          with `cst_cfgtransfer.py export` in case the EEPROM layout changed in this release.
+          EOF
+          gh release create "${{ github.ref_name }}" \
+            "mrbw-cst-${{ github.ref_name }}.hex" \
+            --title "${{ github.ref_name }}" \
+            --notes-file /tmp/release-notes.md
+
+  commit-release:
+    name: Publish per-commit pre-release
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    needs: [firmware-build, model-tests, python-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history + tags so src/git-revision.sh computes the real three-part
+          # VERSION_STRING for this exact commit (X<major>.<minor>.<n>).
+          fetch-depth: 0
+      - name: Compute firmware version
+        id: version
+        working-directory: src
+        run: echo "version=$(./git-revision.sh)" >> "$GITHUB_OUTPUT"
+      - name: Install AVR toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-avr binutils-avr avr-libc
+      - name: Compile
+        working-directory: src
+        run: make hex
+      - name: Name the release artifact
+        working-directory: src
+        run: cp mrbw-cst.hex "mrbw-cst-${{ steps.version.outputs.version }}.hex"
+      - name: Publish GitHub pre-release
+        working-directory: src
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > /tmp/release-notes.md <<'EOF'
+          Automatic pre-release build, published by CI from this commit -- not a curated milestone
+          release. See the maintainer-tagged X<major>.<minor> releases on this page for those.
+
+          Target: ATmega1284P @ 11.0592 MHz / 3.3V.
+
+          See FIRMWARE.md (https://github.com/tim-benson/mrbw-cst/blob/main/FIRMWARE.md) for the
+          hardware you need and step-by-step instructions to flash this file, including how to back up
+          an already-configured throttle first with cst_cfgtransfer.py export.
+          EOF
+          gh release create "${{ steps.version.outputs.version }}" \
+            "mrbw-cst-${{ steps.version.outputs.version }}.hex" \
+            --title "${{ steps.version.outputs.version }}" \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --notes-file /tmp/release-notes.md
