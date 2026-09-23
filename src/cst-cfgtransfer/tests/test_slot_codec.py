@@ -585,8 +585,9 @@ class SpeedTypeTests(unittest.TestCase):
 
 
 class SpeedFullRangeTests(unittest.TestCase):
-    """ACCEL/DECEL are genuine 0-255 fields (a decoder's literal CV3/CV4 can be 255); every other
-    plain-numeric SPEED field still self-heals from 0xFF and so stays 0-254 + "UNSET". Pins
+    """ACCEL/DECEL and OPLOAD/PRLOAD are genuine 0-255 fields - a decoder's literal CV3/CV4 can be
+    255, and CV103/CV104 (Optional/Primary Load) are just as much plain 0-255 decoder CVs. Every
+    other plain-numeric SPEED field still self-heals from 0xFF and so stays 0-254 + "UNSET". Pins
     _decode_speed / _encode_speed (SPEED_FULL_RANGE_FIELDS)."""
 
     def _slot_with_speed(self, speed):
@@ -595,8 +596,8 @@ class SpeedFullRangeTests(unittest.TestCase):
         return d
 
     def test_accel_decel_round_trip_across_range(self):
-        for key in ("ACCEL", "DECEL"):
-            for val in (0, 1, 60, 230, 254, 255):
+        for key in ("ACCEL", "DECEL", "OPLOAD", "PRLOAD"):
+            for val in (0, 1, 60, 128, 230, 254, 255):
                 d = self._slot_with_speed(_valid_speed("V5DCC"))
                 d["speed"][key] = val
                 encoded = slot_codec.encode_slot(d)
@@ -610,19 +611,24 @@ class SpeedFullRangeTests(unittest.TestCase):
         speed = slot_codec.decode_slot(bytes(raw), source={})["speed"]
         self.assertEqual(speed["ACCEL"], 255)
         self.assertEqual(speed["DECEL"], 255)
+        # OPLOAD/PRLOAD joined them at EEPROM_LAYOUT_VERSION 7 - the migration seeds a never-written
+        # 0x59/0x5B to 128 first, so by the time the tooling sees one a 0xFF is a deliberate 255.
+        self.assertEqual(speed["OPLOAD"], 255)
+        self.assertEqual(speed["PRLOAD"], 255)
 
     def test_unset_on_import_maps_to_default(self):
-        for key, default in (("ACCEL", 60), ("DECEL", 230)):
+        for key, default in (("ACCEL", 60), ("DECEL", 230), ("OPLOAD", 128), ("PRLOAD", 128)):
             d = self._slot_with_speed(_valid_speed("V5DCC"))
             d["speed"][key] = slot_codec.UNSET
             encoded = slot_codec.encode_slot(d)
             self.assertEqual(encoded[layout.SPEED_FIELD_OFFSET[key]], default)
 
     def test_out_of_range_rejected(self):
-        d = self._slot_with_speed(_valid_speed("V5DCC"))
-        d["speed"]["ACCEL"] = 256
-        with self.assertRaises(slot_codec.SlotValidationError):
-            slot_codec.encode_slot(d)
+        for key in ("ACCEL", "OPLOAD", "PRLOAD"):
+            d = self._slot_with_speed(_valid_speed("V5DCC"))
+            d["speed"][key] = 256
+            with self.assertRaises(slot_codec.SlotValidationError):
+                slot_codec.encode_slot(d)
 
     def test_brk1_still_rejects_255(self):
         d = self._slot_with_speed(_valid_speed("V5DCC"))
@@ -773,8 +779,11 @@ class AllowMissingTests(unittest.TestCase):
         self.assertEqual(decoded["speed"]["BRK1"], slot_codec.UNSET)
 
     def test_missing_full_range_speed_key_defaults_not_unset(self):
-        # ACCEL/DECEL have no "unset" byte (0xFF is a real 255), so a missing key -> the real default.
-        for key, default in (("ACCEL", 60), ("DECEL", 230)):
+        # These have no "unset" byte (0xFF is a real 255), so a missing key -> the real default. For
+        # OPLOAD/PRLOAD that also covers restoring a pre-schema-9 backup, which carries no notion of a
+        # raw 0xFF there: --import-old must land on the neutral 128, never leave a 0xFF that would now
+        # decode as a heavy 255 load.
+        for key, default in (("ACCEL", 60), ("DECEL", 230), ("OPLOAD", 128), ("PRLOAD", 128)):
             d = _valid_slot_dict()
             del d["speed"][key]
             encoded = slot_codec.encode_slot(d, allow_missing=True)

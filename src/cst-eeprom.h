@@ -13,7 +13,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          6
+#define EEPROM_LAYOUT_VERSION          7
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -205,9 +205,9 @@
 #define EE_MOMENTUM_START_DELAY      (0x56 + CONFIG_OFFSET(WORKING_CONFIG))  // CV167 mirror
 #define EE_SPEED_HOLD_WATCH_FN       (0x57 + CONFIG_OFFSET(WORKING_CONFIG))  // Drive Hold watched DCC fn, 255=OFF (default F09)
 #define EE_SPEED_STOP_WATCH_FN       (0x58 + CONFIG_OFFSET(WORKING_CONFIG))  // stop-trigger watched DCC fn, 255=OFF
-#define EE_SPEED_OPLOAD              (0x59 + CONFIG_OFFSET(WORKING_CONFIG))  // CV103 mirror (Optional Load)
+#define EE_SPEED_OPLOAD              (0x59 + CONFIG_OFFSET(WORKING_CONFIG))  // CV103 mirror (Optional Load), raw 0-255
 #define EE_SPEED_OPLOAD_FN           (0x5A + CONFIG_OFFSET(WORKING_CONFIG))  // OPLOAD watched DCC fn, 255=OFF
-#define EE_SPEED_PRLOAD              (0x5B + CONFIG_OFFSET(WORKING_CONFIG))  // CV104 mirror (Primary Load)
+#define EE_SPEED_PRLOAD              (0x5B + CONFIG_OFFSET(WORKING_CONFIG))  // CV104 mirror (Primary Load), raw 0-255
 #define EE_SPEED_PRLOAD_FN           (0x5C + CONFIG_OFFSET(WORKING_CONFIG))  // PRLOAD watched DCC fn, 255=OFF
 #define EE_SPEED_ACCEL_PCT           (0x5D + CONFIG_OFFSET(WORKING_CONFIG))  // 0-255=0-100%, standing-start head-start
 #define EE_SPEED_ACCEL_TARGET        (0x5E + CONFIG_OFFSET(WORKING_CONFIG))  // target ticks-to-1mph (0.1s/tick)

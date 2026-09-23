@@ -246,13 +246,16 @@ the objects follow the top-level menu cycle
   `ACCPCT`, `ACCTGT`, `DECPCT`, `DECTHR`) — it has no `CV23`/`CV24`/`CV180`/`CV181`/`CV103`/`CV104`, so
   `ACCELADJ`/`DECELADJ`, `BRK2`/`BRK3` and the load CVs are absent. `ACCELADJ`/`DECELADJ` mirror ESU
   CV23/CV24 (a signed factor added to `ACCEL`/`DECEL`) and are a plain signed integer `-127`..`127`.
-  `ACCEL` and `DECEL` are genuine
-  `0`-`255` fields (a decoder's literal CV3/CV4 can be `255`, so a raw `0xFF` decodes to `255`, and a
-  bare `"UNSET"` for one of them imports as its default rather than the sentinel); every other
-  plain-numeric `speed` field is `0`-`254` or `"UNSET"`. Watched-function fields
+  `ACCEL`, `DECEL`, `OPLOAD` and `PRLOAD` are genuine
+  `0`-`255` fields (a decoder's literal CV3/CV4 can be `255`, and CV103/CV104 are just as much plain
+  `0`-`255` decoder CVs, so a raw `0xFF` decodes to `255`, and a bare `"UNSET"` for one of them imports
+  as its default rather than the sentinel); every other plain-numeric `speed` field is `0`-`254` or
+  `"UNSET"`. Watched-function fields
   (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`) are `"OFF"` or `"F00"`..`"F28"`. A pre-5-schema backup
   missing `ACCELADJ`/`DECELADJ` needs `--import-old` (they default to `0`); a `V4` `TYPE` on a flat backup
-  needs `--import-old` too, which ignores the inapplicable fields.
+  needs `--import-old` too, which ignores the inapplicable fields. A pre-9-schema backup carrying
+  `"UNSET"` for `OPLOAD`/`PRLOAD` (they were `0`-`254` + `"UNSET"` before the on-chip layout moved to
+  7) imports as the neutral `128` with no flag needed.
 - **`airbrake`**: 9 fields under the exact `AIRBRAKE CFG` on-device menu names — `BP_CHARGE`, `MR_LOAD`,
   `MR_LOW`, `MR_HIGH`, `RECHARGE`, `LEAK_RATE`, `PUMP_RATE`, `DISPLAY`, `COMP_MODE` — the per-loco
   parameters of the AIRBRAKE air-brake model, all always visible on-device (no `ADV FUNC` gating left in

@@ -357,9 +357,15 @@ static uint8_t ceilFadeNum(uint16_t effCV)
 // used, per the ESU manual's "Acceleration time = CV3 * (load value / 128)" formula. cv is the
 // already-adjusted effective CV (0-382); the return can exceed 255 (e.g. 382 * 255 / 128 = 761) and is
 // deliberately not clamped back to 8 bits - only the raw CV inputs are byte-range, not the scaled time.
+// Rounds to nearest rather than truncating: at a typical CV3 of 60 one load unit only moves the scaled
+// CV by 0.47, so plain truncation makes a whole band of neighbouring load values indistinguishable and
+// biases the resulting time low by up to ~0.8%. Still exact at the neutral 128 ((128*cv + 64) / 128 ==
+// cv, since 64 < 128), so a profile with no load active is unaffected. The /128 is deliberately not
+// folded into ticksToCross()/brakeTicksToCross() instead: the brake form would then reach
+// 255 * 382 * 255 * 896 =~ 2.2e10 before dividing, overflowing uint32_t.
 static uint16_t applyLoad(uint16_t cv, uint8_t loadValue)
 {
-	return (uint16_t)(((uint32_t)cv * loadValue) / 128);
+	return (uint16_t)((((uint32_t)cv * loadValue) + 64) / 128);
 }
 
 static uint16_t ticksToCross(uint16_t cv)
@@ -524,7 +530,7 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 	uint16_t current = simSpeedStepQ8;
 
 	// Optional/Primary Load (CV103/CV104): scales CV3/CV4 while its watched function is active, 128 =
-	// neutral. Primary Load wins if both are active simultaneously, matching the real decoder.
+	// neutral. Primary Load wins if both are active simultaneously, per the ESU manual.
 	uint8_t loadValue = prloadActive ? speedCfg[SPEED_ITEM_PRLOAD] : (oploadActive ? speedCfg[SPEED_ITEM_OPLOAD] : 128);
 
 	// Brake1/2/3 CVs sum when stacked (capped at 255 = near-instant stop), rather than "fastest wins".
@@ -620,6 +626,13 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			// uniform onset paid back by 15mph.
 			uint16_t accelTicksNow = ticksToCross(applyLoad(speedEffAccelCV(), loadValue));
 			uint16_t v = (accelTicksNow > 0) ? (uint16_t)(((uint32_t)126 << 8) / accelTicksNow) : 0xFFFF;
+			// ACCPCT's reference time: the lesser of the load-scaled crossing time and the unloaded
+			// one - i.e. the loaded time under a light load (< 128), the unloaded time under a heavy
+			// one. See the headstartTicks line below. Equal to accelTicksNow at the neutral 128,
+			// since applyLoad() is exact there.
+			uint16_t accelTicksUnloaded = ticksToCross(speedEffAccelCV());
+			uint16_t headstartRefTicks = (accelTicksNow < accelTicksUnloaded) ? accelTicksNow
+			                                                                 : accelTicksUnloaded;
 			// MAXSPEED is a divisor here and at desiredPos below. The editor floors it at 1, but a 0
 			// could still arrive via import / CNF / a corrupt byte - fall back to the default rather
 			// than divide by zero.
@@ -629,9 +642,24 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 
 			// ACCPCT's leadTime budget - the ramp's *total* duration to 15mph, unaffected by
 			// SPEED_ACCEL_TARGET (see below) - so this stays exactly the already hardware-calibrated value.
+			// The budget is measured against headstartRefTicks, not the load-scaled accelTicksNow:
+			// ACCPCT models the decoder's BEMF regulator getting the train moving (leadTime =~ 0.0285 x
+			// ACCEL seconds - see cst-speed.h), and hardware measurement across CV103/CV104 found that
+			// head start is asymmetric in the load. A HEAVY load does not lengthen it - the train still
+			// breaks away in about the same time, the load only stretches the programmed ramp that
+			// follows - so it is capped at the unloaded time. Scaling it up doubled the head start at
+			// PRLOAD 254 (1.6s -> 3.3s) and left that lead in place for the whole climb and all cruise
+			// after, seen on hardware as the display running well ahead of the locomotive. A LIGHT load
+			// does shorten it proportionally, so below 128 the loaded time is used: holding the head
+			// start at its full unloaded value there left the display reading ~1mph high at OPLOAD 80,
+			// and - because the budget is subtracted from a ramp that shrinks with the load while an
+			// absolute head start does not - collapsed rampT to a single tick below about OPLOAD 12,
+			// jumping the readout straight to ~16mph. Equivalently: the head start can never be more
+			// than ACCPCT's fixed fraction of the ramp it is taken out of.
+			// plainTicksToS keeps accelTicksNow - the ramp's own duration genuinely does scale with load.
 			uint32_t headstartQ8 = ((uint32_t)speedCfg[SPEED_ITEM_ACCEL_PCT] * (126UL << 8)) / 255;
 			uint16_t plainTicksToS = (uint16_t)(((uint32_t)rampS * accelTicksNow) / (126UL << 8));
-			uint16_t headstartTicks = (uint16_t)(((uint32_t)headstartQ8 * accelTicksNow) / (126UL << 8));
+			uint16_t headstartTicks = (uint16_t)(((uint32_t)headstartQ8 * headstartRefTicks) / (126UL << 8));
 			rampT = (plainTicksToS > headstartTicks) ? plainTicksToS - headstartTicks : 1;
 
 			// SPEED_ACCEL_TARGET: target ticks-to-1mph, solved for the initial ramp slope r0 that hits it
@@ -641,6 +669,17 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 			int64_t Q0 = 3 * (int64_t)rampS * (int64_t)rampT - (int64_t)v * (int64_t)rampT * (int64_t)rampT;
 			uint16_t desiredPos = (uint16_t)(((uint32_t)126 << 8) / (2 * (uint32_t)maxMph));  // ~0.5mph
 			rampR0 = solveRampR0(speedCfg[SPEED_ITEM_ACCEL_TARGET], P0, Q0, rampT, rampS, desiredPos);
+			// The onset slope can never exceed v, the decoder's own programmed ramp rate: r0 > v means
+			// the ramp starts faster than the loco can accelerate and then has to slow its *rate* back
+			// down to land at (rampT, rampS), the non-monotonicity flagged in cst-speed.h's
+			// SPEED_ACCEL_TARGET notes. It is also exactly the rule the momentum-ceiling fade below
+			// already enforces at its own limit (rampFadeNum == 0 sets rampR0 = v), so this generalises
+			// that instead of applying it only at the ceiling. Matters most under a heavy CV103/CV104
+			// load: solveRampR0() targets an absolute time-to-0.5mph regardless of how slow the loaded
+			// ramp is, and the resulting r0 term (r0*tau*(tau-T)^2/T^2) peaks at 4*r0*rampT/27 - i.e. it
+			// grows with rampT, so a load-doubled ramp got double the mid-ramp bulge.
+			if(rampR0 > (int32_t)v)
+				rampR0 = (int32_t)v;
 			rampP = P0 + (int64_t)rampR0 * (int64_t)rampT;
 			rampQ = Q0 - 2 * (int64_t)rampR0 * (int64_t)rampT * (int64_t)rampT;
 

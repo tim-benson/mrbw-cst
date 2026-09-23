@@ -53,7 +53,12 @@ UNSET = "UNSET"
 # item, right after HORNTYPE), same ADDITIVE/EXCLUSIVE vocabulary and no-EEPROM_LAYOUT_VERSION-bump
 # shape as horn_type above. A pre-8 backup missing it needs --import-old (defaults to ADDITIVE, the
 # bit-clear/current-behavior value).
-SLOT_SCHEMA_VERSION = 8
+# 9: speed.OPLOAD / speed.PRLOAD (CV103 / CV104) become genuine 0-255 fields, read raw by the firmware
+# from EEPROM_LAYOUT_VERSION 7 - a stored 0xFF is now a real 255 (a legitimate value for a plain 0-255
+# decoder CV) rather than "UNSET", and the on-device editor ceiling rises from 254 to 255. No JSON
+# shape change, only the value vocabulary of those two keys, so a pre-9 backup still imports: a
+# "UNSET" there maps to the 128 default, exactly as it does for ACCEL / DECEL.
+SLOT_SCHEMA_VERSION = 9
 
 
 class SlotValidationError(ValueError):
@@ -338,8 +343,8 @@ def _decode_speed(raw):
     out = {}
     for key in layout.speed_fields_for_type(type_name):
         val = raw[layout.SPEED_FIELD_OFFSET[key]]
-        # ACCEL/DECEL and ACCELADJ/DECELADJ are read raw by the firmware - a stored 0xFF is a real
-        # value (255, or -127 sign-magnitude), never "UNSET" - so these come first.
+        # ACCEL/DECEL, OPLOAD/PRLOAD and ACCELADJ/DECELADJ are read raw by the firmware - a stored
+        # 0xFF is a real value (255, or -127 sign-magnitude), never "UNSET" - so these come first.
         if key in layout.SPEED_FULL_RANGE_FIELDS:
             out[key] = val
         elif key in layout.SPEED_SIGNED_FIELDS:
@@ -403,8 +408,9 @@ def _encode_speed(d, errors, allow_missing=False):
     for key in expected:
         offset = layout.SPEED_FIELD_OFFSET[key]
         full_range = key in layout.SPEED_FULL_RANGE_FIELDS
-        # ACCEL/DECEL and ACCELADJ/DECELADJ are read raw by the firmware - a stored 0xFF is a real
-        # value, not "unset" - so a missing key / bare "UNSET" defaults to the real default byte.
+        # ACCEL/DECEL, OPLOAD/PRLOAD and ACCELADJ/DECELADJ are read raw by the firmware - a stored
+        # 0xFF is a real value, not "unset" - so a missing key / bare "UNSET" defaults to the real
+        # default byte.
         no_unset = full_range or key in layout.SPEED_SIGNED_FIELDS
         if key not in d:
             if not allow_missing:

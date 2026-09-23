@@ -643,12 +643,14 @@ static uint8_t speedItemIsSignedAdjust(uint8_t item)
 	return (SPEED_ITEM_ACCEL_ADJ == item) || (SPEED_ITEM_DECEL_ADJ == item);
 }
 
-// SPEED_CONFIG_SCREEN: ACCEL/DECEL are genuine 0-255 fields (read raw, so a stored 0xFF is a real 255);
-// the other plain-numeric items still self-heal from 0xFF so their editor ceiling is 254 (matching the
-// AIRBRAKE editor - a saved 255 would silently revert on the next load).
+// SPEED_CONFIG_SCREEN: ACCEL/DECEL and OPLOAD/PRLOAD are genuine 0-255 fields (read raw, so a stored
+// 0xFF is a real 255) - a decoder's literal CV3/CV4 can be 255, and CV103/CV104 are likewise plain
+// 0-255 decoder CVs. The other plain-numeric items still self-heal from 0xFF so their editor ceiling
+// is 254 (matching the AIRBRAKE editor - a saved 255 would silently revert on the next load).
 static uint8_t speedItemIsFullRange(uint8_t item)
 {
-	return (SPEED_ITEM_ACCEL == item) || (SPEED_ITEM_DECEL == item);
+	return (SPEED_ITEM_ACCEL == item) || (SPEED_ITEM_DECEL == item)
+	    || (SPEED_ITEM_OPLOAD == item) || (SPEED_ITEM_PRLOAD == item);
 }
 static int8_t speedAdjDecode(uint8_t b)
 {
@@ -1499,8 +1501,14 @@ void readConfig(void)
 	speedSet(SPEED_ITEM_UNIT,             readByteOrDefault((uint8_t*)EE_SPEED_UNIT_KMH, SPEED_UNIT_KMH_DEFAULT));
 	speedSet(SPEED_ITEM_STOP_FN,          readByteOrDefault((uint8_t*)EE_SPEED_STOP_WATCH_FN, SPEED_STOP_WATCH_FN_DEFAULT));
 	speedSet(SPEED_ITEM_TYPE,             readByteOrDefault((uint8_t*)EE_SPEED_TYPE, SPEED_TYPE_DEFAULT));
-	speedSet(SPEED_ITEM_OPLOAD,           readByteOrDefault((uint8_t*)EE_SPEED_OPLOAD, SPEED_OPLOAD_DEFAULT));
-	speedSet(SPEED_ITEM_PRLOAD,           readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD, SPEED_PRLOAD_DEFAULT));
+	// OPLOAD / PRLOAD are genuine 0-255 CVs - CV103/CV104 are plain 0-255 decoder bytes, same as
+	// CV3/CV4 - so they are read raw: a stored 0xFF is a real 255, not "unset". The layout -> 7
+	// migration seeded any never-written 0x59 / 0x5B to the neutral 128, which is exactly what
+	// readByteOrDefault() used to substitute there, so an upgraded chip reads the same values it
+	// always did. OPLOADFN / PRLOADFN
+	// stay on readByteOrDefault - their default IS the 0xFF OFF sentinel, so they round-trip already.
+	speedSet(SPEED_ITEM_OPLOAD,           eeprom_read_byte((uint8_t*)EE_SPEED_OPLOAD));
+	speedSet(SPEED_ITEM_PRLOAD,           eeprom_read_byte((uint8_t*)EE_SPEED_PRLOAD));
 	speedSet(SPEED_ITEM_OPLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_OPLOAD_FN, SPEED_OPLOAD_FN_DEFAULT));
 	speedSet(SPEED_ITEM_PRLOAD_FN,        readByteOrDefault((uint8_t*)EE_SPEED_PRLOAD_FN, SPEED_PRLOAD_FN_DEFAULT));
 	// HOLDFN read raw so OFF (0xFF) sticks - its readByteOrDefault default is F09, not OFF, so the heal
@@ -6511,10 +6519,16 @@ int main(void)
 		{
 			uint8_t watchFn = speedGet(SPEED_ITEM_STOP_FN);
 			stopFunctionActive = (watchFn <= 28) && (functionMask & ((uint32_t)1 << watchFn));
-			uint8_t opFn = speedGet(SPEED_ITEM_OPLOAD_FN);
-			oploadFunctionActive = (opFn <= 28) && (functionMask & ((uint32_t)1 << opFn));
-			uint8_t prFn = speedGet(SPEED_ITEM_PRLOAD_FN);
-			prloadFunctionActive = (prFn <= 28) && (functionMask & ((uint32_t)1 << prFn));
+			// OPLOADFN/PRLOADFN come from the committed snapshot, not speedGet(): the LOAD button
+			// builds its own functionMask bit from the same committed copies (see the LOAD block
+			// above), and SPEED_CONFIG_SCREEN's TYPE editing calls speedResetModel() live on every
+			// UP/DOWN press, which forces both live items to the inert OFF sentinel the instant TYPE
+			// is merely browsed to V4. Reading live here would make the sim stop seeing the load
+			// while the button was still asserting it - the two must agree on which function number
+			// is being watched. STOPFN/HOLDFN stay live: neither is in cst-speed.c's droppable[], so
+			// no TYPE edit can reset them out from under a read.
+			oploadFunctionActive = (committedOploadFn <= 28) && (functionMask & ((uint32_t)1 << committedOploadFn));
+			prloadFunctionActive = (committedPrloadFn <= 28) && (functionMask & ((uint32_t)1 << committedPrloadFn));
 			uint8_t holdFn = speedGet(SPEED_ITEM_HOLD_FN);
 			holdFunctionActive = (holdFn <= 28) && (functionMask & ((uint32_t)1 << holdFn));
 

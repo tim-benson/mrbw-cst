@@ -232,6 +232,26 @@ static void sc_from_layout5(void)
 	dumpImage("from_layout5", "layout 5, every slot byte = 0x40 + offset");
 }
 
+/* Layout 6 -> current: the -> 7 block (OPLOAD / PRLOAD leaving readByteOrDefault() for a raw read) is
+ * what is under test. Its seed is conditional on the byte currently reading 0xFF, so this image is
+ * built mixed - every slot carries the usual sentinel at 0x59/0x5B except slots 1 and 3 and the
+ * working config, which are forced to 0xFF to stand for a profile whose load CVs were never written.
+ * The blessed trace must show 0x59/0x5B seeded to the neutral 128 in exactly those three, and the
+ * sentinel preserved everywhere else - a tuned value must never be reset by this upgrade. The
+ * 1->2/2->3/->4/->5 blocks all skip (6 is not < 2 / 2 == 6 is false / not < 4 / not < 5). */
+static void sc_from_layout6(void)
+{
+	buildLayout(6);
+	g_eeprom[CONFIG_OFFSET(1) + 0x59] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(1) + 0x5B] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x59] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x5B] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x59] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x5B] = 0xFF;
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	dumpImage("from_layout6", "layout 6, sentinels; 0x59/0x5B = 0xFF in slots 1 and 3 + working config");
+}
+
 /* Already on the current layout: applyEepromMigrations(EEPROM_LAYOUT_VERSION) must be a complete
  * no-op - not even the version stamp is rewritten. Uses the live macro (not a hardcoded number) so
  * this scenario, and the golden trace it produces, automatically stays meaningful across every future
@@ -323,14 +343,17 @@ static int seededDefaults(uint16_t b)
 	    && g_eeprom[b + 0x61] == SPEED_ACCEL_ADJ_DEFAULT
 	    && g_eeprom[b + 0x62] == SPEED_DECEL_ADJ_DEFAULT
 	    && g_eeprom[b + 0x2C] == FN_OFF            /* -> 5: MENU BTN function slot */
-	    && g_eeprom[b + 0x2D] == FN_OFF;           /* -> 5: SEL BTN function slot */
+	    && g_eeprom[b + 0x2D] == FN_OFF            /* -> 5: SEL BTN function slot */
+	    && g_eeprom[b + 0x59] == SPEED_OPLOAD_DEFAULT   /* -> 7: CV103 mirror, now read raw */
+	    && g_eeprom[b + 0x5B] == SPEED_PRLOAD_DEFAULT;  /* -> 7: CV104 mirror, now read raw */
 }
 
 /* 3. Blank chip -> current layout: the version byte is stamped, the -> 4 raw-seed
  *    loop populates the five raw-read SPEED bytes (0x28/0x2E/0x57/0x61/0x62 -
  *    readByteOrDefault() no longer covers them) with their real defaults, and the
- *    -> 5 block seeds the MENU BTN / SEL BTN function slots (0x2C/0x2D) to FN_OFF -
- *    in every one of the 20 profile slots AND the working config. */
+ *    -> 5 block seeds the MENU BTN / SEL BTN function slots (0x2C/0x2D) to FN_OFF, and the
+ *    -> 7 block seeds the two raw-read load CVs (0x59/0x5B) to the neutral 128 - in every one of
+ *    the 20 profile slots AND the working config. */
 static int inv_blank_to_valid(void)
 {
 	int idx, ok = 1;
@@ -488,9 +511,68 @@ static int inv_reset_agrees_with_migration_defaults(void)
 	return ok;
 }
 
+/* 8. The -> 7 block seeds ONLY where the byte is genuinely unset, and a stored 255 is a real value
+ *    from layout 7 onward. Two halves:
+ *      (a) On a layout-6 chip, 0xFF at 0x59/0x5B still carries its old "unset" meaning - there is no
+ *          way to tell it from a never-written byte - so it becomes the neutral 128, preserving
+ *          exactly what readByteOrDefault() used to substitute there. Any other value, 254 included
+ *          (the old editor ceiling), survives byte-for-byte: an upgrade must never reset a tuned load
+ *          CV. Confined, too - no byte moves apart from those seeds and the version stamp.
+ *      (b) Once the chip is on layout 7, a stored 255 is a genuine CV value (OPLOAD/PRLOAD are plain
+ *          0-255 decoder CVs, same as ACCEL/DECEL) and a later boot must leave it alone - the whole
+ *          point of the raw read. */
+static int inv_layout7_seeds_only_unset(void)
+{
+	static uint8_t before[4096];
+	int idx, o, ok = 1;
+
+	/* (a) layout 6 -> 7 */
+	buildLayout(6);
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		/* Even slots: never-written (0xFF) - must be seeded. Odd slots: real stored values that
+		 * must survive untouched, one of them the old 254 editor ceiling. */
+		g_eeprom[b + 0x59] = (idx & 1) ? 254 : 0xFF;
+		g_eeprom[b + 0x5B] = (idx & 1) ? 200 : 0xFF;
+	}
+	memcpy(before, g_eeprom, sizeof before);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		uint8_t wantOp = (idx & 1) ? 254 : SPEED_OPLOAD_DEFAULT;
+		uint8_t wantPr = (idx & 1) ? 200 : SPEED_PRLOAD_DEFAULT;
+		if (g_eeprom[b + 0x59] != wantOp || g_eeprom[b + 0x5B] != wantPr)
+			ok = 0;
+		before[b + 0x59] = wantOp;   /* the only two bytes per slot allowed to move */
+		before[b + 0x5B] = wantPr;
+	}
+	before[EE_LAYOUT_VERSION] = EEPROM_LAYOUT_VERSION;
+	for (o = 0; o < 4096; o++)
+		if (g_eeprom[o] != before[o])
+			ok = 0;
+
+	/* (b) already on layout 7: a stored 255 is real and must not be seeded away */
+	buildLayout(EEPROM_LAYOUT_VERSION);
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		g_eeprom[b + 0x59] = 255;
+		g_eeprom[b + 0x5B] = 255;
+	}
+	memcpy(before, g_eeprom, sizeof before);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	if (0 != memcmp(before, g_eeprom, sizeof before))
+		ok = 0;
+
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
-	int i1, i2, i3, i4, i5, i6, i7;
+	int i1, i2, i3, i4, i5, i6, i7, i8;
 
 	g_outdir = (argc > 1) ? argv[1] : "out";
 
@@ -500,6 +582,7 @@ int main(int argc, char **argv)
 	sc_from_layout3();
 	sc_from_layout4();
 	sc_from_layout5();
+	sc_from_layout6();
 	sc_from_current_noop();
 	sc_reset_model();
 
@@ -512,6 +595,7 @@ int main(int argc, char **argv)
 	i5 = inv_reset_model_complete();
 	i6 = inv_reset_confined();
 	i7 = inv_reset_agrees_with_migration_defaults();
+	i8 = inv_layout7_seeds_only_unset();
 	printf("invariant  current-layout image untouched (no-op):   %s\n", i1 ? "PASS" : "FAIL");
 	printf("invariant  migration is idempotent:                 %s\n", i2 ? "PASS" : "FAIL");
 	printf("invariant  blank chip -> valid current layout:      %s\n", i3 ? "PASS" : "FAIL");
@@ -519,5 +603,6 @@ int main(int argc, char **argv)
 	printf("invariant  reset-model: every field at its default: %s\n", i5 ? "PASS" : "FAIL");
 	printf("invariant  reset-model: confined to [0x28,0x62]:     %s\n", i6 ? "PASS" : "FAIL");
 	printf("invariant  reset-model agrees with migration seed:  %s\n", i7 ? "PASS" : "FAIL");
-	return (i1 && i2 && i3 && i4 && i5 && i6 && i7) ? 0 : 1;
+	printf("invariant  ->7 seeds only an unset OPLOAD/PRLOAD:   %s\n", i8 ? "PASS" : "FAIL");
+	return (i1 && i2 && i3 && i4 && i5 && i6 && i7 && i8) ? 0 : 1;
 }

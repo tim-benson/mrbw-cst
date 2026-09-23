@@ -188,6 +188,32 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 			eeprom_write_byte((uint8_t*)(base + 0x2D), FN_OFF);
 		}
 	}
+
+	// EEPROM_LAYOUT_VERSION -> 7. 0x59 / 0x5B (EE_SPEED_OPLOAD / EE_SPEED_PRLOAD, the CV103 / CV104
+	// mirrors) leave readByteOrDefault() and are read raw by readConfig(), so a stored 0xFF is now a
+	// real 255 rather than the "unset" sentinel. 255 is a legitimate value for these two, and the 254
+	// editor ceiling that the sentinel forced was wrong for a field that mirrors a plain 0-255 decoder
+	// CV. Seed only the bytes that currently read 0xFF, in
+	// every profile slot plus the working config: under every layout up to 6 a 0xFF there already
+	// *meant* the neutral 128 (that is precisely what readByteOrDefault() substituted), so this is
+	// non-destructive - a real stored value, 254 included, is left exactly as it is, and an upgraded
+	// throttle keeps reading what it always read. The working config self-healed on every boot, but a
+	// stored slot that was never loaded did not, hence the full sweep. Gated `< 7` (the same idiom the
+	// -> 4 and -> 5 blocks use, never `!= EEPROM_LAYOUT_VERSION`), plus the 0xFF blank/wiped-chip case.
+	if((oldLayoutVersion < 7) || (0xFF == oldLayoutVersion))
+	{
+		uint8_t s;
+		for(s = 1; s <= MAX_CONFIGS + 1; s++)
+		{
+			uint8_t cfgNum = (s <= MAX_CONFIGS) ? s : WORKING_CONFIG;
+			uint16_t base = CONFIG_OFFSET(cfgNum);
+			wdt_reset();
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x59)))
+				eeprom_write_byte((uint8_t*)(base + 0x59), SPEED_OPLOAD_DEFAULT);
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x5B)))
+				eeprom_write_byte((uint8_t*)(base + 0x5B), SPEED_PRLOAD_DEFAULT);
+		}
+	}
 }
 
 // Writes the SPEED / AIRBRAKE / STACK "model" bytes of one 128-byte profile slot (at configBase) to

@@ -39,6 +39,11 @@ This is a fork adding:
   reservoir, compressor governor — driving the ESU air sound functions from the simulated pressures,
   with a read-only gauge screen (two-pressure or analogue-dial style). Opt-in via a PREFS toggle;
   replaces the stock transient "Brake Test" gauge.
+- **Ditch-light mode ("DITCHLTS")** — an optional Exclusive mode for the bright+ditch light-knob detent,
+  for ESU decoder configurations where the ditch lights are driven independently of the headlight
+  rather than on top of it.
+- **Menu Customisation** — SYSTEM-menu toggles to hide any top-level menu screen an owner never uses,
+  removing it from the `MENU` cycle without losing the ability to unhide it later.
 
 Everything else — DCC status relay, fast clock, EEPROM read, ping, version query — is unchanged from
 stock ISE firmware. The stock features this fork drops: the `ACCEPT DOWNLOAD` menu item and its
@@ -47,7 +52,7 @@ Functions" menu whose transient Brake Test gauge AIRBRAKE replaces. A mixed flee
 fork-firmware throttles/receivers on the same layout is fully supported; see `CLAUDE.md`,
 "Compatibility," for exactly how each combination behaves.
 
-The stored-config layout carries an `EEPROM_LAYOUT_VERSION` (currently 5) and the firmware migrates an
+The stored-config layout carries an `EEPROM_LAYOUT_VERSION` (currently 7) and the firmware migrates an
 older EEPROM forward on first boot. Migrations carry existing per-profile values across in place, with one
 exception: a throttle already running an early ProtoThrottle X build loses its SPEED and AIRBRAKE
 per-profile config to defaults when it crosses the AIRBRAKE layout change. Coming from stock ISE firmware

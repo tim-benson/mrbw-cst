@@ -12,9 +12,13 @@ Delay, the load CVs, CV sweeps, and the decoder families (V5DCC / V5MULT / V4).
 Every 10 Hz tick it records the internal `simSpeedStepQ8` value and the
 `printSpeed()` render into a plain-text **trace**, one file per scenario. Those
 traces are compared byte-for-byte against the checked-in copies under
-`reference/`. `main()` also asserts one cross-scenario invariant it prints as a
-`PASS`/`FAIL` line - that the V4 model equals the V5MultiProtocol model with its
-dropped parameters no-oped - and exits non-zero if it fails.
+`reference/`. `main()` also asserts four cross-scenario invariants it prints as
+`PASS`/`FAIL` lines, exiting non-zero if any fails: the V4 model equals the
+V5MultiProtocol model with its dropped parameters no-oped; `speedApplyTypeInert()`
+neutralises a stale slot; the `ACCPCT` standing-start head start follows the
+asymmetric load rule (identical to neutral for every load at or above 128,
+proportional below it); and `rampT` never collapses to a single tick across all
+254 load values a non-zero effective CV allows.
 
 A difference means the model output moved. Either it is an intended change (a new
 correction term, a tuned default, a genuine behaviour fix) and the reference is

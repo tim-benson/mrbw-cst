@@ -157,7 +157,7 @@ fields are read through `readByteOrDefault()`, which detects that sentinel and s
 default rather than trusting a plainly-invalid raw byte.
 
 **EEPROM layout migrations (`cst-eeprom.c`)**: one bespoke per-slot byte-remapping transform per
-`EEPROM_LAYOUT_VERSION` bump (currently 6), factored out of `readConfig()` into
+`EEPROM_LAYOUT_VERSION` bump (currently 7), factored out of `readConfig()` into
 `applyEepromMigrations(uint8_t oldLayoutVersion)` — the highest-risk, least-verifiable firmware code (a
 wrong offset silently corrupts every stored profile on upgrade). It touches only the EEPROM (no globals,
 no LCD, no radio) via the byte-at-a-time `eeprom_*` API and is self-limiting: `readConfig()` calls it once
@@ -467,10 +467,11 @@ regardless of visibility, so hiding them never risks an unset field. `UNIT` is a
 
 **Editor ranges and the `0xFF` sentinel**: most plain-numeric SPEED bytes self-heal from `0xFF` via
 `readByteOrDefault()`, so a stored 255 would silently revert on the next load — those items
-(`BRK1`/`BRK2`/`BRK3`/`DELAY`/`OPLOAD`/`PRLOAD`/`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) cap at **254** in
-the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL` are genuine **0-255** (a decoder CV3/CV4 can
-itself be 255): `readConfig()` reads `0x28`/`0x2E` raw, and the `EEPROM_LAYOUT_VERSION` → 4
-migration seeds any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
+(`BRK1`/`BRK2`/`BRK3`/`DELAY`/`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) cap at **254** in
+the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` are genuine **0-255**
+(a decoder CV3/CV4 can itself be 255, and CV103/CV104 are equally plain 0-255 decoder CVs): `readConfig()`
+reads `0x28`/`0x2E` and `0x59`/`0x5B` raw, and the `EEPROM_LAYOUT_VERSION` → 4 and → 7 migrations seed
+any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
 setting it to `OFF` persists (its `readByteOrDefault` default is F09, which would otherwise revert a
 user-set OFF). UP/DOWN on all four watched-function items (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`)
 wrap circularly at both ends (`OFF <-> F00 ... F28 <-> OFF`) rather than clamping, matching CONFIG
@@ -560,9 +561,16 @@ confirms CV24 scales with the family multiplier just like CV4.
 
 **Load simulation (`OPLOAD`/`PRLOAD`/`OPLOADFN`/`PRLOADFN`)**: mirrors decoder CV103 (Optional Load)/CV104
 (Primary Load) — each a 0-255 value (128 = neutral) that scales the base `ACCEL`/`DECEL` CV while its
-watched DCC function is active, `time = CV × loadValue/128`. Primary Load wins if both are active
-simultaneously, per the ESU manual. `OPLOADFN`/`PRLOADFN` can also be asserted directly by a button
-configured to the LOAD function — see "LOAD button function" below.
+watched DCC function is active, `time = CV × loadValue/128`, rounded to nearest rather than truncated
+(at a typical CV3 of 60 one load unit moves the scaled CV by only 0.47, so truncation makes a whole
+band of neighbouring load values indistinguishable). Values below 128 mean a light load, above 128 a
+heavy one. Primary Load wins if both are active simultaneously, per the ESU manual.
+`OPLOADFN`/`PRLOADFN` can also be asserted directly by a button configured to the LOAD function — see
+"LOAD button function" below.
+
+The load scales the ramp the decoder runs, but **not** the BEMF-regulator corrections layered on top of
+it — see "Standing-start acceleration" and "Deceleration lag correction" for which reference time each
+correction is measured against.
 
 **Brake-function detection**: the simulation reads whether Brake1/2/3 are active from the actual outgoing
 `functionMask`, not from the lever own state-machine bits — so any control mapped to the same DCC
@@ -597,9 +605,28 @@ as a smooth cubic-Hermite ramp from a genuine stop up to the 15mph-equivalent sp
 generalizing the zero-rate starting boundary condition of the ramp to a configurable nonzero initial slope
 chosen so the ramp hits the target tick exactly — both ramp endpoints are algebraically unaffected by this,
 so the calibrated total time of `ACCPCT` to 15mph never changes regardless of `ACCTGT`. `ACCTGT` can only
-*shorten* the onset from its own natural baseline, never push it later. Very aggressive `ACCTGT` values can make the
-ramp briefly non-monotonic later in its climb (confirmed tiny, below display resolution, at the one extreme
-tested).
+*shorten* the onset from its own natural baseline, never push it later.
+
+The solved initial slope is clamped to `v`, the plain-rate endpoint of the ramp itself: a slope above
+the programmed ramp rate would start the display faster than the locomotive can accelerate and then
+have to slow its *rate* back down to land on `(rampT, rampS)`, which is where the non-monotonic climb
+an aggressive `ACCTGT` used to produce came from. It is the same rule the momentum-ceiling fade below
+already applies at its own limit (a fade weight of 0 sets the slope to exactly `v`), generalized to
+every configuration rather than only the ceiling. The clamp binds at any slow effective `ACCEL`,
+loaded or not — at the default `ACCEL` 60 it moves the onset by about 0.05s, below display resolution,
+but at `ACCEL` 120 or a large positive `ACCELADJ` it roughly halves the onset boost.
+
+**The head start is asymmetric in the CV103/CV104 load.** `ACCPCT` is measured against
+`min(loaded, unloaded)` full-range crossing time, so a heavy load leaves it at the unloaded value while
+a light load shortens it in proportion — equivalently, the head start can never exceed the fixed
+`ACCPCT` fraction of the ramp it is taken out of. Hardware measurement against the calibration
+locomotive found a heavy load does not lengthen the head start (the train breaks away in about the same
+time; the load only stretches the programmed ramp that follows) while a light load does shorten it.
+Neither a purely load-scaled nor a purely load-independent head start fits: scaling it up put the
+readout seconds ahead of the locomotive for the whole climb at `PRLOAD` 254, and holding it at the full
+unloaded value left the display about 1mph high at `OPLOAD` 80 and — because an absolute head start is
+subtracted from a ramp that itself shrinks with the load — collapsed `rampT` to a single tick below
+about `OPLOAD` 12, jumping the readout straight to roughly 16mph.
 
 **Momentum-ceiling linearization**: the two BEMF-regulator corrections above — the standing-start cubic
 ramp and the `DECPCT` deceleration lag — were fitted only to an effective momentum CV of ~230. At the
@@ -670,7 +697,7 @@ sentinel).
 
 | Item | Default | What it does |
 |---|---|---|
-| `OPLOAD` | 128 | Scales `ACCEL`/`DECEL` while its watched function is active. 128 = neutral |
+| `OPLOAD` | 128 | Scales `ACCEL`/`DECEL` while its watched function is active. Genuine 0-255, 128 = neutral, below 128 lighter, above heavier |
 | `OPLOADFN` | OFF | DCC function watched to switch `OPLOAD` on |
 | `PRLOAD` | 128 | Same as `OPLOAD`; wins if both active at once |
 | `PRLOADFN` | OFF | DCC function watched to switch `PRLOAD` on |
@@ -685,7 +712,7 @@ sentinel).
 
 | Item | Default | Tested | What it does |
 |---|---|---|---|
-| `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time). Faded to a plain linear onset as effective `ACCEL` approaches 255 — see "Momentum-ceiling linearization" |
+| `ACCPCT` | 8 | 8 | Standing-start head start (0-255 = 0-100% of the `ACCEL` full-range time). Measured against the *lesser* of the load-scaled and unloaded times, so a light `OPLOAD`/`PRLOAD` shortens it and a heavy one does not lengthen it — see "Standing-start acceleration". Faded to a plain linear onset as effective `ACCEL` approaches 255 — see "Momentum-ceiling linearization" |
 | `ACCTGT` | 5 | 5 | Target time (0.1s/unit) for the display to first show 1mph |
 | `DECPCT` | 22 | 22 | Strength (0-255 = 0-100%) of the deceleration-lag correction. Faded automatically to 0 across effective `DECEL` 230→255 (see "Momentum-ceiling linearization") |
 | `DECTHR` | 11 | 11 | Speed (raw step, ~0.4 mph/unit) below which the `DECPCT` correction does not apply |
@@ -734,15 +761,29 @@ The decoder-type-specific model parameters live in one contiguous block, `EE_SPE
   Customisation"). Both self-heal via `readByteOrDefault()` exactly like `EE_CONFIGBITS`, so no
   migration block was needed for this bump — the version still had to move because any new `EE_*`
   `#define` requires it (see the pre-commit hook in the maintenance checklist).
+- **6 → 7** — `OPLOAD`/`PRLOAD` (`0x59`/`0x5B`) leave `readByteOrDefault()` and are read raw, so a
+  stored `0xFF` becomes a real 255 rather than the "unset" sentinel, and the editor ceiling rises from
+  254 to 255. 255 is a legitimate value for these two, and the 254 cap the sentinel forced was wrong for
+  a field mirroring a plain 0-255 decoder CV. The migration
+  seeds only the bytes that currently read `0xFF`, across all 20 profiles plus the working config:
+  under every layout up to 6 a `0xFF` there already *meant* the neutral 128 (precisely what
+  `readByteOrDefault()` substituted), so the seed is non-destructive and an upgraded throttle keeps
+  reading what it always read. The working config self-healed on every boot, but a stored slot never
+  loaded did not, hence the full sweep. Gated `(oldLayoutVersion < 7) || (0xFF == oldLayoutVersion)`,
+  the same idiom the → 4 and → 5 blocks use.
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
 per-tick `simSpeedStepQ8` and `printSpeed()` output against checked-in reference traces
 (`reference/*.txt`). It is the regression net for any change to the model — a diff means the output
 moved, either intended (`make speedtest-accept` re-blesses the traces) or a regression. It also asserts
-two invariants as `PASS`/`FAIL` lines (the `V4` model equals the `V5MULT` model with all its dropped
-parameters no-oped — `ACCELADJ`/`DECELADJ`/`BRK2`/`BRK3` and the load CVs; `speedApplyTypeInert()`
-neutralises a stale slot) and exits non-zero on failure. `.githooks/pre-commit` runs it whenever a
+four invariants as `PASS`/`FAIL` lines and exits non-zero on failure: the `V4` model equals the
+`V5MULT` model with all its dropped parameters no-oped (`ACCELADJ`/`DECELADJ`/`BRK2`/`BRK3` and the
+load CVs); `speedApplyTypeInert()` neutralises a stale slot; the `ACCPCT` head start follows the
+asymmetric load rule (identical to neutral for every load at or above 128, proportional below it); and
+`rampT` never collapses to a single tick at any of the 254 load values a non-zero effective CV allows.
+The last two state directly what a trace diff would only show as noise — see "Standing-start
+acceleration". `.githooks/pre-commit` runs it whenever a
 commit touches `cst-speed.c`, `cst-speed.h`, or that directory. The only host-build shim is
 `cst-speed-test/stubs/avr/pgmspace.h`, needed because `lcd.h` includes `<avr/pgmspace.h>`. Scenarios
 keep momentum CVs in non-zero ranges where AVR 16-bit `int` and host 32-bit `int` provably agree. The
@@ -750,7 +791,10 @@ keep momentum CVs in non-zero ranges where AVR 16-bit `int` and host 32-bit `int
 scenarios exercise the momentum-ceiling linearization: at effective CV 255 both `accel_cv255` (a clean
 linear standing-start crawl) and `decel_cv255` (a plain linear coast) confirm the corrections are
 fully faded out; the `*_mid` pair holds the interior blend (`0 < f < 16`); `accel_adj_over_ceiling`
-proves `ACCELADJ` alone can cross the ceiling.
+proves `ACCELADJ` alone can cross the ceiling. `prload_heavy_standing_start` and
+`opload_light_standing_start` hold the two load regimes of the head-start rule (`PRLOAD` 255 and
+`OPLOAD` 80, both hardware-checked against the calibration locomotive); `prload_wins` also uses a light
+load but covers which of the two load CVs wins, not the standing-start shape.
 
 ## AIRBRAKE — air-brake simulation
 
@@ -1455,8 +1499,8 @@ Every editable config menu (`SPEED CFG`, `AIRBRAKE CFG`, `OPTIONS`, `SYSTEM`, `C
 "unset → default" sentinel, so a value cranked to 255 silently reverts on the next load. `AIRBRAKE
 CFG`, the non-full-range `SPEED CFG` numerics, and `TX HLDOF` (`COMM CFG`) all cap at 254 for this
 reason; for `TX HLDOF` `readConfig()` additionally heals a stored `0xFF` to `TX_HOLDOFF_DEFAULT`. The
-exceptions are the five raw-read `SPEED` bytes — `ACCEL`/`DECEL` (0-255), `HOLDFN` (`OFF`),
-`ACCELADJ`/`DECELADJ` (−127…+127) — see the SPEED editor section.
+exceptions are the seven raw-read `SPEED` bytes — `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` (0-255),
+`HOLDFN` (`OFF`), `ACCELADJ`/`DECELADJ` (−127…+127) — see the SPEED editor section.
 
 Two item-dispatch styles are in use:
 
@@ -1506,7 +1550,10 @@ saved, refreshed only inside `readConfig()` — the same choke point a `SELECT`-
 cancel both already route through. Every runtime-affecting read site consults the committed copy instead
 of the live one — `loadEligible()`, LOAD own `functionMask` assembly, the brake-mode dispatch,
 `evaluateStackBrake()`, the `TIMER0_COMPA_vect` pulse-width wrap, AIRBRAKE own `independentBrakeAtRest`
-classification, and SPEED own `stepBrakeMode` exclusion — while the screen own display/edit code keeps
+classification, SPEED own `stepBrakeMode` exclusion, and the `oploadFunctionActive`/`prloadFunctionActive`
+watch scan that tells the speed model whether a load is applied (it must agree with the function number
+the LOAD button actually asserted into `functionMask`, or browsing `TYPE` to `V4` would drop the load
+from the model while the button was still driving it) — while the screen own display/edit code keeps
 reading the live global, so on-screen browsing stays fully reactive with no visible change in behavior;
 only the real, transmitted effect is deferred to save time. `HORNTYPE`/`DITCHLTS`/`REV SWAP`
 (`OPTION_SCREEN`), `AIRBRAKE_CONFIG_SCREEN` own fields, and `CONFIG_FUNC_SCREEN` own function
@@ -1679,11 +1726,15 @@ only the model fields the `TYPE` uses (`speed_fields_for_type()` in `cst_eeprom_
 slot has 13 keys, a `V5` slot 21); `ACCELADJ`/`DECELADJ` are keyed right after `ACCEL`/`DECEL`
 (matching the on-device splice), then `BRK1` leads the rest of the model list for every family. The
 encoder writes inert values to the slots a `V4` drops so the image byte-matches the firmware.
-`ACCEL`/`DECEL` and `ACCELADJ`/`DECELADJ` are read raw by the firmware (a stored `0xFF` is a real value — 255, or −127
-sign-magnitude), so the codec decodes `0xFF` to that rather than `"UNSET"`, accepts `ACCEL`/`DECEL`
-`0-255` and `ACCELADJ`/`DECELADJ` `-127..127`, and maps a bare `"UNSET"` for one of these to its
-default value; `SPEED_FULL_RANGE_FIELDS` / `SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
-`SLOT_SCHEMA_VERSION` is 8 (most recently, `options` gained `ditch_type` — see "Ditch-light mode";
+`ACCEL`/`DECEL`, `OPLOAD`/`PRLOAD` and `ACCELADJ`/`DECELADJ` are read raw by the firmware (a stored
+`0xFF` is a real value — 255, or −127 sign-magnitude), so the codec decodes `0xFF` to that rather than
+`"UNSET"`, accepts `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` `0-255` and `ACCELADJ`/`DECELADJ` `-127..127`,
+and maps a bare `"UNSET"` for one of these to its default value; `SPEED_FULL_RANGE_FIELDS` /
+`SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
+`SLOT_SCHEMA_VERSION` is 9 (most recently, `speed.OPLOAD`/`speed.PRLOAD` became genuine 0-255 fields
+read raw by the firmware, so a stored `0xFF` decodes to 255 rather than `"UNSET"` — a value-vocabulary
+change with no JSON shape change, so a pre-9 backup carrying `"UNSET"` for either still imports, mapping
+to the 128 default with no flag needed; before that, `options` gained `ditch_type` — see "Ditch-light mode";
 earlier bumps added `functions.MENU_BUTTON`/`SEL_BUTTON` and `prefs.config_bits.ops_mode` — see "OPS
 MODE screen" — and `system.menu_visibility` — see "Menu Customisation"). `encode_slot` / `encode_global` also accept the older
 pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`,
@@ -1721,9 +1772,13 @@ the throttle needs re-flashing afterward.
 **`wipe-slot`**: blanks one or more numbered slots (`--slot N`, repeatable) to raw `0xFF` — the same
 state as a slot that was never configured — without touching anything else on the chip, unlike the
 whole-chip `wipe` above. Deliberately writes `0xFF` rather than the values a factory reset would use:
-`readByteOrDefault()` already self-heals every field to its real default the moment that slot is loaded
-(`LOAD CNF`, or promoted to the working profile on boot), so there is no separate default-value table
-here that could drift out of sync with `resetConfig()`/`eepromResetProfileModel()`. Version-gated like
+`readByteOrDefault()` self-heals every field it covers to its real default the moment that slot is
+loaded (`LOAD CNF`, or promoted to the working profile on boot), so there is no separate default-value
+table here that could drift out of sync with `resetConfig()`/`eepromResetProfileModel()`. The raw-read
+`SPEED` bytes are the exception and do not self-heal: a wiped slot loads `ACCEL`/`DECEL` and
+`OPLOAD`/`PRLOAD` as 255 and `ACCELADJ`/`DECELADJ` as −127, since for those a `0xFF` is a real value
+(see "Editor ranges and the `0xFF` sentinel"). Harmless for a slot about to be reconfigured, but it is
+not the same as a factory reset. Version-gated like
 `export`/`import` (not un-gated like `dump`/`wipe`), since it decodes the current loco address of each
 targeted slot for the confirmation/`--dry-run` summary. Reuses `import` own byte-splice-and-safety-
 assertion, retry-on-failure, and post-write verify machinery directly — the only difference is the

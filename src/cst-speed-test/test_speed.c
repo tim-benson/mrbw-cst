@@ -422,6 +422,46 @@ static void sc_prload_wins(void)
 	traceClose();
 }
 
+/* The reported hardware failure: a heavy Primary Load from a dead stop. Before the ACCPCT/ACCTGT fix
+ * the display ran several seconds ahead of the locomotive right through the standing-start ramp - the
+ * head start scaled with the load-stretched accel time, and solveRampR0()'s absolute time-to-0.5mph
+ * target injected an r0 bulge that grew with rampT. PRLOAD 255 is also the value that only became
+ * storable with the EEPROM layout -> 7 raw read (the top of CV104's native 0-255 range). */
+static void sc_prload_heavy_standing_start(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_PRLOAD, 255);       /* CV104 at its 255 max - ~2x the accel time */
+	resetSpeed();
+	traceOpen("prload_heavy_standing_start",
+	          "PRLOAD 255, PRLOADFN active throughout - otherwise defaults (ACCEL 60, MAXSPEED 50, V5DCC)",
+	          "cmd=126 from a dead stop with Primary Load engaged");
+	Inputs in = {0};
+	in.cmd = 126;
+	in.prload = 1;
+	runPhase(0, 500, &in);
+	traceClose();
+}
+
+/* The light-load counterpart of the scenario above. A load below 128 shortens the accel time, and the
+ * ACCPCT head start shortens with it - holding the head start at its full unloaded value here left the
+ * display reading about 1mph high on hardware at OPLOAD 80, and collapsed the ramp outright at very
+ * light loads. Covers the regime no other trace reaches: prload_wins also uses a light load but is
+ * about which of the two load CVs wins, not the standing-start shape. */
+static void sc_opload_light_standing_start(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_OPLOAD, 80);        /* < 128 - hardware-checked against the locomotive */
+	resetSpeed();
+	traceOpen("opload_light_standing_start",
+	          "OPLOAD 80, OPLOADFN active throughout - otherwise defaults (ACCEL 60, MAXSPEED 50, V5DCC)",
+	          "cmd=126 from a dead stop with Optional Load engaged");
+	Inputs in = {0};
+	in.cmd = 126;
+	in.opload = 1;
+	runPhase(0, 400, &in);
+	traceClose();
+}
+
 static void sc_accel_cv30(void)
 {
 	cfgDefaults();
@@ -732,6 +772,35 @@ static int tracesAgree(const char *nameA, const char *nameB, int q8Only)
 	return ok && rows > 0;
 }
 
+/* Ticks by which the display's arrival at the 15mph-equivalent leads a plain linear climb at the same
+ * (load-scaled) rate - i.e. the head start ACCPCT actually spends, measured end to end through the real
+ * model rather than read back out of rampT. Start Delay is zeroed so it does not offset the arrival
+ * tick; PRLOAD carries the load, since Primary wins outright. Returns -1 if the target is never
+ * reached. */
+static int accpctLeadTicks(uint8_t load)
+{
+	int t;
+	uint16_t maxMph, target, plain, accelTicks;
+
+	cfgDefaults();
+	speedSet(SPEED_ITEM_START_DELAY, 0);
+	speedSet(SPEED_ITEM_PRLOAD, load);
+	resetSpeed();
+
+	maxMph     = speedGet(SPEED_ITEM_MAX_MPH);
+	target     = (uint16_t)(((uint32_t)15 * 126 * 256) / maxMph);
+	accelTicks = ticksToCross(applyLoad(speedEffAccelCV(), load));
+	plain      = (uint16_t)(((uint32_t)target * accelTicks) / (126UL << 8));
+
+	for (t = 1; t <= 4000; t++)
+	{
+		updateSpeed10Hz(126, 0, 0, 0, 0, 0, 0, 1, 0);
+		if (simSpeedStepQ8 >= target)
+			return (int)plain - t;
+	}
+	return -1;
+}
+
 int main(int argc, char **argv)
 {
 	g_outdir = (argc > 1) ? argv[1] : "out";
@@ -749,6 +818,8 @@ int main(int argc, char **argv)
 	sc_start_delay_long();
 	sc_opload_slows_accel();
 	sc_prload_wins();
+	sc_prload_heavy_standing_start();
+	sc_opload_light_standing_start();
 	sc_accel_cv30();
 	sc_accel_cv120();
 	sc_decel_cv230();
@@ -787,7 +858,48 @@ int main(int argc, char **argv)
 	         && (128 == speedGet(SPEED_ITEM_OPLOAD))
 	         && (0 == speedGet(SPEED_ITEM_ACCEL_ADJ)) && (0 == speedGet(SPEED_ITEM_DECEL_ADJ));
 
-	printf("invariant  V4 model == V5MULT model:   %s\n", inv ? "PASS" : "FAIL");
-	printf("invariant  speedApplyTypeInert() V4:   %s\n", guard ? "PASS" : "FAIL");
-	return (inv && guard) ? 0 : 1;
+	/* ACCPCT's head start is ASYMMETRIC in the CV103/CV104 load, which is what hardware measurement
+	 * against the locomotive found (see cst-speed.c's headstartTicks). Two halves, both exact:
+	 *   - A heavy load (>= 128) must not lengthen it: the train breaks away in the same time, the load
+	 *     only stretches the ramp that follows. Scaling it up put the readout seconds ahead of the
+	 *     locomotive through the whole climb at PRLOAD 254.
+	 *   - A light load (< 128) shortens it in proportion: holding it at the full unloaded value left
+	 *     the display ~1mph high at OPLOAD 80, and - since the budget is subtracted from a ramp that
+	 *     itself shrinks with the load - collapsed rampT to one tick below about OPLOAD 12, jumping
+	 *     the readout straight to ~16mph.
+	 * A trace diff alone would show either only as noise, hence direct assertions. */
+	int neutralLead = accpctLeadTicks(128), loadRule = (neutralLead > 0);
+	static const uint8_t heavyLoads[] = { 128, 160, 192, 224, 254, 255 };
+	static const uint8_t lightLoads[] = { 8, 16, 32, 48, 64, 80, 96, 112, 120 };
+	for (unsigned k = 0; k < sizeof heavyLoads / sizeof heavyLoads[0]; k++)
+		if (accpctLeadTicks(heavyLoads[k]) != neutralLead)
+			loadRule = 0;
+	for (unsigned k = 0; k < sizeof lightLoads / sizeof lightLoads[0]; k++)
+	{
+		int want = neutralLead * lightLoads[k] / 128;   /* proportional, +/-1 for integer rounding */
+		int got  = accpctLeadTicks(lightLoads[k]);
+		if (got > want + 1 || got < want - 1 || got > neutralLead)
+			loadRule = 0;
+	}
+
+	/* The ramp must never degenerate to a single tick at any load the model can actually move under
+	 * (an effective CV of 0 is a genuine no-momentum config and legitimately snaps). This is the
+	 * direct regression guard for the collapse above. */
+	int rampOk = 1;
+	for (unsigned load = 2; load <= 255; load++)
+	{
+		cfgDefaults();
+		speedSet(SPEED_ITEM_START_DELAY, 0);
+		speedSet(SPEED_ITEM_OPLOAD, (uint8_t)load);
+		resetSpeed();
+		updateSpeed10Hz(126, 0, 0, 0, 0, 0, 1, 0, 0);
+		if (applyLoad(speedEffAccelCV(), (uint8_t)load) > 0 && rampT < 2)
+			rampOk = 0;
+	}
+
+	printf("invariant  V4 model == V5MULT model:          %s\n", inv ? "PASS" : "FAIL");
+	printf("invariant  speedApplyTypeInert() V4:          %s\n", guard ? "PASS" : "FAIL");
+	printf("invariant  ACCPCT head start vs load:         %s\n", loadRule ? "PASS" : "FAIL");
+	printf("invariant  ramp never collapses at any load:  %s\n", rampOk ? "PASS" : "FAIL");
+	return (inv && guard && loadRule && rampOk) ? 0 : 1;
 }
