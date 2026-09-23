@@ -58,7 +58,12 @@ UNSET = "UNSET"
 # decoder CV) rather than "UNSET", and the on-device editor ceiling rises from 254 to 255. No JSON
 # shape change, only the value vocabulary of those two keys, so a pre-9 backup still imports: a
 # "UNSET" there maps to the 128 default, exactly as it does for ACCEL / DECEL.
-SLOT_SCHEMA_VERSION = 9
+# 10: speed.BRK1 / speed.BRK2 / speed.BRK3 / speed.DELAY (CV179 / CV180 / CV181 / CV167) become
+# genuine 0-255 fields, read raw by the firmware from EEPROM_LAYOUT_VERSION 8 - same shape as the
+# schema-9 OPLOAD / PRLOAD change, just four more decoder-CV mirrors. No JSON shape change; a pre-10
+# backup carrying "UNSET" for any of these four still imports, mapping to that field's own default
+# (130 / 70 / 100 / 13) rather than 128.
+SLOT_SCHEMA_VERSION = 10
 
 
 class SlotValidationError(ValueError):

@@ -395,14 +395,15 @@ SPEED_MODEL_INERT = {"ACCELADJ": 0, "DECELADJ": 0, "BRK2": 0, "BRK3": 0, "OPLOAD
 SPEED_SIGNED_FIELDS = {"ACCELADJ", "DECELADJ"}
 SPEED_ADJ_MAG_MAX = 127
 
-# ACCEL / DECEL and OPLOAD / PRLOAD are genuine 0-255 CVs: a decoder's literal CV3 / CV4 can be 255,
-# and CV103 / CV104 (Optional / Primary Load) are just as much plain 0-255 decoder CVs. The firmware
-# reads all four raw, so a stored 0xFF is a real 255, not "UNSET" - OPLOAD / PRLOAD joined them at
-# EEPROM_LAYOUT_VERSION 7, whose migration seeds a never-written 0x59 / 0x5B to the neutral 128 first.
-# Every other plain-numeric SPEED field still self-heals from 0xFF, so its max is 254. See
-# _decode_speed / _encode_speed in
+# ACCEL / DECEL, OPLOAD / PRLOAD and BRK1 / BRK2 / BRK3 / DELAY are genuine 0-255 CVs: a decoder's
+# literal CV3 / CV4 can be 255, and CV103 / CV104 (Optional / Primary Load) / CV179 / CV180 / CV181 /
+# CV167 are just as much plain 0-255 decoder CVs. The firmware reads all eight raw, so a stored 0xFF
+# is a real 255, not "UNSET" - OPLOAD / PRLOAD joined ACCEL / DECEL at EEPROM_LAYOUT_VERSION 7 (a
+# migration seeds a never-written 0x59 / 0x5B to the neutral 128 first), BRK1 / BRK2 / BRK3 / DELAY at
+# EEPROM_LAYOUT_VERSION 8 (same shape, seeding 0x2B / 0x54 / 0x55 / 0x56). Every other plain-numeric
+# SPEED field still self-heals from 0xFF, so its max is 254. See _decode_speed / _encode_speed in
 # slot_codec.py.
-SPEED_FULL_RANGE_FIELDS = {"ACCEL", "DECEL", "OPLOAD", "PRLOAD"}
+SPEED_FULL_RANGE_FIELDS = {"ACCEL", "DECEL", "OPLOAD", "PRLOAD", "BRK1", "BRK2", "BRK3", "DELAY"}
 
 
 def speed_fields_for_type(type_name):

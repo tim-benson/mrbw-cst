@@ -643,13 +643,16 @@ static uint8_t speedItemIsSignedAdjust(uint8_t item)
 	return (SPEED_ITEM_ACCEL_ADJ == item) || (SPEED_ITEM_DECEL_ADJ == item);
 }
 
-// SPEED_CONFIG_SCREEN: ACCEL/DECEL and OPLOAD/PRLOAD are genuine 0-255 fields (read raw, so a stored
-// 0xFF is a real 255) - a decoder's literal CV3/CV4 can be 255, and CV103/CV104 are likewise plain
-// 0-255 decoder CVs. The other plain-numeric items still self-heal from 0xFF so their editor ceiling
-// is 254 (matching the AIRBRAKE editor - a saved 255 would silently revert on the next load).
+// SPEED_CONFIG_SCREEN: ACCEL/DECEL, BRK1/BRK2/BRK3/DELAY and OPLOAD/PRLOAD are genuine 0-255 fields
+// (read raw, so a stored 0xFF is a real 255) - CV3/CV4/CV179/CV180/CV181/CV167/CV103/CV104 are all
+// plain 0-255 decoder CVs. The other plain-numeric items (ACCPCT/ACCTGT/DECPCT/DECTHR, throttle-side
+// correction tunables rather than decoder CV mirrors) still self-heal from 0xFF so their editor
+// ceiling is 254 (matching the AIRBRAKE editor - a saved 255 would silently revert on the next load).
 static uint8_t speedItemIsFullRange(uint8_t item)
 {
 	return (SPEED_ITEM_ACCEL == item) || (SPEED_ITEM_DECEL == item)
+	    || (SPEED_ITEM_BRAKE1 == item) || (SPEED_ITEM_BRAKE2 == item)
+	    || (SPEED_ITEM_BRAKE3 == item) || (SPEED_ITEM_START_DELAY == item)
 	    || (SPEED_ITEM_OPLOAD == item) || (SPEED_ITEM_PRLOAD == item);
 }
 static int8_t speedAdjDecode(uint8_t b)
@@ -1487,16 +1490,20 @@ void readConfig(void)
 		stackBandCombos3Step[i] &= STACK_COMBO_MASK;
 
 	// Scale-speed simulation config - raw 0-255 values mirroring the loco's decoder CVs directly.
-	// ACCEL / DECEL are genuine 0-255 (a decoder's literal CV3 / CV4 can be 255), so they are read raw:
-	// a stored 0xFF is a real 255, not "unset". The layout -> 4 seed above initialised any never-written
-	// 0x28 / 0x2E byte to the default so a blank chip does not read 255. BRK1 (and the rest) stay on
-	// readByteOrDefault - for a brake CV 254 and 255 are indistinguishable (the brake sum caps at 255).
+	// ACCEL / DECEL / BRK1 are genuine 0-255 (a decoder's literal CV3 / CV4 / CV179 can be 255), so they
+	// are read raw: a stored 0xFF is a real 255, not "unset". The layout -> 4 seed above initialised any
+	// never-written 0x28 / 0x2E byte to the default; the layout -> 8 seed below does the same for 0x2B
+	// (and BRK2/BRK3/DELAY's 0x54/0x55/0x56).
 	speedSet(SPEED_ITEM_ACCEL,            eeprom_read_byte((uint8_t*)EE_MOMENTUM_ACCEL_CV3));
 	speedSet(SPEED_ITEM_DECEL,            eeprom_read_byte((uint8_t*)EE_MOMENTUM_DECEL_CV4));
-	speedSet(SPEED_ITEM_BRAKE1,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE1_CV179, MOMENTUM_BRAKE1_CV179_DEFAULT));
-	speedSet(SPEED_ITEM_BRAKE2,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE2_CV180, MOMENTUM_BRAKE2_CV180_DEFAULT));
-	speedSet(SPEED_ITEM_BRAKE3,           readByteOrDefault((uint8_t*)EE_MOMENTUM_BRAKE3_CV181, MOMENTUM_BRAKE3_CV181_DEFAULT));
-	speedSet(SPEED_ITEM_START_DELAY,      readByteOrDefault((uint8_t*)EE_MOMENTUM_START_DELAY, MOMENTUM_START_DELAY_DEFAULT));
+	speedSet(SPEED_ITEM_BRAKE1,           eeprom_read_byte((uint8_t*)EE_MOMENTUM_BRAKE1_CV179));
+	// BRK2 / BRK3 / DELAY are likewise genuine 0-255 CVs (CV180/CV181/CV167), read raw for the same
+	// reason as BRK1 above - the layout -> 8 migration seeded any never-written 0x54/0x55/0x56 to the
+	// neutral default first, which is exactly what readByteOrDefault() used to substitute there, so an
+	// upgraded chip reads the same values it always did.
+	speedSet(SPEED_ITEM_BRAKE2,           eeprom_read_byte((uint8_t*)EE_MOMENTUM_BRAKE2_CV180));
+	speedSet(SPEED_ITEM_BRAKE3,           eeprom_read_byte((uint8_t*)EE_MOMENTUM_BRAKE3_CV181));
+	speedSet(SPEED_ITEM_START_DELAY,      eeprom_read_byte((uint8_t*)EE_MOMENTUM_START_DELAY));
 	speedSet(SPEED_ITEM_MAX_MPH,          readByteOrDefault((uint8_t*)EE_SPEED_MAX_MPH, SPEED_MAX_MPH_DEFAULT));
 	speedSet(SPEED_ITEM_UNIT,             readByteOrDefault((uint8_t*)EE_SPEED_UNIT_KMH, SPEED_UNIT_KMH_DEFAULT));
 	speedSet(SPEED_ITEM_STOP_FN,          readByteOrDefault((uint8_t*)EE_SPEED_STOP_WATCH_FN, SPEED_STOP_WATCH_FN_DEFAULT));
@@ -4181,8 +4188,9 @@ int main(void)
 								}
 								else
 								{
-									// UNIT is a 0/1 toggle; ACCEL/DECEL are genuine 0-255; every other
-									// plain-numeric item self-heals from 0xFF so it caps at 254.
+									// UNIT is a 0/1 toggle; speedItemIsFullRange() items are genuine
+									// 0-255; every other plain-numeric item self-heals from 0xFF so it
+									// caps at 254.
 									uint8_t speedMax = (SPEED_ITEM_UNIT == speedItem) ? 1
 									                 : speedItemIsFullRange(speedItem) ? 255 : 254;
 									if(speedVal < speedMax)

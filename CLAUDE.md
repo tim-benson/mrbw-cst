@@ -157,7 +157,7 @@ fields are read through `readByteOrDefault()`, which detects that sentinel and s
 default rather than trusting a plainly-invalid raw byte.
 
 **EEPROM layout migrations (`cst-eeprom.c`)**: one bespoke per-slot byte-remapping transform per
-`EEPROM_LAYOUT_VERSION` bump (currently 7), factored out of `readConfig()` into
+`EEPROM_LAYOUT_VERSION` bump (currently 8), factored out of `readConfig()` into
 `applyEepromMigrations(uint8_t oldLayoutVersion)` — the highest-risk, least-verifiable firmware code (a
 wrong offset silently corrupts every stored profile on upgrade). It touches only the EEPROM (no globals,
 no LCD, no radio) via the byte-at-a-time `eeprom_*` API and is self-limiting: `readConfig()` calls it once
@@ -467,11 +467,12 @@ regardless of visibility, so hiding them never risks an unset field. `UNIT` is a
 
 **Editor ranges and the `0xFF` sentinel**: most plain-numeric SPEED bytes self-heal from `0xFF` via
 `readByteOrDefault()`, so a stored 255 would silently revert on the next load — those items
-(`BRK1`/`BRK2`/`BRK3`/`DELAY`/`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) cap at **254** in
-the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` are genuine **0-255**
-(a decoder CV3/CV4 can itself be 255, and CV103/CV104 are equally plain 0-255 decoder CVs): `readConfig()`
-reads `0x28`/`0x2E` and `0x59`/`0x5B` raw, and the `EEPROM_LAYOUT_VERSION` → 4 and → 7 migrations seed
-any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
+(`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`, throttle-side correction tunables rather than decoder CV mirrors)
+cap at **254** in the editor, matching the AIRBRAKE screen. `ACCEL`/`DECEL`, `BRK1`/`BRK2`/`BRK3`/`DELAY`
+and `OPLOAD`/`PRLOAD` are genuine **0-255** (a decoder CV3/CV4/CV179/CV180/CV181/CV167 can itself be
+255, and CV103/CV104 are equally plain 0-255 decoder CVs): `readConfig()` reads `0x28`/`0x2E`/`0x2B`,
+`0x54`/`0x55`/`0x56` and `0x59`/`0x5B` raw, and the `EEPROM_LAYOUT_VERSION` → 4, → 7 and → 8 migrations
+seed any never-written byte (see "EEPROM layout" below). `HOLDFN` is likewise read raw so
 setting it to `OFF` persists (its `readByteOrDefault` default is F09, which would otherwise revert a
 user-set OFF). UP/DOWN on all four watched-function items (`HOLDFN`/`STOPFN`/`OPLOADFN`/`PRLOADFN`)
 wrap circularly at both ends (`OFF <-> F00 ... F28 <-> OFF`) rather than clamping, matching CONFIG
@@ -662,9 +663,9 @@ characteristic entirely outside this codebase.
 
 `ACCEL`/`DECEL`/`BRK1-3`/`DELAY` are named after their CV role, but the CV convention itself is inverted
 from what the name suggests — a *bigger* number means *slower*/*weaker* (a time constant, not a rate); that
-is an NMRA convention, not a naming choice made here. `ACCEL`/`DECEL` are genuine 0-255; the other
-plain-numeric items cap at 254 in the editor (a stored 255 would collide with the `0xFF` self-heal
-sentinel).
+is an NMRA convention, not a naming choice made here. `ACCEL`/`DECEL`/`BRK1-3`/`DELAY` are genuine 0-255;
+the four correction tunables (`ACCPCT`/`ACCTGT`/`DECPCT`/`DECTHR`) cap at 254 in the editor (a stored 255
+would collide with the `0xFF` self-heal sentinel).
 
 **Momentum CVs (direct decoder mirrors)**
 
@@ -674,10 +675,10 @@ sentinel).
 | `DECEL` (CV4) | 230 | — | Same as `ACCEL` but for coasting down (no brake held). 0-255. The `DECPCT`/`DECTHR` lag correction is validated to effective `DECEL` (`CV4 + CV24`) ~230 and fades itself out to a plain linear coast by effective `DECEL` 255 — see "Momentum-ceiling linearization". | Slower coast-down | Faster coast-down |
 | `ACCELADJ` (CV23) | 0 | — | Signed `-127..+127` added to `ACCEL` (V5 only). Effective CV3 = `ACCEL + ACCELADJ`, unclamped past 255 | Slower acceleration | Faster acceleration |
 | `DECELADJ` (CV24) | 0 | — | Signed `-127..+127` added to `DECEL` (V5 only). Effective CV4 = `DECEL + DECELADJ`, unclamped past 255 | Slower coast-down | Faster coast-down |
-| `BRK1` (CV179) | 130 | — | How strongly Brake1 shortens the stop when active — sums with `BRK2`/`BRK3` (capped at 255) | Faster/harder stop | Weaker braking |
-| `BRK2` (CV180) | 70 | — | Same as `BRK1`, second stackable brake | Faster/harder stop | Weaker braking |
-| `BRK3` (CV181) | 100 | — | Same as `BRK1`, third stackable brake | Faster/harder stop | Weaker braking |
-| `DELAY` (CV167) | 13 | — | Mirrors the decoder own programmed prime-mover spool-up time. 0.25s/unit | Longer pause before movement | Shorter pause (0 = none) |
+| `BRK1` (CV179) | 130 | — | How strongly Brake1 shortens the stop when active — sums with `BRK2`/`BRK3` (capped at 255). 0-255 | Faster/harder stop | Weaker braking |
+| `BRK2` (CV180) | 70 | — | Same as `BRK1`, second stackable brake. 0-255 | Faster/harder stop | Weaker braking |
+| `BRK3` (CV181) | 100 | — | Same as `BRK1`, third stackable brake. 0-255 | Faster/harder stop | Weaker braking |
+| `DELAY` (CV167) | 13 | — | Mirrors the decoder own programmed prime-mover spool-up time. 0.25s/unit, 0-255 | Longer pause before movement | Shorter pause (0 = none) |
 
 **Display calibration**
 
@@ -771,6 +772,18 @@ The decoder-type-specific model parameters live in one contiguous block, `EE_SPE
   reading what it always read. The working config self-healed on every boot, but a stored slot never
   loaded did not, hence the full sweep. Gated `(oldLayoutVersion < 7) || (0xFF == oldLayoutVersion)`,
   the same idiom the → 4 and → 5 blocks use.
+- **7 → 8** — `BRK1`/`BRK2`/`BRK3`/`DELAY` (`0x2B`/`0x54`/`0x55`/`0x56`) leave `readByteOrDefault()`
+  and are read raw, same shape as the `6 → 7` block above: a stored `0xFF` becomes a real 255 rather
+  than the "unset" sentinel, and the editor ceiling rises from 254 to 255 for each. `ACCPCT`/`ACCTGT`/
+  `DECPCT`/`DECTHR` stay on `readByteOrDefault()` — they are throttle-side correction tunables, not
+  decoder CV mirrors, so there is no "genuine 0-255 CV" argument for them. The migration seeds only the
+  bytes that currently read `0xFF`, across all 20 profiles plus the working config: under every layout
+  up to 7 a `0xFF` there already *meant* each field own neutral default (precisely what
+  `readByteOrDefault()` substituted), so the seed is non-destructive. Gated
+  `(oldLayoutVersion < 8) || (0xFF == oldLayoutVersion)`, the same idiom every prior seed block uses.
+  `BRK1` sits in the scattered type-agnostic Group 1 region (`0x2B`, alongside `ACCEL`/`DECEL`) while
+  `BRK2`/`BRK3`/`DELAY` are already inside the contiguous `EE_SPEED_MODEL_PAYLOAD` block — no byte
+  moves either way, this migration only changes how an already-allocated byte is read.
 
 `make speedtest` runs `src/cst-speed-test/` — a host-compiled (`cc`, not `avr-gcc`) harness that
 `#include`s `cst-speed.c` whole, drives `updateSpeed10Hz()` through a fixed scenario set, and diffs the
@@ -794,7 +807,10 @@ fully faded out; the `*_mid` pair holds the interior blend (`0 < f < 16`); `acce
 proves `ACCELADJ` alone can cross the ceiling. `prload_heavy_standing_start` and
 `opload_light_standing_start` hold the two load regimes of the head-start rule (`PRLOAD` 255 and
 `OPLOAD` 80, both hardware-checked against the calibration locomotive); `prload_wins` also uses a light
-load but covers which of the two load CVs wins, not the standing-start shape.
+load but covers which of the two load CVs wins, not the standing-start shape. `brake1_max_255` and
+`start_delay_max_255` are plain sanity checks for `BRK1`/`DELAY` at their new 255 ceiling (no bug
+suspected — the brake sum is already a `uint16_t` clamped to 255 before storage, and the delay tick
+count has ample headroom — these just pin the behaviour on record).
 
 ## AIRBRAKE — air-brake simulation
 
@@ -1499,8 +1515,9 @@ Every editable config menu (`SPEED CFG`, `AIRBRAKE CFG`, `OPTIONS`, `SYSTEM`, `C
 "unset → default" sentinel, so a value cranked to 255 silently reverts on the next load. `AIRBRAKE
 CFG`, the non-full-range `SPEED CFG` numerics, and `TX HLDOF` (`COMM CFG`) all cap at 254 for this
 reason; for `TX HLDOF` `readConfig()` additionally heals a stored `0xFF` to `TX_HOLDOFF_DEFAULT`. The
-exceptions are the seven raw-read `SPEED` bytes — `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` (0-255),
-`HOLDFN` (`OFF`), `ACCELADJ`/`DECELADJ` (−127…+127) — see the SPEED editor section.
+exceptions are the eleven raw-read `SPEED` bytes — `ACCEL`/`DECEL`, `OPLOAD`/`PRLOAD` and
+`BRK1`/`BRK2`/`BRK3`/`DELAY` (0-255), `HOLDFN` (`OFF`), `ACCELADJ`/`DECELADJ` (−127…+127) — see the
+SPEED editor section.
 
 Two item-dispatch styles are in use:
 
@@ -1726,17 +1743,19 @@ only the model fields the `TYPE` uses (`speed_fields_for_type()` in `cst_eeprom_
 slot has 13 keys, a `V5` slot 21); `ACCELADJ`/`DECELADJ` are keyed right after `ACCEL`/`DECEL`
 (matching the on-device splice), then `BRK1` leads the rest of the model list for every family. The
 encoder writes inert values to the slots a `V4` drops so the image byte-matches the firmware.
-`ACCEL`/`DECEL`, `OPLOAD`/`PRLOAD` and `ACCELADJ`/`DECELADJ` are read raw by the firmware (a stored
-`0xFF` is a real value — 255, or −127 sign-magnitude), so the codec decodes `0xFF` to that rather than
-`"UNSET"`, accepts `ACCEL`/`DECEL` and `OPLOAD`/`PRLOAD` `0-255` and `ACCELADJ`/`DECELADJ` `-127..127`,
-and maps a bare `"UNSET"` for one of these to its default value; `SPEED_FULL_RANGE_FIELDS` /
-`SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
-`SLOT_SCHEMA_VERSION` is 9 (most recently, `speed.OPLOAD`/`speed.PRLOAD` became genuine 0-255 fields
-read raw by the firmware, so a stored `0xFF` decodes to 255 rather than `"UNSET"` — a value-vocabulary
-change with no JSON shape change, so a pre-9 backup carrying `"UNSET"` for either still imports, mapping
-to the 128 default with no flag needed; before that, `options` gained `ditch_type` — see "Ditch-light mode";
-earlier bumps added `functions.MENU_BUTTON`/`SEL_BUTTON` and `prefs.config_bits.ops_mode` — see "OPS
-MODE screen" — and `system.menu_visibility` — see "Menu Customisation"). `encode_slot` / `encode_global` also accept the older
+`ACCEL`/`DECEL`, `OPLOAD`/`PRLOAD`, `BRK1`/`BRK2`/`BRK3`/`DELAY` and `ACCELADJ`/`DECELADJ` are read raw
+by the firmware (a stored `0xFF` is a real value — 255, or −127 sign-magnitude), so the codec decodes
+`0xFF` to that rather than `"UNSET"`, accepts the eight full-range fields `0-255` and
+`ACCELADJ`/`DECELADJ` `-127..127`, and maps a bare `"UNSET"` for one of these to its own default value;
+`SPEED_FULL_RANGE_FIELDS` / `SPEED_SIGNED_FIELDS` in `cst_eeprom_layout.py` name them.
+`SLOT_SCHEMA_VERSION` is 10 (most recently, `speed.BRK1`/`speed.BRK2`/`speed.BRK3`/`speed.DELAY` became
+genuine 0-255 fields the same way `speed.OPLOAD`/`speed.PRLOAD` did at schema 9 — a value-vocabulary
+change with no JSON shape change, so a pre-10 backup carrying `"UNSET"` for any of the four still
+imports, mapping to that field's own default with no flag needed; before that, `speed.OPLOAD`/
+`speed.PRLOAD` became genuine 0-255 fields the same way, and before that `options` gained `ditch_type`
+— see "Ditch-light mode"; earlier bumps added `functions.MENU_BUTTON`/`SEL_BUTTON` and
+`prefs.config_bits.ops_mode` — see "OPS MODE screen" — and `system.menu_visibility` — see "Menu
+Customisation"). `encode_slot` / `encode_global` also accept the older
 pre-schema shapes on import (flat device fields, `force_function_on`/`off`, `brake` / `options_unset`,
 and — via `--import-old` — a pre-4 flat 19-field `speed` object whose `TYPE` is `V4`, a pre-5 `speed`
 object missing `ACCELADJ`/`DECELADJ`, or a pre-6 backup missing the `MENU_BUTTON` / `SEL_BUTTON`
@@ -1775,10 +1794,10 @@ whole-chip `wipe` above. Deliberately writes `0xFF` rather than the values a fac
 `readByteOrDefault()` self-heals every field it covers to its real default the moment that slot is
 loaded (`LOAD CNF`, or promoted to the working profile on boot), so there is no separate default-value
 table here that could drift out of sync with `resetConfig()`/`eepromResetProfileModel()`. The raw-read
-`SPEED` bytes are the exception and do not self-heal: a wiped slot loads `ACCEL`/`DECEL` and
-`OPLOAD`/`PRLOAD` as 255 and `ACCELADJ`/`DECELADJ` as −127, since for those a `0xFF` is a real value
-(see "Editor ranges and the `0xFF` sentinel"). Harmless for a slot about to be reconfigured, but it is
-not the same as a factory reset. Version-gated like
+`SPEED` bytes are the exception and do not self-heal: a wiped slot loads `ACCEL`/`DECEL`,
+`OPLOAD`/`PRLOAD` and `BRK1`/`BRK2`/`BRK3`/`DELAY` as 255 and `ACCELADJ`/`DECELADJ` as −127, since for
+those a `0xFF` is a real value (see "Editor ranges and the `0xFF` sentinel"). Harmless for a slot about
+to be reconfigured, but it is not the same as a factory reset. Version-gated like
 `export`/`import` (not un-gated like `dump`/`wipe`), since it decodes the current loco address of each
 targeted slot for the confirmation/`--dry-run` summary. Reuses `import` own byte-splice-and-safety-
 assertion, retry-on-failure, and post-write verify machinery directly — the only difference is the

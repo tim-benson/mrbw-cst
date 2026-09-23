@@ -29,10 +29,10 @@ blobs):
   byte each migrated byte came from.
 
 For each starting version (`from_blank`, `from_layout1`, `from_layout2`,
-`from_layout3`, `from_layout4`, `from_layout5`, `from_layout6`, `from_current_noop`) it dumps the
-post-migration 4096-byte image (16 bytes/row, all-`0xFF` rows elided) to a
+`from_layout3`, `from_layout4`, `from_layout5`, `from_layout6`, `from_layout7`, `from_current_noop`) it
+dumps the post-migration 4096-byte image (16 bytes/row, all-`0xFF` rows elided) to a
 plain-text **trace**, one file per scenario, compared byte-for-byte against the
-checked-in copies under `reference/`. `from_layout5` and `from_layout6` are each
+checked-in copies under `reference/`. `from_layout5`, `from_layout6` and `from_layout7` are each
 a frozen historical fixture (built from their own literal starting version) and
 are never rewritten to track later bumps; `from_current_noop` is
 the opposite - built from the live `EEPROM_LAYOUT_VERSION` macro, so it keeps
@@ -42,16 +42,16 @@ fidelity" below for why this distinction matters). A further scenario,
 `reset_model`, does the same for `eepromResetProfileModel()` (the factory-default
 writer `resetConfig()` uses) run over a sentinel-filled working-config slot.
 
-`main()` also asserts eight invariants it prints as `PASS`/`FAIL` lines, exiting
+`main()` also asserts nine invariants it prints as `PASS`/`FAIL` lines, exiting
 non-zero if any fails:
 
 1. a current-layout image is left **completely untouched** - zero bytes written;
 2. the migration is **idempotent** - re-running after a real `2 -> current`
    migration changes nothing more;
 3. a **blank chip becomes a valid current layout** - the version byte is stamped,
-   the five raw-read SPEED bytes (`0x28`/`0x2E`/`0x57`/`0x61`/`0x62`) are seeded
-   to their defaults, and the MENU BTN / SEL BTN function slots (`0x2C`/`0x2D`)
-   are seeded to `FN_OFF`;
+   every raw-read SPEED byte is seeded to its default (`0x28`/`0x2E`/`0x57`/`0x61`/`0x62`
+   from the `-> 4` migration, `0x59`/`0x5B` from `-> 7`, `0x2B`/`0x54`/`0x55`/`0x56` from
+   `-> 8`), and the MENU BTN / SEL BTN function slots (`0x2C`/`0x2D`) are seeded to `FN_OFF`;
 4. the **`2 -> 3` relocation preserves every value** - a sentinel at each old
    scattered offset lands at its new `EE_SPEED_MODEL_PAYLOAD` slot;
 5. **`eepromResetProfileModel()` covers every model offset** - each of `0x28-0x62`
@@ -64,7 +64,9 @@ non-zero if any fails:
    defaults (the two default sources in `cst-eeprom.c` must not drift);
 8. the **`6 -> 7` block seeds only a genuinely unset `OPLOAD`/`PRLOAD`** - a real
    stored value, 254 and 255 included, survives untouched, and every never-written
-   slot lands on the current defaults.
+   slot lands on the current defaults;
+9. the **`7 -> 8` block seeds only a genuinely unset `BRK1`/`BRK2`/`BRK3`/`DELAY`** -
+   the same shape as invariant 8, for the four brake/delay CVs.
 
 A difference means the migration or reset output moved - either an intended
 change (a new migration block, a new field, a fix) and the reference is

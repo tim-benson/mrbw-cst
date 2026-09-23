@@ -273,6 +273,27 @@ static void sc_brake1_from_cruise(void)
 	traceClose();
 }
 
+/* Sanity check for BRK1 at its new 255 ceiling (EEPROM_LAYOUT_VERSION -> 8, raw read) - not chasing a
+ * suspected bug the way prload_heavy_standing_start above is: brakeSumRaw is a uint16_t summed before
+ * being clamped to 255 (cst-speed.c), so a single brake at 255 was already safe math, just not
+ * previously storable. Confirms the near-instant-stop path takes no more ticks to reach 0 than the
+ * default BRK1 130 case, and that nothing overflows. */
+static void sc_brake1_max_255(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_BRAKE1, 255);
+	resetSpeed();
+	traceOpen("brake1_max_255",
+	          "BRK1 255 (max), otherwise defaults",
+	          "cmd=45 to tick 150 (settle), then Brake1 held (cmd stays 45)");
+	Inputs in = {0};
+	in.cmd = 45;
+	int t = runPhase(0, 150, &in);
+	in.b1 = 1;
+	runPhase(t, 350, &in);
+	traceClose();
+}
+
 static void sc_brake12_strength_step(void)
 {
 	cfgDefaults();
@@ -387,6 +408,23 @@ static void sc_start_delay_long(void)
 	Inputs in = {0};
 	in.cmd = 35;
 	runPhase(0, 240, &in);
+	traceClose();
+}
+
+/* Sanity check for DELAY at its new 255 ceiling (EEPROM_LAYOUT_VERSION -> 8, raw read) - 255 * 0.25s =
+ * 63.75s, an extreme but legitimate spool-up time for CV167. No bug suspected; confirms no overflow in
+ * the tick-count math and that the hold releases at the right tick (255 * 2.5 = 637.5 -> 637 ticks). */
+static void sc_start_delay_max_255(void)
+{
+	cfgDefaults();
+	speedSet(SPEED_ITEM_START_DELAY, 255);
+	resetSpeed();
+	traceOpen("start_delay_max_255",
+	          "DELAY 255 (63.75s spool-up), otherwise defaults",
+	          "cmd=35 from stop - holds at 0 through the delay, then ramps");
+	Inputs in = {0};
+	in.cmd = 35;
+	runPhase(0, 660, &in);
 	traceClose();
 }
 
@@ -809,6 +847,7 @@ int main(int argc, char **argv)
 	sc_standing_start_low_notch();
 	sc_coast_to_stop();
 	sc_brake1_from_cruise();
+	sc_brake1_max_255();
 	sc_brake12_strength_step();
 	sc_brake123_snap();
 	sc_estop_midramp();
@@ -816,6 +855,7 @@ int main(int argc, char **argv)
 	sc_hold_freeze_resume();
 	sc_hold_edge_skips_delay();
 	sc_start_delay_long();
+	sc_start_delay_max_255();
 	sc_opload_slows_accel();
 	sc_prload_wins();
 	sc_prload_heavy_standing_start();

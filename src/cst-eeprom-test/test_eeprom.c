@@ -252,6 +252,32 @@ static void sc_from_layout6(void)
 	dumpImage("from_layout6", "layout 6, sentinels; 0x59/0x5B = 0xFF in slots 1 and 3 + working config");
 }
 
+/* Layout 7 -> current: the -> 8 block (BRK1/BRK2/BRK3/DELAY leaving readByteOrDefault() for a raw
+ * read) is what is under test. Same shape as sc_from_layout6() above - its seed is conditional on the
+ * byte currently reading 0xFF, so this image is built mixed - every slot carries the usual sentinel at
+ * 0x2B/0x54/0x55/0x56 except slots 1 and 3 and the working config, which are forced to 0xFF to stand
+ * for a profile whose brake/delay CVs were never written. The blessed trace must show those four bytes
+ * seeded to their neutral defaults in exactly those three, and the sentinel preserved everywhere else.
+ * The 1->2/2->3/->4/->5/->6/->7 blocks all skip (7 is not < any of those thresholds). */
+static void sc_from_layout7(void)
+{
+	buildLayout(7);
+	g_eeprom[CONFIG_OFFSET(1) + 0x2B] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(1) + 0x54] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(1) + 0x55] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(1) + 0x56] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x2B] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x54] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x55] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(3) + 0x56] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x2B] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x54] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x55] = 0xFF;
+	g_eeprom[CONFIG_OFFSET(WORKING_CONFIG) + 0x56] = 0xFF;
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	dumpImage("from_layout7", "layout 7, sentinels; 0x2B/0x54/0x55/0x56 = 0xFF in slots 1 and 3 + working config");
+}
+
 /* Already on the current layout: applyEepromMigrations(EEPROM_LAYOUT_VERSION) must be a complete
  * no-op - not even the version stamp is rewritten. Uses the live macro (not a hardcoded number) so
  * this scenario, and the golden trace it produces, automatically stays meaningful across every future
@@ -345,15 +371,20 @@ static int seededDefaults(uint16_t b)
 	    && g_eeprom[b + 0x2C] == FN_OFF            /* -> 5: MENU BTN function slot */
 	    && g_eeprom[b + 0x2D] == FN_OFF            /* -> 5: SEL BTN function slot */
 	    && g_eeprom[b + 0x59] == SPEED_OPLOAD_DEFAULT   /* -> 7: CV103 mirror, now read raw */
-	    && g_eeprom[b + 0x5B] == SPEED_PRLOAD_DEFAULT;  /* -> 7: CV104 mirror, now read raw */
+	    && g_eeprom[b + 0x5B] == SPEED_PRLOAD_DEFAULT   /* -> 7: CV104 mirror, now read raw */
+	    && g_eeprom[b + 0x2B] == MOMENTUM_BRAKE1_CV179_DEFAULT  /* -> 8: CV179 mirror, now read raw */
+	    && g_eeprom[b + 0x54] == MOMENTUM_BRAKE2_CV180_DEFAULT  /* -> 8: CV180 mirror, now read raw */
+	    && g_eeprom[b + 0x55] == MOMENTUM_BRAKE3_CV181_DEFAULT  /* -> 8: CV181 mirror, now read raw */
+	    && g_eeprom[b + 0x56] == MOMENTUM_START_DELAY_DEFAULT;  /* -> 8: CV167 mirror, now read raw */
 }
 
 /* 3. Blank chip -> current layout: the version byte is stamped, the -> 4 raw-seed
  *    loop populates the five raw-read SPEED bytes (0x28/0x2E/0x57/0x61/0x62 -
- *    readByteOrDefault() no longer covers them) with their real defaults, and the
- *    -> 5 block seeds the MENU BTN / SEL BTN function slots (0x2C/0x2D) to FN_OFF, and the
- *    -> 7 block seeds the two raw-read load CVs (0x59/0x5B) to the neutral 128 - in every one of
- *    the 20 profile slots AND the working config. */
+ *    readByteOrDefault() no longer covers them) with their real defaults, the
+ *    -> 5 block seeds the MENU BTN / SEL BTN function slots (0x2C/0x2D) to FN_OFF, the
+ *    -> 7 block seeds the two raw-read load CVs (0x59/0x5B) to the neutral 128, and the -> 8 block
+ *    seeds the four raw-read brake/delay CVs (0x2B/0x54/0x55/0x56) to their own neutral defaults -
+ *    in every one of the 20 profile slots AND the working config. */
 static int inv_blank_to_valid(void)
 {
 	int idx, ok = 1;
@@ -570,9 +601,77 @@ static int inv_layout7_seeds_only_unset(void)
 	return ok;
 }
 
+/* 9. The -> 8 block seeds ONLY where the byte is genuinely unset, and a stored 255 is a real value
+ *    from layout 8 onward - the BRK1/BRK2/BRK3/DELAY counterpart of inv_layout7_seeds_only_unset()
+ *    above. Two halves:
+ *      (a) On a layout-7 chip, 0xFF at 0x2B/0x54/0x55/0x56 still carries its old "unset" meaning - so
+ *          it becomes each field's neutral default, preserving exactly what readByteOrDefault() used
+ *          to substitute there. Any other value, 254 included (the old editor ceiling), survives
+ *          byte-for-byte. Confined, too - no byte moves apart from those seeds and the version stamp.
+ *      (b) Once the chip is on layout 8, a stored 255 is a genuine CV value (BRK1/BRK2/BRK3/DELAY are
+ *          plain 0-255 decoder CVs, same as ACCEL/DECEL/OPLOAD/PRLOAD) and a later boot must leave it
+ *          alone - the whole point of the raw read. */
+static int inv_layout8_seeds_only_unset(void)
+{
+	static uint8_t before[4096];
+	int idx, o, ok = 1;
+
+	/* (a) layout 7 -> 8 */
+	buildLayout(7);
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		/* Even slots: never-written (0xFF) - must be seeded. Odd slots: real stored values that
+		 * must survive untouched, one of them the old 254 editor ceiling. */
+		g_eeprom[b + 0x2B] = (idx & 1) ? 254 : 0xFF;
+		g_eeprom[b + 0x54] = (idx & 1) ? 90  : 0xFF;
+		g_eeprom[b + 0x55] = (idx & 1) ? 200 : 0xFF;
+		g_eeprom[b + 0x56] = (idx & 1) ? 254 : 0xFF;
+	}
+	memcpy(before, g_eeprom, sizeof before);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		uint8_t wantB1 = (idx & 1) ? 254 : MOMENTUM_BRAKE1_CV179_DEFAULT;
+		uint8_t wantB2 = (idx & 1) ? 90  : MOMENTUM_BRAKE2_CV180_DEFAULT;
+		uint8_t wantB3 = (idx & 1) ? 200 : MOMENTUM_BRAKE3_CV181_DEFAULT;
+		uint8_t wantDl = (idx & 1) ? 254 : MOMENTUM_START_DELAY_DEFAULT;
+		if (g_eeprom[b + 0x2B] != wantB1 || g_eeprom[b + 0x54] != wantB2
+		 || g_eeprom[b + 0x55] != wantB3 || g_eeprom[b + 0x56] != wantDl)
+			ok = 0;
+		before[b + 0x2B] = wantB1;   /* the only four bytes per slot allowed to move */
+		before[b + 0x54] = wantB2;
+		before[b + 0x55] = wantB3;
+		before[b + 0x56] = wantDl;
+	}
+	before[EE_LAYOUT_VERSION] = EEPROM_LAYOUT_VERSION;
+	for (o = 0; o < 4096; o++)
+		if (g_eeprom[o] != before[o])
+			ok = 0;
+
+	/* (b) already on layout 8: a stored 255 is real and must not be seeded away */
+	buildLayout(EEPROM_LAYOUT_VERSION);
+	for (idx = 0; idx < MAX_CONFIGS + 1; idx++)
+	{
+		uint16_t b = slotBase(idx);
+		g_eeprom[b + 0x2B] = 255;
+		g_eeprom[b + 0x54] = 255;
+		g_eeprom[b + 0x55] = 255;
+		g_eeprom[b + 0x56] = 255;
+	}
+	memcpy(before, g_eeprom, sizeof before);
+	applyEepromMigrations(eeprom_read_byte((uint8_t *)EE_LAYOUT_VERSION));
+	if (0 != memcmp(before, g_eeprom, sizeof before))
+		ok = 0;
+
+	return ok;
+}
+
 int main(int argc, char **argv)
 {
-	int i1, i2, i3, i4, i5, i6, i7, i8;
+	int i1, i2, i3, i4, i5, i6, i7, i8, i9;
 
 	g_outdir = (argc > 1) ? argv[1] : "out";
 
@@ -583,6 +682,7 @@ int main(int argc, char **argv)
 	sc_from_layout4();
 	sc_from_layout5();
 	sc_from_layout6();
+	sc_from_layout7();
 	sc_from_current_noop();
 	sc_reset_model();
 
@@ -596,6 +696,7 @@ int main(int argc, char **argv)
 	i6 = inv_reset_confined();
 	i7 = inv_reset_agrees_with_migration_defaults();
 	i8 = inv_layout7_seeds_only_unset();
+	i9 = inv_layout8_seeds_only_unset();
 	printf("invariant  current-layout image untouched (no-op):   %s\n", i1 ? "PASS" : "FAIL");
 	printf("invariant  migration is idempotent:                 %s\n", i2 ? "PASS" : "FAIL");
 	printf("invariant  blank chip -> valid current layout:      %s\n", i3 ? "PASS" : "FAIL");
@@ -604,5 +705,6 @@ int main(int argc, char **argv)
 	printf("invariant  reset-model: confined to [0x28,0x62]:     %s\n", i6 ? "PASS" : "FAIL");
 	printf("invariant  reset-model agrees with migration seed:  %s\n", i7 ? "PASS" : "FAIL");
 	printf("invariant  ->7 seeds only an unset OPLOAD/PRLOAD:   %s\n", i8 ? "PASS" : "FAIL");
-	return (i1 && i2 && i3 && i4 && i5 && i6 && i7 && i8) ? 0 : 1;
+	printf("invariant  ->8 seeds only unset BRK1/BRK2/BRK3/DELAY: %s\n", i9 ? "PASS" : "FAIL");
+	return (i1 && i2 && i3 && i4 && i5 && i6 && i7 && i8 && i9) ? 0 : 1;
 }

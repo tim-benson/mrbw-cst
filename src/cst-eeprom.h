@@ -13,7 +13,7 @@
 // into EE_LAYOUT_VERSION by readConfig(), same pattern as EE_VERSION_MAJOR/MINOR. Lets offline tooling
 // (src/cst-cfgtransfer/) detect a layout mismatch against the connected chip and refuse rather than
 // silently misdecode. Bump this alongside any cst-eeprom.h layout change - see CLAUDE.md.
-#define EEPROM_LAYOUT_VERSION          7
+#define EEPROM_LAYOUT_VERSION          8
 
 //                                    0x10
 #define EE_DEVICE_SLEEP_TIMEOUT       0x11
@@ -149,12 +149,13 @@
 // Group 1 - decoder-type-agnostic (6 bytes): these mean the same thing for every SPEED_TYPE and keep
 // their original scattered addresses. ACCEL/DECEL/BRK1 (CV3/CV4/CV179 mirrors - "momentum" is the
 // correct NMRA/ESU term) reuse the isolated single-byte gaps left by EE_BK2_FUNCTION/EE_BK3_FUNCTION;
-// MAX_MPH/UNIT/TYPE take the free bytes after EE_STACK_BAND_COMBOS. ACCEL/DECEL are read raw by
-// readConfig() (a decoder's literal CV3/CV4 can be 255, so a stored 0xFF is a real 255, not "unset" -
-// the layout -> 4 seed migration initialises any never-written byte). BRK1 and every other
-// plain-numeric SPEED item still self-heal from 0xFF via readByteOrDefault(), so their max is 254.
+// MAX_MPH/UNIT/TYPE take the free bytes after EE_STACK_BAND_COMBOS. ACCEL/DECEL/BRK1 are read raw by
+// readConfig() (a decoder's literal CV3/CV4/CV179 can be 255, so a stored 0xFF is a real 255, not
+// "unset" - the layout -> 4 seed migration initialises ACCEL/DECEL's never-written byte, the layout
+// -> 8 migration BRK1's). Every other plain-numeric SPEED item still self-heals from 0xFF via
+// readByteOrDefault(), so its max is 254.
 #define EE_MOMENTUM_ACCEL_CV3         (0x28 + CONFIG_OFFSET(WORKING_CONFIG))  // CV3, agnostic, raw 0-255
-#define EE_MOMENTUM_BRAKE1_CV179      (0x2B + CONFIG_OFFSET(WORKING_CONFIG))  // CV179, agnostic
+#define EE_MOMENTUM_BRAKE1_CV179      (0x2B + CONFIG_OFFSET(WORKING_CONFIG))  // CV179, agnostic, raw 0-255
 #define EE_MOMENTUM_DECEL_CV4         (0x2E + CONFIG_OFFSET(WORKING_CONFIG))  // CV4, agnostic, raw 0-255
 #define EE_SPEED_MAX_MPH              (0x39 + CONFIG_OFFSET(WORKING_CONFIG))  // scale mph @ speed step 126, agnostic
 #define EE_SPEED_UNIT_KMH             (0x3A + CONFIG_OFFSET(WORKING_CONFIG))  // SPEED_UNIT_MPH/_KMH, agnostic
@@ -198,11 +199,12 @@
 // order, is decided by the per-family descriptor in cst-speed.c (speedItemAt()); this is only their
 // fixed storage. The EEPROM_LAYOUT_VERSION 2->3 migration in readConfig() relocated 0x54-0x60 here
 // from their former scattered offsets (preserving every value for a layout-2 throttle); the 3->4
-// migration inits 0x61/0x62 (ACCELADJ/DECELADJ) to 0.
+// migration inits 0x61/0x62 (ACCELADJ/DECELADJ) to 0; the 7->8 migration seeds any never-written
+// 0x54/0x55/0x56 to their neutral defaults ahead of the raw read below.
 #define EE_SPEED_MODEL_PAYLOAD       (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // block base
-#define EE_MOMENTUM_BRAKE2_CV180     (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // CV180 mirror
-#define EE_MOMENTUM_BRAKE3_CV181     (0x55 + CONFIG_OFFSET(WORKING_CONFIG))  // CV181 mirror
-#define EE_MOMENTUM_START_DELAY      (0x56 + CONFIG_OFFSET(WORKING_CONFIG))  // CV167 mirror
+#define EE_MOMENTUM_BRAKE2_CV180     (0x54 + CONFIG_OFFSET(WORKING_CONFIG))  // CV180 mirror, raw 0-255
+#define EE_MOMENTUM_BRAKE3_CV181     (0x55 + CONFIG_OFFSET(WORKING_CONFIG))  // CV181 mirror, raw 0-255
+#define EE_MOMENTUM_START_DELAY      (0x56 + CONFIG_OFFSET(WORKING_CONFIG))  // CV167 mirror, raw 0-255
 #define EE_SPEED_HOLD_WATCH_FN       (0x57 + CONFIG_OFFSET(WORKING_CONFIG))  // Drive Hold watched DCC fn, 255=OFF (default F09)
 #define EE_SPEED_STOP_WATCH_FN       (0x58 + CONFIG_OFFSET(WORKING_CONFIG))  // stop-trigger watched DCC fn, 255=OFF
 #define EE_SPEED_OPLOAD              (0x59 + CONFIG_OFFSET(WORKING_CONFIG))  // CV103 mirror (Optional Load), raw 0-255

@@ -214,6 +214,35 @@ void applyEepromMigrations(uint8_t oldLayoutVersion)
 				eeprom_write_byte((uint8_t*)(base + 0x5B), SPEED_PRLOAD_DEFAULT);
 		}
 	}
+
+	// EEPROM_LAYOUT_VERSION -> 8. 0x2B / 0x54 / 0x55 / 0x56 (EE_MOMENTUM_BRAKE1_CV179 / BRAKE2_CV180 /
+	// BRAKE3_CV181 / START_DELAY, the CV179 / CV180 / CV181 / CV167 mirrors) leave readByteOrDefault()
+	// and are read raw by readConfig(), so a stored 0xFF is now a real 255 rather than the "unset"
+	// sentinel. 255 is a legitimate value for these four, same reasoning as the OPLOAD/PRLOAD -> 7
+	// block: each mirrors a plain 0-255 decoder CV, and the 254 editor ceiling the sentinel forced was
+	// wrong. Seed only the bytes that currently read 0xFF, in every profile slot plus the working
+	// config: under every layout up to 7 a 0xFF there already *meant* the neutral default (that is
+	// precisely what readByteOrDefault() substituted), so this is non-destructive - a real stored
+	// value, 254 included, is left exactly as it is. Gated `< 8` (the same idiom every prior seed block
+	// uses, never `!= EEPROM_LAYOUT_VERSION`), plus the 0xFF blank/wiped-chip case.
+	if((oldLayoutVersion < 8) || (0xFF == oldLayoutVersion))
+	{
+		uint8_t s;
+		for(s = 1; s <= MAX_CONFIGS + 1; s++)
+		{
+			uint8_t cfgNum = (s <= MAX_CONFIGS) ? s : WORKING_CONFIG;
+			uint16_t base = CONFIG_OFFSET(cfgNum);
+			wdt_reset();
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x2B)))
+				eeprom_write_byte((uint8_t*)(base + 0x2B), MOMENTUM_BRAKE1_CV179_DEFAULT);
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x54)))
+				eeprom_write_byte((uint8_t*)(base + 0x54), MOMENTUM_BRAKE2_CV180_DEFAULT);
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x55)))
+				eeprom_write_byte((uint8_t*)(base + 0x55), MOMENTUM_BRAKE3_CV181_DEFAULT);
+			if(0xFF == eeprom_read_byte((uint8_t*)(base + 0x56)))
+				eeprom_write_byte((uint8_t*)(base + 0x56), MOMENTUM_START_DELAY_DEFAULT);
+		}
+	}
 }
 
 // Writes the SPEED / AIRBRAKE / STACK "model" bytes of one 128-byte profile slot (at configBase) to
