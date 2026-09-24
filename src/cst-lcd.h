@@ -42,9 +42,10 @@ void setupAirbrakeGlyphChar(uint8_t slot);
 // setupAirbrakeGlyphChar() above - same calling convention. See cst-lcd.c.
 void setupClockPeekGlyphChar(uint8_t slot);
 // Rewrites the given CGRAM slot with the STOP glyph for a button corner whose configured DCC
-// function number matches STOPFN. See setupAirbrakeGlyphChar() above - same calling convention.
-// See cst-lcd.c.
-void setupStopGlyphChar(uint8_t slot);
+// function number matches STOPFN - the idle (open) or held (filled) variant per `held`, recomputed
+// every render pass off the button's live asserting state (mrbw-cst.c's allocateSpecialGlyphSlots()).
+// See setupAirbrakeGlyphChar() above - same calling convention otherwise. See cst-lcd.c.
+void setupStopGlyphChar(uint8_t slot, uint8_t held);
 // Loads the narrow "H" bitmap into SPEED_H_CHAR (cst-common.h, slot 3). Called by setupLCD() on
 // entry to LCD_MAIN_SPEED/LCD_OPS_SPEED, and again by mrbw-cst.c's renderBaseScreen() every render
 // pass while not peeking - not gated by currentMode, since a CLOCK peek's AM/PM draw

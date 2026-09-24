@@ -1932,7 +1932,16 @@ static void allocateSpecialGlyphSlots(uint8_t opsScreen, uint8_t optionButtonSta
 	if(needStop && (next < poolSize))
 	{
 		stopGlyphSlot = pool[next++];
-		setupStopGlyphChar(stopGlyphSlot);
+		// STOP is an incidental F## match, not a dedicated single-owner special value like LOAD -
+		// more than one button could coincidentally match STOPFN, and they share this one slot.
+		// held is OR'd across every matching button, so any one of them being asserted flips the
+		// shared glyph for all of them; a documented limitation, not a bug - see CLAUDE.md.
+		uint8_t stopHeld = (isFunctionStop(UP_FN)   && (optionButtonState & UP_OPTION_BUTTON))   ||
+		                   (isFunctionStop(DOWN_FN) && (optionButtonState & DOWN_OPTION_BUTTON)) ||
+		                   (opsScreen && (
+		                       (isFunctionStop(MENU_FN) && (optionButtonState & MENU_OPTION_BUTTON)) ||
+		                       (isFunctionStop(SEL_FN)  && (optionButtonState & SEL_OPTION_BUTTON))));
+		setupStopGlyphChar(stopGlyphSlot, stopHeld);
 	}
 
 	// MAIN_SCREEN never reallocates the softkey circle - its 2-slot pool above already covers its

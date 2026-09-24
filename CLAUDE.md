@@ -1425,8 +1425,10 @@ one: a new legal string within an existing field type, not a JSON shape change.
 
 A button corner (`UP BTN`/`DOWN BTN`/`MENU BTN`/`SEL BTN`) draws a coupler glyph whenever its configured
 DCC function number equals SPEED's `STOPFN` (see "Watched-function e-stop and Drive Hold" under SPEED
-above) — a static reminder that pressing it also snaps the speed readout to zero, shown for as long as
-the match holds regardless of press state, the same convention `AIRBRAKE`/`CLOCK` use above.
+above) — a reminder that pressing it also snaps the speed readout to zero, shown for as long as the
+match holds. Unlike `AIRBRAKE`/`CLOCK`, the glyph itself swaps between an idle (open coupler) and held
+(filled coupler) bitmap as the button asserts — see the held-state paragraph below — rather than
+staying static regardless of press state.
 
 Unlike `AIRBRAKE`/`LOAD`/`CLOCK`, this is not a new special `FunctionValues` sentinel — a STOP-matching
 button is an ordinary `F00`-`F28` assignment whose number happens to coincide with `STOPFN`.
@@ -1437,11 +1439,30 @@ is outside `cst-speed.c`'s `droppable[]` list), so none of the live-edit-before-
 `committedOploadFn`/`committedPrloadFn` applies here — see "Committed, not live, config state" under
 "On-device config-screen pattern" below.
 
-The glyph itself (`StopGlyph`, `cst-lcd.c`) draws from the same dynamic CGRAM pool as `AIRBRAKE`/`LOAD`/
-`CLOCK` (see "OPS MODE screen" CGRAM above) — no pool growth was needed, since each button still resolves
-to exactly one concept at a time regardless of how many concept types exist. No `EEPROM_LAYOUT_VERSION` or
-`SLOT_SCHEMA_VERSION` bump, and no PC-tooling change, since this is rendering logic layered on an
-already-stored value.
+The glyph itself (`StopGlyph`/`StopHeldGlyph`, `cst-lcd.c`) draws from the same dynamic CGRAM pool as
+`AIRBRAKE`/`LOAD`/`CLOCK` (see "OPS MODE screen" CGRAM above) — no pool growth was needed, since each
+button still resolves to exactly one concept at a time regardless of how many concept types exist. No
+`EEPROM_LAYOUT_VERSION` or `SLOT_SCHEMA_VERSION` bump, and no PC-tooling change, since this is rendering
+logic layered on an already-stored value.
+
+**Held-state swap.** `allocateSpecialGlyphSlots()` (`mrbw-cst.c`) rewrites the pool slot's CGRAM content
+every render pass with `setupStopGlyphChar(slot, held)`, the same "just do it every pass" idiom
+`setupLoadChar()` already uses — no overlay, the corner keeps pointing at the same slot, only its
+content changes. `held` is `optionButtonState`'s momentary bit for whichever button is STOP-matching,
+the identical live-asserting signal `buttonCornerGlyph()`'s own `asserting` parameter already carries
+and `clockPeekHeld` already uses for CLOCK Peek's readout swap — no new persistent state variable is
+needed, unlike LOAD's `loadModeUp`/`Down`/`Menu`/`Sel`. For a momentary STOP-matching assignment this
+is a genuine press/release swap; for a latching one it tracks the latched-on state, the same `asserting`
+semantics the filled/hollow softkey circle already uses elsewhere on these screens. Hardware-confirmed
+on both `MAIN_SCREEN` and `OPS_MODE_SCREEN`, with no perceptible swap lag.
+
+**Known limitation, not guarded.** Because STOP is an incidental `F00`-`F28` match rather than a
+dedicated single-owner special value (unlike `LOAD`'s `loadUsedElsewhere()` restriction), nothing stops
+two buttons from coincidentally sharing the same STOPFN-matching number. `held` is OR'd across every
+matching button and both would then share the same pool slot exactly as they already do for the idle
+glyph, so holding one flips the glyph at both corners even though only one is physically pressed. A
+misconfiguration-adjacent edge case, not a crash, and not currently guarded against — the same class of
+documented tradeoff as ditch-light mode's unguarded `FN_OFF` case (see "Ditch-light mode" above).
 
 ## Menu Customisation
 

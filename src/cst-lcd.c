@@ -239,10 +239,9 @@ void setupClockPeekGlyphChar(uint8_t slot)
 }
 
 // Shown on a button corner whenever that button's configured DCC function number equals STOPFN's -
-// a static reminder that pressing it will also snap the speed readout to zero, not a live press-state
-// indicator (shown regardless of whether the button is currently asserting). Written into whichever
-// pool slot allocateSpecialGlyphSlots() assigns it this render pass - see setupAirbrakeGlyphChar()
-// above.
+// idle (open coupler, not currently asserting) vs held (filled/closed coupler, asserting - a genuine
+// momentary press, or a latching assignment currently toggled on). Written into whichever pool slot
+// allocateSpecialGlyphSlots() assigns it this render pass - see setupAirbrakeGlyphChar() above.
 const uint8_t StopGlyph[8] =
 {
 	0b00000000,
@@ -255,9 +254,21 @@ const uint8_t StopGlyph[8] =
 	0b00000000
 };
 
-void setupStopGlyphChar(uint8_t slot)
+const uint8_t StopHeldGlyph[8] =
 {
-	lcd_setup_custom(slot, StopGlyph);
+	0b00000000,
+	0b00000000,
+	0b00000111,
+	0b00011111,
+	0b00011111,
+	0b00000111,
+	0b00000000,
+	0b00000000
+};
+
+void setupStopGlyphChar(uint8_t slot, uint8_t held)
+{
+	lcd_setup_custom(slot, held ? StopHeldGlyph : StopGlyph);
 }
 
 // Narrow "H" for the MPH/KMH unit in the running SPEED readout (printSpeed()), tighter than the
