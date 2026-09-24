@@ -1018,9 +1018,11 @@ How this screen is dismissed depends on how it was entered (see "OPS MODE screen
 `airbrakeReturn*` flags): from the menu cycle, `SELECT` exits to the main screen and `MENU` advances
 to the next menu screen; from a base-screen `UP` / `DOWN` button set to `AIRBRAKE`, any of the four
 buttons dismisses to the main screen; from an OPS MODE button set to `AIRBRAKE`, any of the four
-returns to the OPS MODE screen. Reached from either running-screen path the screen honours the
-`backlight` toggle rather than forcing the panel on (see "Menu backlight hold"); the menu-cycle entry
-stays always-lit.
+returns to the OPS MODE screen — except that a `MENU`-triggered return which is itself held past the
+OPS MODE exit long-press threshold carries straight on out to the base screen instead of stopping there
+(`airbrakeMenuExitThrough`, see "Long-press hold-through" under "OPS MODE screen"). Reached from either
+running-screen path the screen honours the `backlight` toggle rather than forcing the panel on (see
+"Menu backlight hold"); the menu-cycle entry stays always-lit.
 
 The full text/diagnostic readout (lever %, per-function letters) lives on **AIRBRAKE DIAGS**, a
 `DIAG_SCREEN` subscreen (page 14) shown only while `AIRBRAKE` is on — reached via `DIAGS` → `SELECT`
@@ -1201,6 +1203,21 @@ OPS MODE) returns to `OPS_MODE_SCREEN` on any of the four buttons; `airbrakeRetu
 four; the menu-cycle entry keeps its stock behaviour. The triggering button momentary bit is cleared
 at every open site so a still-held button cannot re-open the gauge on return, and while either flag is
 set the top-level `MENU` handler is bypassed.
+
+**Long-press hold-through.** A `MENU`-triggered `airbrakeReturnToOps` dismissal also sets a second,
+narrower one-shot, `airbrakeMenuExitThrough`, alongside `opsMenuIgnoreUntilRelease`. Left on its own,
+`opsMenuIgnoreUntilRelease` would also block the exit long-press check above for that same held press,
+trapping the operator on `OPS_MODE_SCREEN` until they release and press `MENU` again from scratch.
+`airbrakeMenuExitThrough` re-opens only that check — never the press-edge `MENU_FN` toggle, never the
+`NO_BUTTON` reopen-on-release check — so a `MENU` hold that dismisses an OPS-MODE-opened `AIRBRAKE`
+screen and is then sustained past the same ~1s threshold carries straight on out to the base screen in
+one motion, instead of requiring a second, separate long-press once back on `OPS_MODE_SCREEN`. A short
+second tap still simply lands on, and stays on, `OPS_MODE_SCREEN`, unaffected. Both flags clear together
+on release or the moment the exit check fires. The undo-the-latch-toggle lines in the exit body stay
+gated by `opsMenuIgnoreUntilRelease` alone (not the relaxed condition), since a hold that reaches the
+exit check only via `airbrakeMenuExitThrough` never ran the press-edge toggle in the first place — there
+is nothing for it to undo, and undoing it anyway would spuriously flip a latching `MENU_FN` that was
+never touched by this press.
 
 **CGRAM.** `MAIN_SCREEN` and `OPS_MODE_SCREEN` each use their own `LcdMode` palette — `LCD_MAIN` /
 `LCD_MAIN_SPEED` and `LCD_OPS` / `LCD_OPS_SPEED` respectively, selected by `baseScreenLcdMode(opsScreen)`

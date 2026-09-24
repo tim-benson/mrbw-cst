@@ -2198,8 +2198,16 @@ int main(void)
 	// returns there instead of the main screen / menu. airbrakeReturnToMain: AIRBRAKE was opened from
 	// the base screen via a UP/DOWN button set to AIRBRAKE (NOT via the menu cycle, NOT from OPS
 	// MODE) - any of the four buttons dismisses it straight back to the main screen.
+	// airbrakeMenuExitThrough: set alongside opsMenuIgnoreUntilRelease whenever MENU is the button
+	// that dismissed an OPS-MODE-opened AIRBRAKE screen back to OPS_MODE_SCREEN. Left on its own,
+	// opsMenuIgnoreUntilRelease would also block the exit long-press below for that same held press -
+	// trapping the operator on OPS_MODE_SCREEN until they release and press MENU again from scratch.
+	// This narrower flag re-opens only the exit long-press check (never the press-edge MENU_FN toggle,
+	// never the NO_BUTTON reopen-on-release check), so a sustained hold continues straight on out to
+	// the base screen instead. Cleared on release or the moment the exit check fires.
 	uint8_t menuAdvancePending = 0;
 	uint8_t opsMenuIgnoreUntilRelease = 0;
+	uint8_t airbrakeMenuExitThrough = 0;
 	uint8_t airbrakeReturnToOps = 0;
 	uint8_t airbrakeReturnToMain = 0;
 
@@ -2896,24 +2904,38 @@ int main(void)
 										optionButtonState |= MENU_OPTION_BUTTON;
 								}
 							}
-							if(opsModeMenuHoldTicks >= OPS_MODE_LONGPRESS_10MS_TICKS)
+						}
+						// Normally gated by the same !opsMenuIgnoreUntilRelease as the press-edge block
+						// above (an entry-hold's already-elapsed ticks must not immediately re-exit -
+						// see opsModeMenuHoldTicks's declaration comment). airbrakeMenuExitThrough
+						// re-opens only this check for a MENU held continuously through an
+						// OPS-MODE-opened AIRBRAKE screen's dismiss back to here.
+						if((!opsMenuIgnoreUntilRelease || airbrakeMenuExitThrough) &&
+						   (opsModeMenuHoldTicks >= OPS_MODE_LONGPRESS_10MS_TICKS))
+						{
+							// Long-press MENU -> leave OPS MODE for the base screen. A long-press
+							// is "exit", not "toggle": undo this same press's latch toggle so a
+							// still-latched MENU function is preserved and a not-latched one is not
+							// spuriously turned on - but only if the press-edge block above actually
+							// ran for this press (!opsMenuIgnoreUntilRelease); a hold that reached here
+							// via airbrakeMenuExitThrough never toggled MENU_OPTION_BUTTON in the first
+							// place (that block stayed skipped the whole time), so there is nothing to
+							// undo. Drop every momentary bit on the way out regardless.
+							if(!opsMenuIgnoreUntilRelease)
 							{
-								// Long-press MENU -> leave OPS MODE for the base screen. A long-press
-								// is "exit", not "toggle": undo this same press's latch toggle so a
-								// still-latched MENU function is preserved and a not-latched one is not
-								// spuriously turned on; drop every momentary bit on the way out.
 								if(isFunctionLatching(MENU_FN))
 									optionButtonState ^= MENU_OPTION_BUTTON;
 								else
 									optionButtonState &= ~MENU_OPTION_BUTTON;
-								if(!isFunctionLatching(SEL_FN))  optionButtonState &= ~SEL_OPTION_BUTTON;
-								if(!isFunctionLatching(UP_FN))   optionButtonState &= ~UP_OPTION_BUTTON;
-								if(!isFunctionLatching(DOWN_FN)) optionButtonState &= ~DOWN_OPTION_BUTTON;
-								opsMenuIgnoreUntilRelease = 0;
-								menuAdvancePending = 0;
-								screenState = LAST_SCREEN;
-								lcd_clrscr();
 							}
+							if(!isFunctionLatching(SEL_FN))  optionButtonState &= ~SEL_OPTION_BUTTON;
+							if(!isFunctionLatching(UP_FN))   optionButtonState &= ~UP_OPTION_BUTTON;
+							if(!isFunctionLatching(DOWN_FN)) optionButtonState &= ~DOWN_OPTION_BUTTON;
+							opsMenuIgnoreUntilRelease = 0;
+							airbrakeMenuExitThrough = 0;
+							menuAdvancePending = 0;
+							screenState = LAST_SCREEN;
+							lcd_clrscr();
 						}
 						break;
 					case NO_BUTTON:
@@ -2961,9 +2983,13 @@ int main(void)
 
 				// Clear the entry-hold ignore now that the switch is done (case NO_BUTTON above has
 				// read its pre-release value): any button other than a still-held MENU means the
-				// MENU press that entered OPS MODE has been released.
+				// MENU press that entered OPS MODE has been released. airbrakeMenuExitThrough only
+				// ever matters paired with opsMenuIgnoreUntilRelease, so it is released here too.
 				if(MENU_BUTTON != button)
+				{
 					opsMenuIgnoreUntilRelease = 0;
+					airbrakeMenuExitThrough = 0;
+				}
 				break;
 
 			case ENGINE_SCREEN:
@@ -3119,8 +3145,13 @@ int main(void)
 					{
 						airbrakeReturnToOps = 0;
 						// If MENU was the button used to return, ignore it in OPS MODE until released
-						// so a still-held MENU cannot immediately trip the OPS MODE exit long-press.
+						// so a still-held MENU cannot immediately trip the press-edge toggle or the
+						// NO_BUTTON reopen-on-release check below - but if this same fresh press turns
+						// into a genuine long hold, airbrakeMenuExitThrough lets it carry straight on
+						// out of OPS MODE rather than being trapped here until released - see its
+						// declaration comment.
 						opsMenuIgnoreUntilRelease = (MENU_BUTTON == button);
+						airbrakeMenuExitThrough = (MENU_BUTTON == button);
 						setupLCD(baseScreenLcdMode(1));
 						screenState = OPS_MODE_SCREEN;
 						lcd_clrscr();
