@@ -72,8 +72,10 @@ and decoders before being committed; the commit messages record the specifics.
 ## Repo layout
 
 `src/` is the only directory with code in the normal sense — the AVR firmware, plus the two Python PC
-tools. Everything else (`sch/`, `pcb/`, `fp/`, `sym/`, `mech/`, `doc/`, `pg/`) is gEDA schematic/PCB CAD,
-3D-printable parts, and datasheets/manuals for the physical hardware.
+tools. Most of the rest (`sch/`, `pcb/`, `fp/`, `sym/`, `mech/`, `pg/`, and most of `doc/`) is gEDA
+schematic/PCB CAD, 3D-printable parts, and datasheets/manuals for the physical hardware. `doc/` also holds
+end-user calibration reference material for specific firmware features, such as
+`doc/notch-soundcv-calculator.xlsx` (an ESU LokSound V5 notch-to-SoundCV calculator for the SPEED model).
 
 ## Build / flash quick start
 

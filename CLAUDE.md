@@ -17,9 +17,12 @@ colloquialisms, or genitive language (i.e. avoid apostrophes except where requir
 
 Hardware + firmware source for the **MRBW-CST** ("Control Stand Throttle") from Iowa Scaled Engineering —
 the wireless throttle sold as the **ProtoThrottle**. The repo bundles the schematics/PCB/mechanical CAD
-alongside the AVR firmware; `src/` is the only directory with code in the normal sense. Everything else
-(`sch/`, `pcb/`, `fp/`, `sym/`, `mech/`, `doc/`, `pg/`) is gEDA schematic/PCB CAD, 3D-printable parts, and
-datasheets/manuals — only relevant if the task is about the physical hardware design, not the firmware.
+alongside the AVR firmware; `src/` is the only directory with code in the normal sense. Most of the rest
+(`sch/`, `pcb/`, `fp/`, `sym/`, `mech/`, `pg/`, and most of `doc/`) is gEDA schematic/PCB CAD, 3D-printable
+parts, and datasheets/manuals — only relevant if the task is about the physical hardware design, not the
+firmware. `doc/` also holds end-user calibration reference material for specific firmware features, for
+example `doc/notch-soundcv-calculator.xlsx` (an ESU LokSound V5 notch-to-SoundCV calculator for the SPEED
+model — see the SPEED section below).
 
 This is **ProtoThrottle X** (the `X` is for *Extensions*), a fork of `IowaScaledEngineering/mrbw-cst`,
 tagged `X<major>.<minor>.<commits>` to keep this fork versioning unambiguous — see "Firmware
