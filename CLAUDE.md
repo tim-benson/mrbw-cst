@@ -520,7 +520,10 @@ regardless of which physical control put it there) and the throttle built-in e-s
 standing-start ramp and re-arms the Start Delay, so releasing e-stop/`STOPFN` resumes from a genuine
 standing start — not mid-ramp. `HOLDFN` (default F09) freezes the simulation exactly as-is while asserted —
 no state is touched, since `functionMask`/`commandedSpeedStep` are recomputed fresh every pass, so freezing
-is sufficient by construction for "resume based on current state once released." While `HOLDFN` is
+is sufficient by construction for "resume based on current state once released." This includes the Start
+Delay: raising the throttle while `HOLDFN` is held from a genuine stop does not shorten or skip the CV167
+spool-up once Hold releases — with no frozen state to consult, a standing start after `HOLDFN` releases
+goes through the identical delay as any other genuine stop. While `HOLDFN` is
 asserted, the loco-address line of the main screen is also replaced with a literal `"HOLD"` on-screen cue
 — the same priority slot the throttle existing reverser-mismatch indicator already uses, checked in order:
 alerter-timeout backlight blink → reverser mismatch → `"HOLD"` → normal loco address/speed display.
@@ -724,8 +727,10 @@ would collide with the `0xFF` self-heal sentinel).
 Confirmed working values for the calibration locomotive: `ACCEL=60`, `MAXSPEED=50`, `DECTHR=11`,
 `DECPCT=22`, `ACCPCT=8`, `ACCTGT=5` (the shipped defaults already match). The momentum-ceiling fade
 was additionally validated on that locomotive at effective `ACCEL` / `DECEL` 255 and above (via the
-adjusts). Every other field above is still the shipped compile-time default, not independently
-re-validated against that locomotive. `ACCELADJ`/`DECELADJ` were bench-checked against the times
+adjusts). `DECEL`, `BRK1`/`BRK2`/`BRK3`, `DELAY`, `ACCELADJ`/`DECELADJ`, and `UNIT` have separately
+been validated on real hardware across a range of values, confirmed on both `V5DCC` and `V4` decoder
+hardware — a general validation pass independent of, and not tied to, this calibration locomotive's
+specific tested set above. `ACCELADJ`/`DECELADJ` were additionally bench-checked against the times
 LokProgrammer computes (V5DCC, and V5MULT for CV24 scaling), confirmed on a locomotive with a
 non-zero CV23/CV24 in the normal momentum range, and their effect at the ceiling is covered by that
 fade test.

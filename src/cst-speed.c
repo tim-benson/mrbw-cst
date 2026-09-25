@@ -81,10 +81,6 @@ static uint8_t speedCfg[SPEED_ITEM_COUNT] =
 	[SPEED_ITEM_DECEL_ADJ]        = SPEED_DECEL_ADJ_DEFAULT,
 };
 
-// Drive Hold falling-edge detection - see updateSpeed10Hz()'s top-of-function comment for why this only
-// matters at the moment Hold releases, not while it's engaged or held.
-static uint8_t previousHoldActive = 0;
-
 // Steady-state-lag state - see updateSpeed10Hz() for the mechanism. steadyStopExtraMs is the extra decel
 // time "locked in" for a deceleration (coast or brake) - captured once per deceleration and held steady
 // until the loco settles or starts accelerating again. 0 if not applicable. Was formerly gated to only
@@ -489,15 +485,6 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
                          uint8_t brake3Active, uint8_t emergencyActive, uint8_t watchedFunctionActive,
                          uint8_t oploadActive, uint8_t prloadActive, uint8_t holdActive)
 {
-	// Drive Hold, falling edge only: if the target is already non-zero the instant Hold releases
-	// (having been "revved" during the hold period), CV167's mechanical spool-up is considered
-	// already done for this specific start, so skip just that contribution below - CV167 models
-	// sound/mechanical revving, which has happened during the hold. Purely local/transient (not
-	// persisted across ticks): computed fresh here and consumed by the Start Delay block later in
-	// this same call, on this same tick.
-	uint8_t skipStartDelayCV = (!holdActive && previousHoldActive && (0 != commandedSpeedStep)) ? 1 : 0;
-	previousHoldActive = holdActive;
-
 	if (emergencyActive)
 	{
 		// Highest priority - overrides even Hold. Snaps to zero and holds there for as long as it
@@ -600,9 +587,8 @@ void updateSpeed10Hz(uint8_t commandedSpeedStep, uint8_t brake1Active, uint8_t b
 		if (delayArmed)
 		{
 			if (0 == startDelayRemainingMs)
-				// CV167 x 0.25s, in ms (skipped if just "revved" via Drive Hold - see
-				// skipStartDelayCV above).
-				startDelayRemainingMs = skipStartDelayCV ? 0 : (uint16_t)speedCfg[SPEED_ITEM_START_DELAY] * 250;
+				// CV167 x 0.25s, in ms.
+				startDelayRemainingMs = (uint16_t)speedCfg[SPEED_ITEM_START_DELAY] * 250;
 			if (startDelayRemainingMs > 100)
 			{
 				startDelayRemainingMs -= 100;
@@ -843,7 +829,6 @@ void resetSpeed(void)
 	rampT = 0;
 	rampS = 0;
 	rampR0 = 0;
-	previousHoldActive = 0;
 	steadyStopExtraMs = 0;
 	wasBraking = 0;
 	lastBrakeSum = 0;

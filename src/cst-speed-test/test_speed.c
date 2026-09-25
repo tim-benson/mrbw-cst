@@ -378,19 +378,20 @@ static void sc_hold_freeze_resume(void)
 	traceClose();
 }
 
-static void sc_hold_edge_skips_delay(void)
+static void sc_hold_edge_at_stop_still_delays(void)
 {
 	cfgDefaults();
 	resetSpeed();
-	traceOpen("hold_edge_skips_delay",
+	traceOpen("hold_edge_at_stop_still_delays",
 	          "defaults - DELAY 13",
 	          "from stop: HOLD held ticks [0,30) with cmd rising to 40 during the hold; "
-	          "HOLD released at tick 30 with cmd!=0 -> Start Delay skipped");
+	          "HOLD released at tick 30 with cmd!=0 -> Start Delay still counts down normally "
+	          "(raising the throttle while held from a stop does not skip CV167)");
 	Inputs in = {0};
 	in.hold = 1;
 	in.cmd = 0;
 	int t = runPhase(0, 15, &in);
-	in.cmd = 40;               /* "revved" while held */
+	in.cmd = 40;               /* throttle raised while held, loco still at a genuine stop */
 	t = runPhase(t, 15, &in);
 	in.hold = 0;               /* falling edge, cmd != 0 */
 	runPhase(t, 120, &in);
@@ -853,7 +854,7 @@ int main(int argc, char **argv)
 	sc_estop_midramp();
 	sc_stopfn_snap_release();
 	sc_hold_freeze_resume();
-	sc_hold_edge_skips_delay();
+	sc_hold_edge_at_stop_still_delays();
 	sc_start_delay_long();
 	sc_start_delay_max_255();
 	sc_opload_slows_accel();
